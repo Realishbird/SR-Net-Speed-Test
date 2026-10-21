@@ -43,7 +43,7 @@ curl -fsSL https://raw.githubusercontent.com/Realishbird/SR-Net-Speed-Test/main/
   | sudo bash -s -- --controller https://10.0.0.5:8443 --token <token> --ca-sha256 <fingerprint>
 ```
 
-`install.sh` installs `rdma-core`, `perftest`, `iperf3`, `ethtool`, `chrony` and `lldpd` from apt, downloads the signed-checksum agent binary for the host's architecture (amd64 or arm64), pins the controller's CA by fingerprint, enrolls, and starts `srnet-agent.service` as the unprivileged `srnet` user. The only sudo rule it adds is `ethtool -m` for transceiver readings. Re-running upgrades in place; `--uninstall` removes everything.
+`install.sh` installs `rdma-core`, `perftest`, `iperf3`, `ethtool`, `chrony` and `lldpd` from apt, downloads the signed-checksum agent binary for the host's architecture (amd64 or arm64), pins the controller's CA by fingerprint, enrolls, and starts `srnet-agent.service` as the unprivileged `srnet` user. The only sudo rules it adds are `ethtool -m` for transceiver readings and `lldpctl -f keyvalue` for switch neighbours. Re-running upgrades in place; `--uninstall` removes everything.
 
 ## 3. Name your devices
 
@@ -109,7 +109,7 @@ With gNMI credentials the controller writes `/etc/srnet/gnmic.yaml` (a path unit
 
 On Enterprise SONiC the telemetry server is on by default (port 8080, TLS with a self-signed certificate, password authentication with the switch's user accounts, mgmt VRF); `show ip telemetry` on the switch confirms it. For SNMP, create a read-only community, for example `snmp-server community srnetro group ro` in `configure terminal`. To test gNMI from the controller: `gnmic -a <switch>:8080 -u admin -p '<password>' --skip-verify capabilities`.
 
-Hosts run `lldpd`, so each port's switch neighbour and port id show in `srnet hosts` and the UI without a cable map.
+Hosts run `lldpd`, so each port's switch neighbour and port id show in `srnet hosts` and the UI without a cable map. Hosts installed before v0.1.15 need `install.sh` run once more to get the sudo rule that lets the agent query `lldpctl`.
 
 ## Agent updates from the controller
 

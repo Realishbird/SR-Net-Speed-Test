@@ -217,9 +217,13 @@ func toolVersions(ctx context.Context) map[string]string {
 func addLLDP(ctx context.Context, ports []api.Port) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "lldpctl", "-f", "keyvalue").Output()
+	// lldpcli is setuid and group-restricted on Debian and Ubuntu, so the
+	// unprivileged agent goes through the narrow sudo rule install.sh adds.
+	out, err := exec.CommandContext(ctx, "sudo", "-n", "/usr/sbin/lldpctl", "-f", "keyvalue").Output()
 	if err != nil {
-		return
+		if out, err = exec.CommandContext(ctx, "lldpctl", "-f", "keyvalue").Output(); err != nil {
+			return
+		}
 	}
 	neigh := ParseLLDP(string(out))
 	for i := range ports {
