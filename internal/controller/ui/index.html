@@ -71,7 +71,7 @@ button.danger { color:var(--fail); border-color:color-mix(in srgb, var(--fail) 4
 button.sm { padding:4px 9px; font-size:12px; }
 button:disabled { opacity:.5; cursor:default; }
 .row { display:flex; gap:12px; flex-wrap:wrap; align-items:end; }
-.row label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); }
+.row label, .row .field { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); }
 .row label.inline { flex-direction:row; align-items:center; color:var(--fg); }
 .badge { display:inline-block; font-weight:600; padding:2px 9px; border-radius:999px; font-size:11.5px; line-height:1.6; text-transform:lowercase; }
 .badge.pass, .badge.done, .badge.active { color:var(--pass); background:color-mix(in srgb, var(--pass) 14%, transparent); }
@@ -103,6 +103,13 @@ textarea { width:100%; font:12.5px/1.5 var(--mono); resize:vertical; }
 .help { font-size:12.5px; color:var(--muted); margin:4px 0 12px; }
 .chips { display:flex; gap:6px; flex-wrap:wrap; }
 .chip { font-size:12px; padding:2px 8px; border-radius:999px; background:var(--hover); border:1px solid var(--line); }
+.picker { display:flex; flex-wrap:wrap; gap:4px; align-items:center; min-height:36px; padding:3px 6px; border:1px solid var(--line); border-radius:8px; background:var(--surface); cursor:text; }
+.picker:focus-within { outline:2px solid color-mix(in srgb, var(--accent) 40%, transparent); border-color:var(--accent); }
+.picker input.pick-in { flex:1; min-width:120px; border:0; outline:0; padding:4px; background:transparent; }
+.picker .chip button { border:0; background:none; padding:0 0 0 4px; cursor:pointer; color:var(--muted); font-size:13px; line-height:1; }
+.picker .chip button:hover { color:var(--fail); }
+button.chip { cursor:pointer; }
+button.chip:hover { border-color:var(--accent); }
 .kv { display:grid; grid-template-columns:max-content 1fr; gap:6px 18px; font-size:13px; }
 .kv b { font-weight:500; color:var(--muted); }
 @media (max-width: 860px) {
@@ -384,11 +391,11 @@ async function pageNew(token) {
         <option value="mesh" ${topo === 'mesh' ? 'selected' : ''}>Full mesh</option>
         <option value="legs" ${topo === 'legs' ? 'selected' : ''}>Explicit legs</option></select></label></div></div>
     <div class="card"><h2>Who</h2>
-      <div class="row" id="t-cs"><label>Clients <input name="clients" list="sel" style="width:340px" value="${esc((prev?.clients || []).join(', '))}" placeholder="host, tag:client, 172.27.100.1, port label"></label>
-        <label>Servers <input name="servers" list="sel" style="width:340px" value="${esc((prev?.servers || []).join(', '))}" placeholder="host, tag:server"></label></div>
-      <div class="row" id="t-mesh" style="display:none"><label>Hosts <input name="hosts" list="sel" style="width:520px" value="${esc((prev?.hosts || []).join(', '))}" placeholder="every ordered pair among these"></label></div>
+      <div class="row" id="t-cs"><div class="field">Clients ${picker('clients', prev?.clients, 'host, tag:client, IP or port label', 340)}</div>
+        <div class="field">Servers ${picker('servers', prev?.servers, 'host, tag:server, IP or port label', 340)}</div></div>
+      <div class="row" id="t-mesh" style="display:none"><div class="field">Hosts ${picker('hosts', prev?.hosts, 'every ordered pair among these', 520)}</div></div>
       <div class="row" id="t-legs" style="display:none"><label>Legs <input name="legs" style="width:520px" value="${esc((prev?.legs || []).map(l => l.client + '>' + l.server).join(', '))}" placeholder="client>server, client>server"></label></div>
-      <p class="help" style="margin:10px 0 0">Selectors are host names, <span class="mono">tag:&lt;tag&gt;</span>, RDMA IPs or port labels. Legs are paired by shared subnet. ${hosts.length ? 'Known: ' + [...names, ...tags].map(n => `<span class="chip">${esc(n)}</span>`).join(' ') : 'No hosts enrolled yet.'}</p></div>
+      <p class="help" style="margin:10px 0 0">Selectors are host names, <span class="mono">tag:&lt;tag&gt;</span>, RDMA IPs or port labels. Legs are paired by shared subnet. Pick from the list, or type and press Enter; add as many as you like. ${hosts.length ? 'Click to add: ' + [...names, ...tags].map(n => `<button type="button" class="chip" data-v="${esc(n)}" onclick="pickAdd(null, this.dataset.v)">${esc(n)}</button>`).join(' ') : 'No hosts enrolled yet.'}</p></div>
     <div class="card"><h2>How</h2><div class="row">
       <label>Duration (s) <input name="duration_sec" type="number" min="5" value="${v('duration_sec', 60)}" style="width:90px"></label>
       <label>Message size <input name="msg_size" type="number" min="1" value="${v('msg_size') || ''}" placeholder="per test" style="width:110px"></label>
@@ -405,9 +412,37 @@ async function pageNew(token) {
   </form>`)) return;
   topoChange(topo);
 }
+// picker: a multi-value selector. Chips hold the chosen values, the text box
+// (with the host/tag datalist) adds more, and a hidden input carries the
+// comma-joined list for the form.
+let lastPicker = null;
+function picker(name, values, placeholder, width) {
+  const vals = values || [];
+  return `<div class="picker" data-name="${name}" style="width:${width}px" onclick="if(event.target===this)this.querySelector('.pick-in').focus()">
+    ${vals.map(pickChip).join('')}<input class="pick-in" list="sel" placeholder="${esc(placeholder)}"
+      onfocus="lastPicker=this.parentNode" onchange="pickAdd(this.parentNode, this.value); this.value=''"
+      onkeydown="pickKey(event, this)"><input type="hidden" name="${name}" value="${esc(vals.join(', '))}"></div>`;
+}
+function pickChip(v) { return `<span class="chip" data-v="${esc(v)}">${esc(v)}<button type="button" title="Remove" onclick="pickDel(this)">×</button></span>`; }
+function pickSync(box) { box.querySelector('input[type=hidden]').value = [...box.querySelectorAll('.chip')].map(c => c.dataset.v).join(', '); }
+function pickAdd(box, text) {
+  box = box || lastPicker || [...document.querySelectorAll('.picker')].find(b => b.offsetParent);
+  if (!box) return;
+  const have = new Set([...box.querySelectorAll('.chip')].map(c => c.dataset.v));
+  const inp = box.querySelector('.pick-in');
+  for (const v of list(text)) if (!have.has(v)) { inp.insertAdjacentHTML('beforebegin', pickChip(v)); have.add(v); }
+  pickSync(box); lastPicker = box;
+}
+function pickDel(btn) { const box = btn.closest('.picker'); btn.parentNode.remove(); pickSync(box); }
+function pickKey(ev, inp) {
+  if (ev.key === 'Enter' || ev.key === ',') { ev.preventDefault(); pickAdd(inp.parentNode, inp.value); inp.value = ''; }
+  else if (ev.key === 'Backspace' && !inp.value) { const c = inp.parentNode.querySelectorAll('.chip'); if (c.length) { c[c.length - 1].remove(); pickSync(inp.parentNode); } }
+}
+function pickFlush(box) { const inp = box.querySelector('.pick-in'); if (inp.value.trim()) { pickAdd(box, inp.value); inp.value = ''; } }
 function topoChange(t) { $('#t-cs').style.display = (t === 'cs' || t === 'pairs') ? '' : 'none'; $('#t-mesh').style.display = t === 'mesh' ? '' : 'none'; $('#t-legs').style.display = t === 'legs' ? '' : 'none'; }
 async function startRun(ev) {
   ev.preventDefault();
+  document.querySelectorAll('.picker').forEach(pickFlush);
   const f = new FormData(ev.target), g = k => f.get(k);
   const spec = { name: g('name'), test: g('test'), duration_sec: +g('duration_sec'), msg_size: +g('msg_size') || 0, qps: +g('qps'), streams: +g('streams'),
     pass_pct: +g('pass_pct'), max_lat_p99_us: +g('max_lat_p99_us') || 0, max_loss_pct: +g('max_loss_pct') || 0, bidir: !!g('bidir'), serial: !!g('serial'),
