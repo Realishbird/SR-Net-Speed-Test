@@ -15,6 +15,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -708,6 +709,15 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	if err := cfg.SaveBack(); err != nil {
 		log.Printf("admin password: saved in memory only, config not written: %v", err)
+	}
+	// The srnet CLI reads its password from a file next to the config; a
+	// stale copy would lock it out after the change.
+	if pwFile := cfg.CLIPasswordFile(); pwFile != "" {
+		if st, err := os.Stat(pwFile); err == nil && st.Mode().IsRegular() {
+			if err := os.WriteFile(pwFile, []byte(req.New+"\n"), 0o600); err != nil {
+				log.Printf("admin password: could not update %s for the srnet CLI: %v", pwFile, err)
+			}
+		}
 	}
 	if s.store != nil {
 		s.store.Audit(r.Context(), "admin.password", map[string]any{"user": s.cfg.AdminUser})

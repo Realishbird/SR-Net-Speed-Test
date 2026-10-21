@@ -75,6 +75,16 @@ func LoadConfig(path string) (Config, error) {
 }
 
 // SaveBack writes the config to the file it was loaded from.
+// CLIPasswordFile is where the srnet CLI reads the admin password
+// (admin-password beside the config file), or "" when the config was not
+// loaded from a file.
+func (c Config) CLIPasswordFile() string {
+	if c.path == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(c.path), "admin-password")
+}
+
 func (c Config) SaveBack() error {
 	if c.path == "" {
 		return errors.New("config was not loaded from a file")

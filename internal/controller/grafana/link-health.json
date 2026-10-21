@@ -74,22 +74,22 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "sum by (host, rdma_dev, __name__) (increase(srnet_rdma_hw_out_of_sequence{host=~\"$host\"}[5m]))",
+     "expr": "sum by (host, rdma_dev, __name__) (increase(srnet_rdma_hw_out_of_sequence{host=~\"$host\"}[5m]) keep_metric_names)",
      "legendFormat": "{{host}} {{rdma_dev}} {{__name__}}"
     },
     {
      "refId": "B",
-     "expr": "sum by (host, rdma_dev, __name__) (increase(srnet_rdma_hw_packet_seq_err{host=~\"$host\"}[5m]))",
+     "expr": "sum by (host, rdma_dev, __name__) (increase(srnet_rdma_hw_packet_seq_err{host=~\"$host\"}[5m]) keep_metric_names)",
      "legendFormat": "{{host}} {{rdma_dev}} {{__name__}}"
     },
     {
      "refId": "C",
-     "expr": "sum by (host, rdma_dev, __name__) (increase(srnet_rdma_hw_local_ack_timeout_err{host=~\"$host\"}[5m]))",
+     "expr": "sum by (host, rdma_dev, __name__) (increase(srnet_rdma_hw_local_ack_timeout_err{host=~\"$host\"}[5m]) keep_metric_names)",
      "legendFormat": "{{host}} {{rdma_dev}} {{__name__}}"
     },
     {
      "refId": "D",
-     "expr": "sum by (host, rdma_dev, __name__) (increase(srnet_rdma_hw_rnr_nak_retry_err{host=~\"$host\"}[5m]))",
+     "expr": "sum by (host, rdma_dev, __name__) (increase(srnet_rdma_hw_rnr_nak_retry_err{host=~\"$host\"}[5m]) keep_metric_names)",
      "legendFormat": "{{host}} {{rdma_dev}} {{__name__}}"
     }
    ]
@@ -129,17 +129,17 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "sum by (host, netdev, __name__) (increase(srnet_nic_rx_symbol_err_phy{host=~\"$host\"}[5m]))",
+     "expr": "sum by (host, netdev, __name__) (increase(srnet_nic_rx_symbol_err_phy{host=~\"$host\"}[5m]) keep_metric_names)",
      "legendFormat": "{{host}} {{netdev}} {{__name__}}"
     },
     {
      "refId": "B",
-     "expr": "sum by (host, netdev, __name__) (increase({__name__=~\"srnet_nic_rx_(corrected_bits_phy|fec_corrected_blocks_phy|fec_corrected_blocks|fec_uncorrectable_blocks|fec_corrected_bits|corrected_bits)\",host=~\"$host\"}[5m]))",
+     "expr": "sum by (host, netdev, __name__) (increase({__name__=~\"srnet_nic_rx_(corrected_bits_phy|fec_corrected_blocks_phy|fec_corrected_blocks|fec_uncorrectable_blocks|fec_corrected_bits|corrected_bits)\",host=~\"$host\"}[5m]) keep_metric_names)",
      "legendFormat": "{{host}} {{netdev}} {{__name__}}"
     },
     {
      "refId": "C",
-     "expr": "sum by (host, netdev, __name__) (increase(srnet_nic_rx_crc_errors_phy{host=~\"$host\"}[5m]))",
+     "expr": "sum by (host, netdev, __name__) (increase(srnet_nic_rx_crc_errors_phy{host=~\"$host\"}[5m]) keep_metric_names)",
      "legendFormat": "{{host}} {{netdev}} {{__name__}}"
     }
    ]
@@ -379,12 +379,12 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "sum by (host, netdev, __name__) (rate({__name__=~\"srnet_nic_rx_(prio[0-9]_pause|pause_ctrl_phy|global_pause)\",host=~\"$host\"}[5m]))",
+     "expr": "sum by (host, netdev, __name__) (rate({__name__=~\"srnet_nic_rx_(prio[0-9]_pause|pause_ctrl_phy|global_pause)\",host=~\"$host\"}[5m]) keep_metric_names)",
      "legendFormat": "{{host}} {{netdev}} {{__name__}}"
     },
     {
      "refId": "B",
-     "expr": "sum by (host, netdev, __name__) (rate({__name__=~\"srnet_nic_tx_(prio[0-9]_pause|pause_ctrl_phy|global_pause)\",host=~\"$host\"}[5m]))",
+     "expr": "sum by (host, netdev, __name__) (rate({__name__=~\"srnet_nic_tx_(prio[0-9]_pause|pause_ctrl_phy|global_pause)\",host=~\"$host\"}[5m]) keep_metric_names)",
      "legendFormat": "{{host}} {{netdev}} {{__name__}}"
     }
    ]

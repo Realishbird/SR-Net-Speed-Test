@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -138,7 +137,7 @@ func main() {
 		}
 		// The srnet CLI reads the password from this file; a stale copy
 		// would lock it out after the change.
-		if pwFile := filepath.Join(filepath.Dir(*cfgPath), "admin-password"); *password != pwFile {
+		if pwFile := cfg.CLIPasswordFile(); pwFile != "" && *password != pwFile {
 			if st, err := os.Stat(pwFile); err == nil && st.Mode().IsRegular() {
 				if err := os.WriteFile(pwFile, []byte(lastPassword+"\n"), 0o600); err != nil {
 					log.Printf("could not update %s for the srnet CLI: %v", pwFile, err)

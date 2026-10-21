@@ -297,17 +297,17 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "sum by (host, rdma_dev, __name__) (increase(srnet_rdma_hw_out_of_sequence{run_id=\"\"}[1h]))",
+     "expr": "sum by (host, rdma_dev, __name__) (increase(srnet_rdma_hw_out_of_sequence{run_id=\"\"}[1h]) keep_metric_names)",
      "legendFormat": "{{host}} {{netdev}}{{rdma_dev}} {{__name__}}"
     },
     {
      "refId": "B",
-     "expr": "sum by (host, rdma_dev, __name__) (increase(srnet_rdma_hw_packet_seq_err{run_id=\"\"}[1h]))",
+     "expr": "sum by (host, rdma_dev, __name__) (increase(srnet_rdma_hw_packet_seq_err{run_id=\"\"}[1h]) keep_metric_names)",
      "legendFormat": "{{host}} {{netdev}}{{rdma_dev}} {{__name__}}"
     },
     {
      "refId": "C",
-     "expr": "sum by (host, netdev, __name__) (increase(srnet_nic_rx_crc_errors_phy{run_id=\"\"}[1h]))",
+     "expr": "sum by (host, netdev, __name__) (increase(srnet_nic_rx_crc_errors_phy{run_id=\"\"}[1h]) keep_metric_names)",
      "legendFormat": "{{host}} {{netdev}}{{rdma_dev}} {{__name__}}"
     }
    ]
