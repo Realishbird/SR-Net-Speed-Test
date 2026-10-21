@@ -165,10 +165,10 @@ cat <<EOF
  Web UI:        https://$CT_IP:8443   (admin login above)
 
  Install the agent on each host with a fresh token:
-   pct exec $CTID -- srnet token
+   pct exec $CTID -- /usr/local/bin/srnet token
 
  Add your SONiC switch so its port counters land next to the host counters:
-   pct exec $CTID -- srnet-controller switch --name z9864f --address <switch ip> --snmp-community <ro community> --gnmi-user <user> --gnmi-password <pw>
+   pct exec $CTID -- /usr/local/bin/srnet-controller switch --name z9864f --address <switch ip> --snmp-community <ro community> --gnmi-user <user> --gnmi-password <pw>
 
  Or from inside the container: pct enter $CTID, then 'srnet hosts', 'srnet run --help'.
 ================================================================================
