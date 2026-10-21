@@ -109,7 +109,7 @@ With gNMI credentials the controller writes `/etc/srnet/gnmic.yaml` (a path unit
 
 On Enterprise SONiC the telemetry server is on by default (port 8080, TLS with a self-signed certificate, password authentication with the switch's user accounts, mgmt VRF); `show ip telemetry` on the switch confirms it. For SNMP, create a read-only community, for example `snmp-server community srnetro group ro` in `configure terminal`. To test gNMI from the controller: `gnmic -a <switch>:8080 -u admin -p '<password>' --skip-verify capabilities`.
 
-Hosts run `lldpd`, so each port's switch neighbour and port id show in `srnet hosts` and the UI without a cable map. Hosts installed before v0.1.15 need `install.sh` run once more to get the sudo rule that lets the agent query `lldpctl`.
+Hosts run `lldpd`, so each port's switch neighbour and port id show in `srnet hosts` and the UI without a cable map. The Topology page draws the result: the switch with the ports in use, every host with its ports, CPU, load and memory, lines coloured by fabric and sized by the live rate, and the legs of a run in progress highlighted. Below it, the switch ports in use with their in/out rate, discards and errors (gNMI, or SNMP when that is all there is), and the hosts with their switch ports. `GET /api/v1/topology` returns the same data. Hosts installed before v0.1.15 need `install.sh` run once more to get the sudo rule that lets the agent query `lldpctl`.
 
 ## Agent updates from the controller
 
