@@ -61,6 +61,24 @@ func main() {
 		}
 		fp, _ := controller.CAFingerprint(cfg.CACert)
 		fmt.Printf("config written to %s\nCA fingerprint (sha256): %s\n", *cfgPath, fp)
+	case "dashboards":
+		// srnet-controller dashboards --dir /var/lib/grafana/dashboards/srnet
+		// Writes the bundled Grafana dashboards where Grafana's file provisioner
+		// reads them. The installer runs this as root so the files end up in a
+		// directory the grafana user can read.
+		dir := fs.String("dir", "", "directory for the dashboard JSON files (default: grafana_dashboard_dir from the config)")
+		fs.Parse(args)
+		cfg := controller.DefaultConfig()
+		if old, err := controller.LoadConfig(*cfgPath); err == nil {
+			cfg = old
+		}
+		if *dir != "" {
+			cfg.GrafanaDashDir = *dir
+		}
+		if err := writeDashboards(cfg); err != nil {
+			log.Fatalf("grafana dashboards: %v", err)
+		}
+		fmt.Printf("dashboards written to %s\n", cfg.GrafanaDashDir)
 	case "switch":
 		// srnet-controller switch add --name sw1 --address 10.0.0.2 --snmp-community public --gnmi-user admin --gnmi-password x --gnmi-tls
 		name := fs.String("name", "", "switch name")
@@ -195,6 +213,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage: srnet-controller <command> [--config /etc/srnet/controller.json]
 
   init     write the config, TLS certificates, admin password and Grafana dashboards
+  dashboards  write the bundled Grafana dashboards to --dir, for Grafana's file provisioner
   serve    run the controller (systemd starts this)
   passwd   change the admin password
   switch   add or remove a switch to collect from (--name, --address, --snmp-community, --gnmi-user ...)
