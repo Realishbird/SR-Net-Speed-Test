@@ -35,12 +35,18 @@ func WriteGnmicConfig(cfg Config, path string) (int, error) {
 		} else {
 			b.WriteString("    insecure: true\n")
 		}
+		b.WriteString("    subscriptions: [counters, transceivers]\n")
 	}
 	if n == 0 {
 		os.Remove(path)
 		return 0, nil
 	}
-	b.WriteString(`subscriptions:
+	// log: gnmic discards its log output unless asked, which hides subscribe
+	// errors from the journal. encoding: Enterprise SONiC only offers
+	// JSON_IETF and PROTO; gnmic's default "json" is rejected by the switch.
+	b.WriteString(`log: true
+encoding: json_ietf
+subscriptions:
   counters:
     paths:
       - /openconfig-interfaces:interfaces/interface/state/counters
@@ -49,6 +55,7 @@ func WriteGnmicConfig(cfg Config, path string) (int, error) {
     mode: stream
     stream-mode: sample
     sample-interval: 5s
+    encoding: json_ietf
   transceivers:
     paths:
       - /openconfig-platform:components/component/transceiver/physical-channels/channel/state
@@ -56,6 +63,7 @@ func WriteGnmicConfig(cfg Config, path string) (int, error) {
     mode: stream
     stream-mode: sample
     sample-interval: 30s
+    encoding: json_ietf
 outputs:
   victoriametrics:
     type: prometheus_write
