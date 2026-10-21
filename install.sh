@@ -98,10 +98,37 @@ curl -fsSL -o "$TMP/SHA256SUMS" "$BASE/SHA256SUMS" || die "download failed: $BAS
 (cd "$TMP" && grep " srnet-agent-linux-$ARCH\$" SHA256SUMS | sed "s/srnet-agent-linux-$ARCH/srnet-agent/" | sha256sum -c --quiet -) || die "checksum mismatch for srnet-agent"
 install -m 0755 "$TMP/srnet-agent" /usr/local/bin/srnet-agent
 
+# The launcher lets the controller push updates: the agent stages a verified
+# binary as srnet-agent.next, exits, and the launcher swaps it in on restart.
+# If the new binary never reports healthy, the next start restores .prev.
+cat > /usr/local/bin/srnet-agent-launch <<'EOF'
+#!/usr/bin/env bash
+set -u
+BIN=/var/lib/srnet/bin
+mkdir -p "$BIN"
+if [ -x "$BIN/srnet-agent.next" ]; then
+  [ -x "$BIN/srnet-agent" ] && mv -f "$BIN/srnet-agent" "$BIN/srnet-agent.prev"
+  mv -f "$BIN/srnet-agent.next" "$BIN/srnet-agent"
+  touch "$BIN/trial"
+elif [ -e "$BIN/trial" ] && [ -x "$BIN/srnet-agent.prev" ]; then
+  echo "srnet-agent-launch: previous update did not become healthy; rolling back" >&2
+  mv -f "$BIN/srnet-agent.prev" "$BIN/srnet-agent"
+  rm -f "$BIN/trial"
+elif [ -e "$BIN/trial" ]; then
+  rm -f "$BIN/trial" "$BIN/srnet-agent"  # fall back to the package-installed binary
+fi
+if [ -x "$BIN/srnet-agent" ]; then
+  exec "$BIN/srnet-agent" run
+fi
+exec /usr/local/bin/srnet-agent run
+EOF
+chmod 0755 /usr/local/bin/srnet-agent-launch
+
 log "Creating srnet user and directories"
 getent group srnet >/dev/null || groupadd --system srnet
 getent passwd srnet >/dev/null || useradd --system --gid srnet --home-dir /var/lib/srnet --shell /usr/sbin/nologin srnet
-install -d -m 0750 -o srnet -g srnet /etc/srnet /var/lib/srnet
+install -d -m 0750 -o srnet -g srnet /etc/srnet /var/lib/srnet /var/lib/srnet/bin
+rm -f /var/lib/srnet/bin/srnet-agent /var/lib/srnet/bin/srnet-agent.next /var/lib/srnet/bin/srnet-agent.prev /var/lib/srnet/bin/trial
 
 # ethtool -m needs root on most drivers; allow exactly that command and nothing else.
 cat > /etc/sudoers.d/srnet-ethtool <<'EOF'
@@ -121,7 +148,7 @@ Wants=network-online.target
 Type=simple
 User=srnet
 Group=srnet
-ExecStart=/usr/local/bin/srnet-agent run
+ExecStart=/usr/local/bin/srnet-agent-launch
 Restart=always
 RestartSec=5
 LimitMEMLOCK=infinity

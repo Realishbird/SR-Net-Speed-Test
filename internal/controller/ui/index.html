@@ -47,6 +47,9 @@ a.link { color:var(--accent); cursor:pointer; text-decoration:underline; }
   <a href="#hosts" id="nav-hosts">Hosts</a>
   <a href="#runs" id="nav-runs">Runs</a>
   <a href="#new" id="nav-new">New run</a>
+  <a href="#suites" id="nav-suites">Suites</a>
+  <a href="#fleet" id="nav-fleet">Fleet</a>
+  <a href="#alerts" id="nav-alerts">Alerts <span id="alert-count" class="v fail" style="display:none"></span></a>
   <a id="grafana" href="#" target="_blank">Grafana</a>
   <span class="muted" id="ver" style="margin-left:auto"></span>
 </header>
@@ -79,6 +82,9 @@ function route() {
   if (h.startsWith('#run/')) return showRun(+h.slice(5));
   if (h === '#runs') return showRuns();
   if (h === '#new') return showNew();
+  if (h === '#suites') return showSuites();
+  if (h === '#fleet') return showFleet();
+  if (h === '#alerts') return showAlerts();
   return showHosts();
 }
 window.addEventListener('hashchange', route);
@@ -156,7 +162,9 @@ async function showRun(id) {
   let html = `<div class="row" style="margin-bottom:12px"><h2 style="margin:0">Run ${r.id}: ${esc(r.name)}</h2>
     <span class="v ${r.status}">${r.status}</span> ${r.verdict ? `<span class="v ${r.verdict}">${r.verdict}</span>` : ''}
     ${live ? `<button onclick="cancelRun(${r.id})">Cancel</button>` : ''}
-    <a class="link" href="#new" onclick='sessionStorage.setItem("spec", ${JSON.stringify(JSON.stringify(s))})'>Run again</a></div>`;
+    <a class="link" href="#new" onclick='sessionStorage.setItem("spec", ${JSON.stringify(JSON.stringify(s))})'>Run again</a>
+    <a class="link" href="#suites" onclick='sessionStorage.setItem("suitespec", ${JSON.stringify(JSON.stringify(s))})'>Add to a suite</a>
+    ${!live ? `<span class="muted">Report:</span> <a class="link" href="/api/v1/runs/${r.id}/report.csv">CSV</a> <a class="link" href="/api/v1/runs/${r.id}/report.html" target="_blank">HTML</a>` : ''}</div>`;
   if (r.error) html += `<div class="card" style="color:var(--fail)">${esc(r.error)}</div>`;
   html += `<div class="card"><div class="row">
     <div><div class="muted">${live ? 'Live aggregate' : 'Aggregate (tool)'}</div><div class="big">${fmt(live ? r.summary.live_gbps : r.summary.tool_gbps)} <span class="muted" style="font-size:14px">Gbps</span></div></div>
@@ -239,6 +247,107 @@ async function startRun(ev) {
   try { const r = await api('POST', '/runs', spec); location.hash = '#run/' + r.id; } catch (e) { say(e); }
   return false;
 }
+
+/* Suites and schedules */
+async function showSuites() {
+  const [suites, scheds, sruns] = await Promise.all([api('GET', '/suites'), api('GET', '/schedules'), api('GET', '/suite-runs')]).catch(e => { say(e); return [[], [], []]; });
+  const added = JSON.parse(sessionStorage.getItem('suitespec') || 'null'); sessionStorage.removeItem('suitespec');
+  let html = `<h2>Suites</h2><p class="muted">A suite is an ordered list of runs executed back to back. Edit the JSON (an array of run specs, the same fields the New run form sends), or open a finished run and click "Add to a suite".</p>`;
+  for (const su of suites) html += suiteCard(su);
+  html += suiteCard({ id: 0, name: '', specs: added ? [added] : [] });
+  html += `<h2>Schedules</h2><form class="card row" onsubmit="return addSchedule(event)">
+    <label>Name <input name="name" required placeholder="nightly"></label>
+    <label>Suite <select name="suite_id">${suites.map(su => `<option value="${su.id}">${esc(su.name)}</option>`).join('')}</select></label>
+    <label>Cron (5 fields, controller local time) <input name="cron" required value="0 2 * * *" size="14"></label>
+    <button class="primary" ${suites.length ? '' : 'disabled'}>Add schedule</button></form>
+    <table><tr><th>ID</th><th>Name</th><th>Suite</th><th>Cron</th><th>Enabled</th><th>Last run</th><th>Next run</th><th></th></tr>`;
+  if (!scheds.length) html += `<tr><td colspan="8" class="muted">No schedules.</td></tr>`;
+  for (const sc of scheds) html += `<tr><td>${sc.id}</td><td>${esc(sc.name)}</td><td>${esc(sc.suite_name)}</td><td><code>${esc(sc.cron)}</code></td>
+    <td><input type="checkbox" ${sc.enabled ? 'checked' : ''} onchange='toggleSchedule(${JSON.stringify(sc)}, this.checked)'></td>
+    <td class="muted">${sc.last_run_at ? new Date(sc.last_run_at).toLocaleString() : '-'}</td><td class="muted">${sc.next_run_at ? new Date(sc.next_run_at).toLocaleString() : '-'}</td>
+    <td><button onclick="delSchedule(${sc.id})">Delete</button></td></tr>`;
+  html += `</table><h2 style="margin-top:20px">Suite runs</h2><table><tr><th>ID</th><th>Suite</th><th>Trigger</th><th>Status</th><th>Verdict</th><th>Runs</th><th>Started</th><th></th></tr>`;
+  if (!sruns.length) html += `<tr><td colspan="8" class="muted">No suite runs yet.</td></tr>`;
+  for (const r of sruns) html += `<tr><td>${r.id}</td><td>${esc(r.suite_name)}</td><td>${esc(r.trigger)}</td><td><span class="v ${r.status}">${r.status}</span></td>
+    <td>${r.verdict ? `<span class="v ${r.verdict}">${r.verdict}</span>` : ''}</td><td>${r.run_ids.map(id => `<a class="link" href="#run/${id}">${id}</a>`).join(' ')}</td>
+    <td class="muted">${new Date(r.started_at).toLocaleString()}</td><td>${r.status === 'running' ? `<button onclick="api('POST','/suite-runs/${r.id}/cancel').then(showSuites,say)">Cancel</button>` : ''}</td></tr>`;
+  $('#view').innerHTML = html + '</table>';
+}
+function suiteCard(su) {
+  return `<form class="card" onsubmit="return saveSuite(event, ${su.id})">
+    <div class="row"><label>Name <input name="name" value="${esc(su.name)}" required placeholder="new suite"></label>
+      <button class="primary">${su.id ? 'Save' : 'Create'}</button>
+      ${su.id ? `<button type="button" onclick="api('POST','/suites/${su.id}/run').then(showSuites,say)">Run now</button><button type="button" onclick="delSuite(${su.id})">Delete</button>` : ''}
+      <span class="muted">${su.specs.length} run(s)</span></div>
+    <textarea name="specs" rows="${Math.min(14, 3 + su.specs.length * 2)}" style="width:100%;margin-top:8px;font:12px/1.4 ui-monospace,monospace;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px">${esc(JSON.stringify(su.specs, null, 1).replace(/\n\s*/g, ' ').replace(/\{ /g, '\n {').replace(/^\[\n/, '[\n').replace(/ \]$/, '\n]'))}</textarea></form>`;
+}
+async function saveSuite(ev, id) {
+  ev.preventDefault();
+  const f = new FormData(ev.target);
+  let specs; try { specs = JSON.parse(f.get('specs')); } catch (e) { say('specs: ' + e.message); return false; }
+  try { await api(id ? 'PUT' : 'POST', id ? '/suites/' + id : '/suites', { name: f.get('name'), specs }); say(''); showSuites(); } catch (e) { say(e); }
+  return false;
+}
+async function delSuite(id) { try { await api('DELETE', '/suites/' + id); showSuites(); } catch (e) { say(e); } }
+async function addSchedule(ev) {
+  ev.preventDefault();
+  const f = new FormData(ev.target);
+  try { await api('POST', '/schedules', { name: f.get('name'), suite_id: +f.get('suite_id'), cron: f.get('cron'), enabled: true }); say(''); showSuites(); } catch (e) { say(e); }
+  return false;
+}
+async function toggleSchedule(sc, on) { try { await api('PUT', '/schedules/' + sc.id, { ...sc, enabled: on }); showSuites(); } catch (e) { say(e); } }
+async function delSchedule(id) { try { await api('DELETE', '/schedules/' + id); showSuites(); } catch (e) { say(e); } }
+
+/* Fleet: releases and agent updates */
+async function showFleet(check) {
+  const [rel, jobs, hosts] = await Promise.all([api('GET', '/releases' + (check ? '?check=1' : '')), api('GET', '/updates'), api('GET', '/hosts')]).catch(e => { say(e); return [{ mirrored: [] }, [], []]; });
+  const versions = [...new Set(hosts.map(h => h.agent_version))];
+  let html = `<div class="row" style="margin-bottom:12px"><h2 style="margin:0">Fleet</h2><span class="muted">controller ${esc(rel.controller_version)} · agents on ${versions.map(esc).join(', ') || 'none'}</span>
+    <button onclick="showFleet(true)">Check GitHub</button>${rel.latest_on_github ? `<span>latest on GitHub: <b>${esc(rel.latest_on_github)}</b></span>` : ''}
+    <form class="row" onsubmit="return fetchRelease(event)"><label>Mirror release <input name="version" placeholder="${esc(rel.latest_on_github || 'v0.3.0')}" size="10"></label><button>Fetch</button></form></div>`;
+  html += `<div class="card"><div class="row"><b>Mirrored releases</b></div><table><tr><th>Version</th><th>Arches</th><th>Mirrored</th><th></th></tr>`;
+  if (!rel.mirrored.length) html += `<tr><td colspan="4" class="muted">Nothing mirrored yet. Fetch a release, then push it to the agents.</td></tr>`;
+  for (const r of rel.mirrored) html += `<tr><td><b>${esc(r.version)}</b></td><td>${r.arches.join(', ')}</td><td class="muted">${new Date(r.mirrored_at).toLocaleString()}</td>
+    <td><form class="row" onsubmit="return startUpdate(event, '${esc(r.version)}')"><input name="hosts" placeholder="all hosts, or names / tag:x" size="26"><button class="primary">Update agents</button></form></td></tr>`;
+  html += `</table></div><h2>Update jobs</h2>`;
+  if (!jobs.length) html += `<p class="muted">No update jobs yet.</p>`;
+  for (const j of jobs) {
+    html += `<div class="card"><div class="row"><b>Job ${j.id}</b> to ${esc(j.version)} <span class="v ${j.status === 'done' ? 'pass' : j.status === 'failed' ? 'fail' : 'running'}">${j.status}</span><span class="muted">${new Date(j.created_at).toLocaleString()}</span></div>
+      <table><tr><th>Host</th><th>From</th><th>Status</th><th>Note</th></tr>${j.hosts.map(h => `<tr><td>${esc(h.name)}</td><td class="muted">${esc(h.from)}</td><td><span class="v ${h.status === 'done' ? 'pass' : h.status === 'failed' ? 'fail' : h.status === 'skipped' ? 'warn' : 'running'}">${h.status}</span></td><td class="muted">${esc(h.note)}</td></tr>`).join('')}</table></div>`;
+  }
+  $('#view').innerHTML = html;
+  if (jobs.some(j => j.status === 'running')) timer = setInterval(() => showFleet(), 3000);
+}
+async function fetchRelease(ev) {
+  ev.preventDefault();
+  const v = new FormData(ev.target).get('version') || 'latest';
+  say('fetching ' + v + ' from GitHub...');
+  try { await api('POST', '/releases/fetch', { version: v }); say(''); showFleet(); } catch (e) { say(e); }
+  return false;
+}
+async function startUpdate(ev, version) {
+  ev.preventDefault();
+  const hosts = list(new FormData(ev.target).get('hosts'));
+  try { await api('POST', '/updates', { version, hosts }); say(''); showFleet(); } catch (e) { say(e); }
+  return false;
+}
+
+/* Alerts */
+async function showAlerts(all) {
+  const alerts = await api('GET', '/alerts' + (all ? '?all=1' : '')).catch(say) || [];
+  let html = `<div class="row" style="margin-bottom:12px"><h2 style="margin:0">Alerts</h2><label><input type="checkbox" ${all ? 'checked' : ''} onchange="showAlerts(this.checked)"> include resolved</label></div>
+    <table><tr><th>State</th><th>Kind</th><th>Host</th><th>Port</th><th>Message</th><th>Opened</th><th>Resolved</th></tr>`;
+  if (!alerts.length) html += `<tr><td colspan="7" class="muted">No ${all ? '' : 'open '}alerts.</td></tr>`;
+  for (const a of alerts) html += `<tr><td><span class="v ${a.resolved_at ? 'pass' : 'fail'}">${a.resolved_at ? 'resolved' : 'open'}</span></td><td>${esc(a.kind)}</td><td>${esc(a.host)}</td><td>${esc(a.port)}</td>
+    <td style="white-space:normal">${esc(a.message)}</td><td class="muted">${new Date(a.opened_at).toLocaleString()}</td><td class="muted">${a.resolved_at ? new Date(a.resolved_at).toLocaleString() : ''}</td></tr>`;
+  $('#view').innerHTML = html + '</table>';
+  timer = setInterval(() => showAlerts(all), 10000);
+}
+async function alertBadge() {
+  const n = (await api('GET', '/alerts').catch(() => [])).length;
+  const b = $('#alert-count'); b.textContent = n; b.style.display = n ? '' : 'none';
+}
+alertBadge(); setInterval(alertBadge, 30000);
 
 api('GET', '/status').then(s => { $('#ver').textContent = s.version; $('#grafana').href = s.grafana_url || (location.protocol + '//' + location.hostname + ':3000'); }).catch(() => {});
 route();

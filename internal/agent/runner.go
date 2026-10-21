@@ -146,6 +146,13 @@ func (r *Runner) Handle(ctx context.Context, t api.Task) {
 	}
 }
 
+// Active reports whether any benchmark task is in progress.
+func (r *Runner) Active() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.cancels) > 0
+}
+
 func (r *Runner) cancelRun(runID int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

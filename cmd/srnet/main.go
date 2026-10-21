@@ -75,6 +75,24 @@ func main() {
 		err = c.watch(ctx, args)
 	case "cancel":
 		err = c.cancel(ctx, args)
+	case "releases":
+		err = c.releases(ctx, args)
+	case "fetch-release":
+		err = c.fetchRelease(ctx, args)
+	case "update":
+		err = c.update(ctx, args)
+	case "updates":
+		err = c.updates(ctx)
+	case "suite":
+		err = c.suite(ctx, args)
+	case "suite-runs":
+		err = c.suiteRuns(ctx)
+	case "schedule":
+		err = c.schedule(ctx, args)
+	case "alerts":
+		err = c.alerts(ctx, args)
+	case "report":
+		err = c.report(ctx, args)
 	default:
 		usage()
 	}
@@ -99,6 +117,19 @@ func usage() {
   show <run id>                 show a run's result
   watch <run id>                follow a run live until it ends
   cancel <run id>
+  report <run id> [--format csv|html] [-o file]
+
+  releases [--check]            agent builds mirrored on the controller (and the newest on GitHub)
+  fetch-release [version]       mirror a release from GitHub (default: latest)
+  update --version vX [--host a,b | --tag t]
+                                push an agent update one host at a time, with rollback
+  updates                       update job history
+  suite list|show|create|update|delete|run
+                                suites are ordered lists of runs (JSON array of run specs)
+  suite-runs                    suite run history
+  schedule list|add|enable|disable|delete
+                                run a suite on a cron expression
+  alerts [--all]                open alerts (agent offline, link down, hot optics, idle errors, failed runs)
 
 Environment: SRNET_URL, SRNET_USER, SRNET_PASSWORD or SRNET_PASSWORD_FILE, SRNET_CA`)
 	os.Exit(2)

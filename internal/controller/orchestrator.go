@@ -440,6 +440,20 @@ func (o *Orchestrator) Start(ctx context.Context, spec api.RunSpec) (int64, erro
 
 type userError struct{ error }
 
+// hostBusy reports whether any active run uses a port on the agent.
+func (o *Orchestrator) hostBusy(agentID int64) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, ar := range o.active {
+		for _, p := range ar.plans {
+			if p.client.AgentID == agentID || p.server.AgentID == agentID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (o *Orchestrator) allocTCP(agentID int64) int {
 	used := o.tcpPorts[agentID]
 	if used == nil {

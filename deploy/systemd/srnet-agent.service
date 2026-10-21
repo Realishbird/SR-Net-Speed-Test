@@ -8,7 +8,7 @@ Wants=network-online.target
 Type=simple
 User=srnet
 Group=srnet
-ExecStart=/usr/local/bin/srnet-agent run
+ExecStart=/usr/local/bin/srnet-agent-launch
 Restart=always
 RestartSec=5
 # perftest pins memory for RDMA; the agent itself needs no root.

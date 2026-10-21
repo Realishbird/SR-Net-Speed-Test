@@ -35,6 +35,7 @@ const (
 	TaskServer = "server"
 	TaskClient = "client"
 	TaskCancel = "cancel"
+	TaskUpdate = "update" // replace the agent binary with Version from URLPath
 )
 
 // Event types sent from an agent to the controller.
@@ -108,7 +109,18 @@ type Task struct {
 	Streams     int       `json:"streams,omitempty"`  // iperf3 -P
 	Protocol    string    `json:"protocol,omitempty"` // iperf3: tcp or udp
 	StartAt     time.Time `json:"start_at,omitempty"`
+
+	// Update tasks.
+	Version string `json:"version,omitempty"`
+	URLPath string `json:"url_path,omitempty"` // controller path serving the binary
+	SHA256  string `json:"sha256,omitempty"`
 }
+
+// Update events sent by agents.
+const (
+	EventUpdateApplied = "update_applied" // binary staged, agent restarting
+	EventUpdateFailed  = "update_failed"
+)
 
 // Latency is the perftest latency summary in microseconds.
 type Latency struct {
@@ -299,4 +311,83 @@ type Leg struct {
 	ErrorDeltas  map[string]int64 `json:"error_deltas,omitempty"`
 	Verdict      string           `json:"verdict"`
 	Note         string           `json:"note,omitempty"`
+}
+
+// Release is an agent build mirrored on the controller.
+type Release struct {
+	Version  string            `json:"version"`
+	Arches   []string          `json:"arches"`
+	SHA256   map[string]string `json:"sha256"` // arch -> checksum
+	Mirrored time.Time         `json:"mirrored_at"`
+}
+
+type ReleaseList struct {
+	Current  string    `json:"controller_version"`
+	Latest   string    `json:"latest_on_github,omitempty"`
+	Mirrored []Release `json:"mirrored"`
+}
+
+// UpdateJob tracks one fleet update: hosts are updated one at a time.
+type UpdateJob struct {
+	ID        int64              `json:"id"`
+	Version   string             `json:"version"`
+	Status    string             `json:"status"` // running | done | failed
+	Hosts     []UpdateHostStatus `json:"hosts"`
+	CreatedAt time.Time          `json:"created_at"`
+	EndedAt   *time.Time         `json:"ended_at,omitempty"`
+}
+
+type UpdateHostStatus struct {
+	HostID int64  `json:"host_id"`
+	Name   string `json:"name"`
+	From   string `json:"from"`
+	Status string `json:"status"` // pending | updating | done | failed | skipped
+	Note   string `json:"note,omitempty"`
+}
+
+type UpdateRequest struct {
+	Version string   `json:"version"`
+	Hosts   []string `json:"hosts,omitempty"` // selectors; empty = every host
+}
+
+// Suite is an ordered list of runs executed back to back.
+type Suite struct {
+	ID    int64     `json:"id"`
+	Name  string    `json:"name"`
+	Specs []RunSpec `json:"specs"`
+}
+
+type SuiteRun struct {
+	ID        int64      `json:"id"`
+	SuiteID   int64      `json:"suite_id"`
+	SuiteName string     `json:"suite_name"`
+	Trigger   string     `json:"trigger"` // manual | schedule:<name>
+	Status    string     `json:"status"`  // running | done | failed | canceled
+	Verdict   string     `json:"verdict"`
+	RunIDs    []int64    `json:"run_ids"`
+	StartedAt time.Time  `json:"started_at"`
+	EndedAt   *time.Time `json:"ended_at,omitempty"`
+}
+
+// Schedule runs a suite on a cron expression (5 fields, controller local time).
+type Schedule struct {
+	ID        int64      `json:"id"`
+	Name      string     `json:"name"`
+	SuiteID   int64      `json:"suite_id"`
+	SuiteName string     `json:"suite_name,omitempty"`
+	Cron      string     `json:"cron"`
+	Enabled   bool       `json:"enabled"`
+	LastRunAt *time.Time `json:"last_run_at,omitempty"`
+	NextRunAt *time.Time `json:"next_run_at,omitempty"`
+}
+
+// Alert is a condition the controller noticed; it closes when the condition clears.
+type Alert struct {
+	ID         int64      `json:"id"`
+	Kind       string     `json:"kind"` // agent_offline | link_down | errors_idle | transceiver_hot | run_failed | update_failed
+	Host       string     `json:"host,omitempty"`
+	Port       string     `json:"port,omitempty"`
+	Message    string     `json:"message"`
+	OpenedAt   time.Time  `json:"opened_at"`
+	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
 }
