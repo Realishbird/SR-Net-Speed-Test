@@ -111,6 +111,8 @@ On Enterprise SONiC the telemetry server is on by default (port 8080, TLS with a
 
 Hosts run `lldpd`, so each port's switch neighbour and port id show in `srnet hosts` and the UI without a cable map. The Topology page draws the result: the switch with the ports in use, every host with its ports, CPU, load and memory, lines coloured by fabric and sized by the live rate, and the legs of a run in progress highlighted. Below it, the switch ports in use with their in/out rate, discards and errors (gNMI, or SNMP when that is all there is), and the hosts with their switch ports. `GET /api/v1/topology` returns the same data. Hosts installed before v0.1.15 need `install.sh` run once more to get the sudo rule that lets the agent query `lldpctl`.
 
+Each finished leg also records the switch's view of it and the hosts' CPU. From LLDP the leg knows which switch ports it crossed ("Switch path" on the run page, `switch_client_port` and `switch_server_port` in the CSV). From the switch's own octet counters, sampled every 30 s by gNMI or SNMP, it gets the rate on the server-side port during the test (`switch_gbps`), a third measurement next to the tool and the NIC counters, plus any discards, errors or FCS errors that grew on either port (`switch_deltas`, shown with the error counters). `cpu_*` columns give the average and peak CPU use of the client and the server during the leg, so a host that ran out of CPU is visible next to its rate. The Grafana button on a run page opens the Live run dashboard on that run's time range.
+
 ## Agent updates from the controller
 
 Releases are mirrored on the controller and pushed to agents one host at a time, with rollback.
