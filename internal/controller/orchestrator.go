@@ -28,6 +28,8 @@ type endpoint struct {
 	Label        string
 	Fabric       string
 	ExpectedGbps float64
+	LLDPSwitch   string // neighbour chassis the host's lldpd saw on this port
+	LLDPPort     string
 }
 
 type legPlan struct {
@@ -56,6 +58,9 @@ type Orchestrator struct {
 	store   *Store
 	hub     *hub
 	metrics *metrics
+	// switches lists the configured switches, for per-leg switch counters.
+	// Nil when the server has not wired it (tests).
+	switches func() []SwitchConfig
 
 	mu       sync.Mutex
 	portLock map[int64]int64        // port id -> run id
@@ -232,7 +237,7 @@ func pairPorts(c, s target) (endpoint, endpoint, error) {
 		if exp == 0 {
 			exp = float64(p.SpeedMbps) / 1000
 		}
-		return endpoint{AgentID: h.ID, Host: h.Name, PortID: p.ID, RdmaDev: p.RdmaDev, PortNum: p.PortNum, Netdev: p.Netdev, IP: ip, Label: p.Label, Fabric: p.Fabric, ExpectedGbps: exp}
+		return endpoint{AgentID: h.ID, Host: h.Name, PortID: p.ID, RdmaDev: p.RdmaDev, PortNum: p.PortNum, Netdev: p.Netdev, IP: ip, Label: p.Label, Fabric: p.Fabric, ExpectedGbps: exp, LLDPSwitch: p.LLDPSwitch, LLDPPort: p.LLDPPort}
 	}
 	return mk(c.host, best.cp, best.cip), mk(s.host, best.sp, best.sip), nil
 }
@@ -729,6 +734,12 @@ func (o *Orchestrator) score(ar *activeRun) (api.RunSummary, string) {
 			} else {
 				l.Note = "both ports shared with other legs; no per-leg counter rate"
 			}
+		}
+		if !p.startAt.IsZero() {
+			// The switch's view of the leg and the hosts' CPU over the whole test.
+			from, to := p.startAt, p.startAt.Add(time.Duration(ar.spec.DurationSec)*time.Second)
+			l.Switch = o.legSwitch(ar, p, from, to)
+			l.CPU = o.legCPU(p, from, to)
 		}
 		l.Verdict = "pass"
 		measured := l.CounterGbps
