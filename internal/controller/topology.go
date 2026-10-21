@@ -1,12 +1,16 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -232,57 +236,263 @@ type lldpEntry struct {
 	Switch, Port string
 }
 
-// switchLLDP reads every configured switch's own LLDP table out of
-// VictoriaMetrics (gnmic subscribes to it) and keys it by the neighbour's
+// switchLLDP asks every switch with gNMI settings for its own LLDP table
+// (a gNMI Get of /openconfig-lldp:lldp/interfaces, run through gnmic with
+// the same config file its subscriptions use) and keys the neighbours by
 // system name and port description, lower-cased, which on a Linux host are
 // its hostname and netdev. A host whose agent cannot run lldpctl is still
-// placed, because the switch saw it.
-func (s *Server) switchLLDP(ctx context.Context) map[string]lldpEntry {
+// placed, because the switch saw it. This is a Get rather than a
+// subscription because Enterprise SONiC refuses the wildcard interface
+// list in a Subscribe ("wildcard path not supported") and LLDP changes
+// when cables move, not more often.
+func (s *Server) switchLLDP(ctx context.Context) (map[string]lldpEntry, error) {
 	out := map[string]lldpEntry{}
-	switches := s.switchList()
-	if len(switches) == 0 || s.metrics.vmURL == "" {
-		return out
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+	bySource := gnmiSources(cfg)
+	if len(bySource) == 0 {
+		return out, nil
 	}
-	bySource := map[string]SwitchConfig{}
-	for _, sw := range switches {
-		if sw.GNMIUser != "" {
-			bySource[strings.ToLower(sw.Name)] = sw
-			bySource[strings.ToLower(sw.Address)] = sw
-			bySource[strings.ToLower(fmt.Sprintf("%s:%d", sw.Address, sw.GNMIPort))] = sw
-		}
+	raw, err := gnmicGet(ctx, cfg, "/openconfig-lldp:lldp/interfaces")
+	if err != nil {
+		return out, err
 	}
-	// Each leaf is its own series; join system-name and port-description on
-	// the interface and neighbour keys.
-	type key struct{ source, iface, id string }
-	names := map[key]string{}
-	descs := map[key]string{}
-	for leaf, dst := range map[string]map[key]string{"system_name": names, "port_description": descs} {
-		rows, err := s.metrics.vmQuery(ctx, `last_over_time(`+gnmiMetric("lldp.*neighbor_state_"+leaf)+`[5m])`)
-		if err != nil {
-			return out
-		}
-		for _, r := range rows {
-			k := key{strings.ToLower(r.Labels["source"]), r.Labels["name"], r.Labels["id"]}
-			if v := r.Labels[leaf]; v != "" && k.iface != "" {
-				dst[k] = v
-			}
-		}
-	}
-	for k, sys := range names {
-		desc := descs[k]
-		if desc == "" {
+	for source, neighbours := range parseLLDPGet(raw) {
+		sw, ok := gnmiSource(bySource, source)
+		if !ok {
 			continue
 		}
-		sw, ok := bySource[k.source]
-		if !ok {
-			name, _, _ := strings.Cut(k.source, ":")
-			if sw, ok = bySource[name]; !ok {
+		for _, n := range neighbours {
+			if n.SystemName == "" || n.PortDesc == "" {
 				continue
 			}
+			out[strings.ToLower(n.SystemName)+"|"+strings.ToLower(n.PortDesc)] = lldpEntry{Switch: sw.Name, Port: n.Iface}
 		}
-		out[strings.ToLower(sys)+"|"+strings.ToLower(desc)] = lldpEntry{Switch: sw.Name, Port: k.iface}
 	}
-	return out
+	return out, nil
+}
+
+// gnmiSources indexes the switches with gNMI settings by every spelling
+// gnmic may use as a response source: the target name, the address and
+// address:port, lower-cased.
+func gnmiSources(cfg Config) map[string]SwitchConfig {
+	bySource := map[string]SwitchConfig{}
+	for _, sw := range cfg.Switches {
+		if sw.GNMIUser == "" || sw.Address == "" {
+			continue
+		}
+		port := sw.GNMIPort
+		if port == 0 {
+			port = 8080
+		}
+		host, _, _ := strings.Cut(sw.Address, ":")
+		bySource[strings.ToLower(sw.Name)] = sw
+		bySource[strings.ToLower(host)] = sw
+		bySource[strings.ToLower(fmt.Sprintf("%s:%d", host, port))] = sw
+	}
+	return bySource
+}
+
+func gnmiSource(bySource map[string]SwitchConfig, source string) (SwitchConfig, bool) {
+	src := strings.ToLower(source)
+	if sw, ok := bySource[src]; ok {
+		return sw, true
+	}
+	name, _, _ := strings.Cut(src, ":")
+	sw, ok := bySource[name]
+	return sw, ok
+}
+
+// gnmicGet runs one gNMI Get against every switch in the gnmic config and
+// returns gnmic's JSON rendering of the answers. The config file is the
+// one gnmic's own subscriptions use, so the credentials live in one place.
+func gnmicGet(ctx context.Context, cfg Config, path string) ([]byte, error) {
+	if _, err := os.Stat(cfg.GnmicConfigPath); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, cfg.GnmicPath, "--config", cfg.GnmicConfigPath, "--log=false", "--encoding", "json_ietf", "--format", "json",
+		"get", "--path", path)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	raw, err := cmd.Output()
+	if err != nil && len(bytes.TrimSpace(raw)) == 0 {
+		msg := strings.TrimSpace(stderr.String())
+		if len(msg) > 300 {
+			msg = msg[:300]
+		}
+		return nil, fmt.Errorf("gnmic get %s: %v: %s", path, err, msg)
+	}
+	return raw, nil
+}
+
+// switchVLANs reads each switch's VLAN membership (SONiC's VLAN_MEMBER
+// table, one Get for the whole switch; the OpenConfig vlans tree is not
+// served by Enterprise SONiC) and keys it switch|port, lower-cased, with
+// the VLAN number as the value: "Vlan100" on Ethernet0 is fabric 100, the
+// fabric as the switch sees it.
+func (s *Server) switchVLANs(ctx context.Context) (map[string]string, error) {
+	out := map[string]string{}
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+	bySource := gnmiSources(cfg)
+	if len(bySource) == 0 {
+		return out, nil
+	}
+	raw, err := gnmicGet(ctx, cfg, "/sonic-vlan:sonic-vlan/VLAN_MEMBER")
+	if err != nil {
+		return out, err
+	}
+	for source, members := range parseVLANMembers(raw) {
+		sw, ok := gnmiSource(bySource, source)
+		if !ok {
+			continue
+		}
+		for port, vlan := range members {
+			out[strings.ToLower(sw.Name+"|"+port)] = vlan
+		}
+	}
+	return out, nil
+}
+
+// parseVLANMembers reads gnmic's rendering of a Get on SONiC's VLAN_MEMBER
+// table ({"ifname":"Ethernet0","name":"Vlan100","tagging_mode":"untagged"}
+// rows under VLAN_MEMBER_LIST) and returns, per source, port -> VLAN
+// number. A port in several VLANs (a trunk) keeps the lowest-numbered
+// untagged one, else the first seen.
+func parseVLANMembers(raw []byte) map[string]map[string]string {
+	var resp []struct {
+		Source  string `json:"source"`
+		Updates []struct {
+			Values map[string]any `json:"values"`
+		} `json:"updates"`
+	}
+	res := map[string]map[string]string{}
+	if i := bytes.Index(raw, []byte("\n[")); i >= 0 && !bytes.HasPrefix(bytes.TrimSpace(raw), []byte("[")) {
+		raw = raw[i+1:]
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return res
+	}
+	for _, r := range resp {
+		var walk func(v any)
+		walk = func(v any) {
+			switch t := v.(type) {
+			case map[string]any:
+				ifname, _ := t["ifname"].(string)
+				name, _ := t["name"].(string)
+				mode, _ := t["tagging_mode"].(string)
+				if ifname != "" && strings.HasPrefix(name, "Vlan") {
+					id := strings.TrimPrefix(name, "Vlan")
+					if res[r.Source] == nil {
+						res[r.Source] = map[string]string{}
+					}
+					if cur, seen := res[r.Source][ifname]; !seen || mode == "untagged" && cur != id {
+						res[r.Source][ifname] = id
+					}
+				}
+				for _, x := range t {
+					walk(x)
+				}
+			case []any:
+				for _, x := range t {
+					walk(x)
+				}
+			}
+		}
+		for _, u := range r.Updates {
+			walk(u.Values)
+		}
+	}
+	return res
+}
+
+// lldpNeighbour is one row of a switch's LLDP table.
+type lldpNeighbour struct {
+	Iface, SystemName, PortDesc, PortID string
+}
+
+// parseLLDPGet reads gnmic's JSON rendering of a Get on
+// /openconfig-lldp:lldp/interfaces: a list of responses, one per target,
+// each with "source" and "updates" whose "values" hold the OpenConfig tree.
+// The tree is walked generically because the exact nesting and module
+// prefixes ("openconfig-lldp:interface") vary between switches: an object
+// with a "name" and a "neighbors" child is an interface, and a "state"
+// object below it that carries a system-name or port-description is a
+// neighbour.
+func parseLLDPGet(raw []byte) map[string][]lldpNeighbour {
+	var resp []struct {
+		Source  string `json:"source"`
+		Updates []struct {
+			Values map[string]any `json:"values"`
+		} `json:"updates"`
+	}
+	res := map[string][]lldpNeighbour{}
+	// With log: true gnmic may print a few log lines first; the answer
+	// starts at the first line that opens the JSON list.
+	if i := bytes.Index(raw, []byte("\n[")); i >= 0 && !bytes.HasPrefix(bytes.TrimSpace(raw), []byte("[")) {
+		raw = raw[i+1:]
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return res
+	}
+	for _, r := range resp {
+		var walk func(v any, iface string)
+		walk = func(v any, iface string) {
+			switch t := v.(type) {
+			case map[string]any:
+				m := make(map[string]any, len(t))
+				for k, x := range t {
+					m[stripModule(k)] = x
+				}
+				if n, ok := m["name"].(string); ok {
+					if _, has := m["neighbors"]; has {
+						iface = n
+					}
+				}
+				if st, ok := m["state"].(map[string]any); ok && iface != "" {
+					nb := lldpNeighbour{Iface: iface}
+					for k, x := range st {
+						sv, _ := x.(string)
+						switch stripModule(k) {
+						case "system-name":
+							nb.SystemName = sv
+						case "port-description":
+							nb.PortDesc = sv
+						case "port-id":
+							nb.PortID = sv
+						}
+					}
+					if nb.SystemName != "" || nb.PortDesc != "" {
+						res[r.Source] = append(res[r.Source], nb)
+					}
+				}
+				for _, x := range t {
+					walk(x, iface)
+				}
+			case []any:
+				for _, x := range t {
+					walk(x, iface)
+				}
+			}
+		}
+		for _, u := range r.Updates {
+			walk(u.Values, "")
+		}
+	}
+	return res
+}
+
+// stripModule drops a YANG module prefix: "openconfig-lldp:interface" is
+// "interface".
+func stripModule(k string) string {
+	if i := strings.LastIndex(k, ":"); i >= 0 {
+		return k[i+1:]
+	}
+	return k
 }
 
 // fillLLDP completes each host port's switch neighbour from the switches'
@@ -290,7 +500,9 @@ func (s *Server) switchLLDP(ctx context.Context) map[string]lldpEntry {
 // the Topology and per-leg switch figures work even before every host runs
 // lldpctl. The host's own report wins when it has one.
 func (s *Server) fillLLDP(ctx context.Context, hosts []hostRec) {
-	lldp := s.cachedLLDP(ctx)
+	s.mu.Lock()
+	lldp := s.lldp
+	s.mu.Unlock()
 	if len(lldp) == 0 {
 		return
 	}
@@ -308,23 +520,74 @@ func (s *Server) fillLLDP(ctx context.Context, hosts []hostRec) {
 	}
 }
 
-// cachedLLDP keeps the switch LLDP map for a minute: the Hosts page polls
-// every few seconds and the table changes when cables move, not before.
-func (s *Server) cachedLLDP(ctx context.Context) map[string]lldpEntry {
-	s.mu.Lock()
-	fresh := s.lldpAt.Add(time.Minute).After(time.Now())
-	m := s.lldp
-	s.mu.Unlock()
-	if fresh {
-		return m
+// switchPollLoop refreshes the switch LLDP and VLAN tables once a minute,
+// off the request path: a Get takes a second or two and both tables change
+// when cables move or VLANs are reassigned, not between Hosts page polls.
+// A failed poll keeps the last table and logs once per change of error text.
+func (s *Server) switchPollLoop(ctx context.Context) {
+	lastErr := map[string]string{}
+	report := func(what string, err error, n int) {
+		if err != nil {
+			if msg := err.Error(); msg != lastErr[what] {
+				log.Printf("switch %s: %v", what, err)
+				lastErr[what] = msg
+			}
+			return
+		}
+		if lastErr[what] != "" {
+			log.Printf("switch %s: %d entries", what, n)
+		}
+		lastErr[what] = ""
 	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	m = s.switchLLDP(ctx)
-	s.mu.Lock()
-	s.lldp, s.lldpAt = m, time.Now()
-	s.mu.Unlock()
-	return m
+	for {
+		if m, err := s.switchLLDP(ctx); err == nil {
+			s.mu.Lock()
+			s.lldp, s.lldpAt = m, time.Now()
+			s.mu.Unlock()
+			report("lldp", nil, len(m))
+		} else {
+			report("lldp", err, 0)
+		}
+		if m, err := s.switchVLANs(ctx); err == nil {
+			s.mu.Lock()
+			s.vlans = m
+			s.mu.Unlock()
+			report("vlans", nil, len(m))
+		} else {
+			report("vlans", err, 0)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Minute):
+		}
+	}
+}
+
+// applyVLANs stamps each switch port with the VLAN the switch has it in,
+// and gives a host port with no fabric of its own the VLAN of the switch
+// port it is cabled to: the switch's view of the fabric. A host port whose
+// hand-set fabric differs from that VLAN keeps its own value so the
+// Topology can show the mismatch.
+func applyVLANs(t *api.Topology, vlans map[string]string) {
+	if len(vlans) == 0 {
+		return
+	}
+	for i := range t.Switches {
+		sw := &t.Switches[i]
+		for j := range sw.Ports {
+			p := &sw.Ports[j]
+			p.VLAN = vlans[strings.ToLower(sw.Name+"|"+p.Name)]
+		}
+	}
+	for i := range t.Hosts {
+		for j := range t.Hosts[i].Ports {
+			p := &t.Hosts[i].Ports[j]
+			if p.Fabric == "" && p.SwitchPort != "" {
+				p.Fabric = vlans[strings.ToLower(p.Switch+"|"+p.SwitchPort)]
+			}
+		}
+	}
 }
 
 // buildTopology joins hosts, their LLDP neighbours and the switch port
@@ -419,6 +682,10 @@ func (s *Server) topology(w http.ResponseWriter, r *http.Request) {
 	s.fillLLDP(r.Context(), hosts)
 	ports, source, err := s.switchPortStats(r.Context())
 	t := buildTopology(hosts, s.switchList(), ports, source, s.metrics.live, s.metrics.hostLive, s.hub.online)
+	s.mu.Lock()
+	vlans := s.vlans
+	s.mu.Unlock()
+	applyVLANs(&t, vlans)
 	if err != nil {
 		t.Warning = "switch counters unavailable: " + err.Error()
 	}
