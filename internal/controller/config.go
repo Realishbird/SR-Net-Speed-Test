@@ -23,9 +23,12 @@ type Config struct {
 	AdminUser          string `json:"admin_user"`
 	AdminPasswordHash  string `json:"admin_password_hash"`
 	InstallScriptURL   string `json:"install_script_url"`
+	GrafanaURL         string `json:"grafana_url,omitempty"` // shown in the UI; defaults to port 3000 on the same host
+	GnmicConfigPath    string `json:"gnmic_config_path"`
+	GrafanaDashDir     string `json:"grafana_dashboard_dir"`
 
-	// Switches are collected in Phase 2 (gNMI first, SNMP fallback). They are
-	// stored now so the deploy script can record them once.
+	// Switches to collect port counters from: gNMI through gnmic when GNMIUser
+	// is set, SNMP v1/v2c from the controller itself when SNMPCommunity is set.
 	Switches []SwitchConfig `json:"switches,omitempty"`
 }
 
@@ -51,6 +54,8 @@ func DefaultConfig() Config {
 		CACert:             "/etc/srnet/tls/ca.pem",
 		AdminUser:          "admin",
 		InstallScriptURL:   "https://raw.githubusercontent.com/Realishbird/SR-Net-Speed-Test/main/install.sh",
+		GnmicConfigPath:    "/etc/srnet/gnmic.yaml",
+		GrafanaDashDir:     "/var/lib/srnet/grafana",
 	}
 }
 

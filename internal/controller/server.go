@@ -48,6 +48,12 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	h := newHub()
 	m := newMetrics(cfg.VictoriaMetricsURL)
 	go m.writer(ctx)
+	go newSNMPCollector(cfg.Switches, m).loop(ctx)
+	if n, err := WriteGnmicConfig(cfg, cfg.GnmicConfigPath); err != nil {
+		log.Printf("gnmic config: %v", err)
+	} else if n > 0 {
+		log.Printf("gnmic config written for %d switch(es) to %s", n, cfg.GnmicConfigPath)
+	}
 	s := &Server{
 		cfg: cfg, store: store, hub: h, metrics: m, orch: newOrchestrator(store, h, m),
 		agentCache: map[string]int64{}, portCache: map[int64]map[string]portMeta{}, hostName: map[int64]string{},
@@ -61,6 +67,8 @@ func (s *Server) Close() { s.store.Close() }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
+	ui := uiHandler()
+	mux.HandleFunc("GET /{$}", s.admin(ui.ServeHTTP))
 	mux.HandleFunc("GET /ca.pem", func(w http.ResponseWriter, r *http.Request) { http.ServeFile(w, r, s.cfg.CACert) })
 
 	mux.HandleFunc("POST /api/v1/enroll", s.enroll)
@@ -252,7 +260,8 @@ func (s *Server) agentResult(w http.ResponseWriter, r *http.Request) {
 // Admin endpoints.
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"version": version.Version, "public_url": s.cfg.PublicURL, "time": time.Now()})
+	writeJSON(w, map[string]any{"version": version.Version, "public_url": s.cfg.PublicURL, "grafana_url": s.cfg.GrafanaURL, "time": time.Now(),
+		"switches": len(s.cfg.Switches)})
 }
 
 func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {

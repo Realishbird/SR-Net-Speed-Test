@@ -77,7 +77,10 @@ func TestScoreUsesCountersAndErrorDeltas(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Now().Add(-70 * time.Second)
-	ar := &activeRun{id: 1, spec: api.RunSpec{Test: "write", DurationSec: 60, PassPct: 90}, plans: plans, startAt: start}
+	for _, p := range plans {
+		p.startAt = start
+	}
+	ar := &activeRun{id: 1, spec: api.RunSpec{Test: "write", DurationSec: 60, PassPct: 90}, plans: plans, stages: stagesOf(plans)}
 	// One sample per second, as agents send during a run.
 	fill := func(portID int64, gbps float64) {
 		m.ring[portID] = nil
@@ -123,5 +126,93 @@ func TestFormatLabelsAndMetricNames(t *testing.T) {
 	}
 	if metricName("dom_tx_bias_ma") != "dom_tx_bias_ma" || metricName("bad-name.x") != "bad_name_x" {
 		t.Error("metric names not sanitized")
+	}
+}
+
+func TestPlanMeshSweepAndSerial(t *testing.T) {
+	hosts := lab()
+	spec := api.RunSpec{Test: "write", Mesh: true, Hosts: []string{"Dell 770AP", "Dell Spark 1", "Acer Spark"}, MsgSize: 65536}
+	if err := applyDefaults(&spec); err != nil {
+		t.Fatal(err)
+	}
+	plans, err := plan(hosts, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 770AP<->Spark1 and 770AP<->Acer share subnet 100; Spark1<->Acer too: 6 ordered pairs.
+	if len(plans) != 6 || len(stagesOf(plans)) != 1 {
+		t.Fatalf("mesh: %d legs, %d stages", len(plans), len(stagesOf(plans)))
+	}
+
+	sweep := api.RunSpec{Test: "write", Clients: []string{"Dell 770AP"}, Servers: []string{"tag:server"}, Sizes: []int{4096, 65536, 1048576}}
+	applyDefaults(&sweep)
+	plans, err = plan(hosts, sweep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := stagesOf(plans)
+	if len(plans) != 6 || len(st) != 3 || st[1][0].leg.MsgSize != 65536 || st[2][1].leg.MsgSize != 1048576 {
+		t.Errorf("sweep: %d legs, %d stages", len(plans), len(st))
+	}
+
+	serial := sweep
+	serial.Sizes, serial.Serial = nil, true
+	applyDefaults(&serial)
+	plans, _ = plan(hosts, serial)
+	if st := stagesOf(plans); len(st) != 2 || len(st[0]) != 1 || len(st[1]) != 1 {
+		t.Errorf("serial: %d stages", len(st))
+	}
+	// In a serial matrix each leg has its own stage, so even a shared client port is unshared per stage.
+	ar := &activeRun{spec: serial, plans: plans, stages: stagesOf(plans)}
+	if id, tx, nic, ok := counterSide(ar, plans[0]); !ok || tx || nic || id != 20 {
+		t.Errorf("counterSide = %d %v %v %v", id, tx, nic, ok)
+	}
+}
+
+func TestApplyDefaultsPerTest(t *testing.T) {
+	cases := map[string]struct {
+		size int
+		tool string
+	}{"write": {65536, api.ToolWriteBW}, "read_lat": {2, api.ToolReadLat}, "tcp": {131072, api.ToolIperf3}, "udp": {8192, api.ToolIperf3}}
+	for test, want := range cases {
+		s := api.RunSpec{Test: test}
+		if err := applyDefaults(&s); err != nil {
+			t.Fatal(err)
+		}
+		if s.MsgSize != want.size || api.Tests[s.Test] != want.tool {
+			t.Errorf("%s: size %d tool %s", test, s.MsgSize, api.Tests[s.Test])
+		}
+	}
+	bad := api.RunSpec{Test: "ping"}
+	if err := applyDefaults(&bad); err == nil {
+		t.Error("unknown test must be rejected")
+	}
+	bidirLat := api.RunSpec{Test: "write_lat", Bidir: true}
+	if err := applyDefaults(&bidirLat); err == nil {
+		t.Error("bidir latency must be rejected")
+	}
+}
+
+func TestScoreLatencyAndUDP(t *testing.T) {
+	o := &Orchestrator{metrics: newMetrics("")}
+	plans, _ := plan(lab(), api.RunSpec{Clients: []string{"Dell 770AP"}, Servers: []string{"Dell Spark 1"}})
+	for _, p := range plans {
+		p.startAt = time.Now().Add(-30 * time.Second)
+	}
+	ar := &activeRun{spec: api.RunSpec{Test: "write_lat", DurationSec: 20, MaxLatP99Us: 5}, plans: plans, stages: stagesOf(plans)}
+	plans[0].clientRes = &api.LegResult{Latency: &api.Latency{P99Us: 7.5}}
+	plans[0].serverRes = &api.LegResult{}
+	if _, v := o.score(ar); v != "fail" || !strings.Contains(plans[0].leg.Note, "p99 7.50") {
+		t.Errorf("latency verdict %s note %q", v, plans[0].leg.Note)
+	}
+	ar.spec = api.RunSpec{Test: "udp", DurationSec: 20, MaxLossPct: 1, PassPct: 90}
+	plans[0].clientRes = &api.LegResult{AvgGbps: 20, LossPct: 2.5}
+	if _, v := o.score(ar); v != "fail" || !strings.Contains(plans[0].leg.Note, "loss") {
+		t.Errorf("udp verdict %s note %q", v, plans[0].leg.Note)
+	}
+	ar.spec = api.RunSpec{Test: "tcp", DurationSec: 20, PassPct: 50}
+	plans[0].clientRes = &api.LegResult{AvgGbps: 150, Retransmits: 3}
+	if _, v := o.score(ar); v != "warn" {
+		t.Errorf("tcp retransmit verdict %s note %q", v, plans[0].leg.Note)
 	}
 }

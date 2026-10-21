@@ -2,11 +2,14 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Realishbird/SR-Net-Speed-Test/internal/api"
 )
 
 // ModuleDOM is the transceiver reading from `ethtool -m`.
@@ -157,4 +160,100 @@ func ParseEthtoolStats(out string) map[string]float64 {
 		stats[k] = f
 	}
 	return stats
+}
+
+// ParsePerftestLat parses the summary row of ib_*_lat:
+// #bytes #iterations t_min t_max t_typical t_avg t_stdev 99% 99.9%  (all µs).
+// Older perftest builds omit the stdev and percentile columns.
+func ParsePerftestLat(out string) (api.Latency, bool) {
+	var lat api.Latency
+	lines := strings.Split(out, "\n")
+	for i, line := range lines {
+		if !strings.Contains(line, "#bytes") || !strings.Contains(line, "t_min") {
+			continue
+		}
+		for _, row := range lines[i+1:] {
+			f := strings.Fields(row)
+			if len(f) < 5 {
+				continue
+			}
+			nums := make([]float64, 0, len(f))
+			for _, x := range f {
+				v, err := strconv.ParseFloat(x, 64)
+				if err != nil {
+					break
+				}
+				nums = append(nums, v)
+			}
+			if len(nums) < 5 {
+				continue
+			}
+			lat.MinUs, lat.MaxUs, lat.TypicalUs = nums[2], nums[3], nums[4]
+			if len(nums) > 5 {
+				lat.AvgUs = nums[5]
+			}
+			if len(nums) > 6 {
+				lat.StdevUs = nums[6]
+			}
+			if len(nums) > 7 {
+				lat.P99Us = nums[7]
+			}
+			if len(nums) > 8 {
+				lat.P999Us = nums[8]
+			}
+			return lat, true
+		}
+	}
+	return lat, false
+}
+
+// Iperf3Result is the end-of-run summary from `iperf3 --json`.
+type Iperf3Result struct {
+	Gbps        float64
+	Retransmits int64
+	LossPct     float64
+	JitterMs    float64
+}
+
+// ParseIperf3 reads the "end" block. For TCP the receiver's rate is the one
+// that matters; for UDP the single sum carries loss and jitter.
+func ParseIperf3(out string) (Iperf3Result, bool) {
+	var r Iperf3Result
+	start := strings.Index(out, "{")
+	if start < 0 {
+		return r, false
+	}
+	var doc struct {
+		Error string `json:"error"`
+		End   struct {
+			SumReceived *struct {
+				BitsPerSecond float64 `json:"bits_per_second"`
+			} `json:"sum_received"`
+			SumSent *struct {
+				BitsPerSecond float64 `json:"bits_per_second"`
+				Retransmits   int64   `json:"retransmits"`
+			} `json:"sum_sent"`
+			Sum *struct {
+				BitsPerSecond float64 `json:"bits_per_second"`
+				JitterMs      float64 `json:"jitter_ms"`
+				LostPercent   float64 `json:"lost_percent"`
+			} `json:"sum"`
+		} `json:"end"`
+	}
+	if err := json.Unmarshal([]byte(out[start:]), &doc); err != nil || doc.Error != "" {
+		return r, false
+	}
+	switch {
+	case doc.End.SumReceived != nil && doc.End.SumReceived.BitsPerSecond > 0:
+		r.Gbps = doc.End.SumReceived.BitsPerSecond / 1e9
+		if doc.End.SumSent != nil {
+			r.Retransmits = doc.End.SumSent.Retransmits
+		}
+	case doc.End.Sum != nil:
+		r.Gbps = doc.End.Sum.BitsPerSecond / 1e9
+		r.JitterMs, r.LossPct = doc.End.Sum.JitterMs, doc.End.Sum.LostPercent
+	default:
+		return r, false
+	}
+	return r, true
 }

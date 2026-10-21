@@ -33,6 +33,8 @@ type endpoint struct {
 type legPlan struct {
 	leg            api.Leg
 	client, server endpoint
+	stage          int
+	startAt        time.Time
 	tcpPort        int
 	serverTask     api.Task
 	clientTask     api.Task
@@ -42,11 +44,11 @@ type legPlan struct {
 }
 
 type activeRun struct {
-	id      int64
-	spec    api.RunSpec
-	plans   []*legPlan
-	startAt time.Time
-	cancel  context.CancelFunc
+	id     int64
+	spec   api.RunSpec
+	plans  []*legPlan // every leg, in order
+	stages [][]*legPlan
+	cancel context.CancelFunc
 }
 
 // Orchestrator turns run specs into agent tasks and collects the results.
@@ -73,21 +75,32 @@ var errorCounterKeys = map[string]bool{
 }
 
 func applyDefaults(s *api.RunSpec) error {
-	switch s.Test {
-	case "", "write":
+	if s.Test == "" {
 		s.Test = "write"
-	case "read":
-	default:
-		return fmt.Errorf("test must be write or read, not %q", s.Test)
+	}
+	if _, ok := api.Tests[s.Test]; !ok {
+		return fmt.Errorf("unknown test %q (write, read, send, write_lat, read_lat, send_lat, tcp, udp)", s.Test)
 	}
 	if s.DurationSec == 0 {
 		s.DurationSec = 60
 	}
 	if s.MsgSize == 0 {
-		s.MsgSize = 65536
+		switch {
+		case api.IsLatency(s.Test):
+			s.MsgSize = 2
+		case s.Test == "udp":
+			s.MsgSize = 8192
+		case s.Test == "tcp":
+			s.MsgSize = 131072
+		default:
+			s.MsgSize = 65536
+		}
 	}
 	if s.QPs == 0 {
 		s.QPs = 1
+	}
+	if s.Streams == 0 {
+		s.Streams = 1
 	}
 	if s.TOS == 0 {
 		s.TOS = 106
@@ -98,8 +111,19 @@ func applyDefaults(s *api.RunSpec) error {
 	if s.PassPct == 0 {
 		s.PassPct = 90
 	}
+	if s.MaxLossPct == 0 {
+		s.MaxLossPct = 1
+	}
 	if s.DurationSec < 5 || s.DurationSec > 24*3600 {
 		return errors.New("duration must be between 5 s and 24 h")
+	}
+	if s.Bidir && (api.IsLatency(s.Test) || s.Test == "udp") {
+		return errors.New("bidirectional applies to bandwidth tests only")
+	}
+	for _, sz := range s.Sizes {
+		if sz < 1 || sz > 1<<30 {
+			return fmt.Errorf("invalid sweep size %d", sz)
+		}
 	}
 	if s.Name == "" {
 		s.Name = fmt.Sprintf("%s %s", s.Test, time.Now().Format("2006-01-02 15:04"))
@@ -107,12 +131,7 @@ func applyDefaults(s *api.RunSpec) error {
 	return nil
 }
 
-func (o *Orchestrator) tool(spec api.RunSpec) string {
-	if spec.Test == "read" {
-		return api.ToolReadBW
-	}
-	return api.ToolWriteBW
-}
+func (o *Orchestrator) tool(spec api.RunSpec) string { return api.Tests[spec.Test] }
 
 // target is a selector match: a host, optionally narrowed to one port.
 type target struct {
@@ -244,7 +263,22 @@ func plan(hosts []hostRec, spec api.RunSpec) ([]*legPlan, error) {
 		}
 		return out, nil
 	}
-	if len(spec.Legs) > 0 {
+	if spec.Mesh {
+		hs, err := many(spec.Hosts)
+		if err != nil {
+			return nil, err
+		}
+		if len(hs) < 2 {
+			return nil, errors.New("a mesh needs at least two hosts")
+		}
+		for i := range hs {
+			for j := range hs {
+				if i != j && hs[i].host.ID != hs[j].host.ID {
+					pairs = append(pairs, pair{hs[i], hs[j]})
+				}
+			}
+		}
+	} else if len(spec.Legs) > 0 {
 		for _, l := range spec.Legs {
 			c, err := one(l.Client)
 			if err != nil {
@@ -284,10 +318,10 @@ func plan(hosts []hostRec, spec api.RunSpec) ([]*legPlan, error) {
 				pairs = append(pairs, pair{c, ss[0]})
 			}
 		default:
-			return nil, errors.New("several clients and several servers: use --pairs or explicit legs (full mesh comes in Phase 2)")
+			return nil, errors.New("several clients and several servers: use --pairs, --mesh, or explicit legs")
 		}
 	}
-	var plans []*legPlan
+	var base []*legPlan
 	for i, p := range pairs {
 		if p.c.host.ID == p.s.host.ID {
 			return nil, fmt.Errorf("leg %d: client and server are the same host (%s)", i+1, p.c.host.Name)
@@ -304,12 +338,47 @@ func plan(hosts []hostRec, spec api.RunSpec) ([]*legPlan, error) {
 		if se.ExpectedGbps > 0 && (exp == 0 || se.ExpectedGbps < exp) {
 			exp = se.ExpectedGbps
 		}
-		plans = append(plans, &legPlan{
+		base = append(base, &legPlan{
 			client: ce, server: se,
-			leg: api.Leg{Index: i, ClientHost: ce.Host, ClientIP: ce.IP, ServerHost: se.Host, ServerIP: se.IP, Fabric: fabric, ExpectedGbps: exp},
+			leg: api.Leg{ClientHost: ce.Host, ClientIP: ce.IP, ServerHost: se.Host, ServerIP: se.IP, Fabric: fabric, ExpectedGbps: exp},
 		})
 	}
+	// Expand a size sweep: every leg repeats at each size. Serial mode then
+	// puts every leg in its own stage; otherwise one stage per size.
+	sizes := spec.Sizes
+	if len(sizes) == 0 {
+		sizes = []int{spec.MsgSize}
+	}
+	var plans []*legPlan
+	for si, sz := range sizes {
+		for _, b := range base {
+			lp := *b
+			lp.leg.MsgSize = sz
+			lp.leg.Index = len(plans)
+			if spec.Serial {
+				lp.stage = len(plans)
+			} else {
+				lp.stage = si
+			}
+			lp.leg.Stage = lp.stage
+			plans = append(plans, &lp)
+		}
+	}
+	if len(plans) > 512 {
+		return nil, fmt.Errorf("%d legs is too many for one run (max 512)", len(plans))
+	}
 	return plans, nil
+}
+
+func stagesOf(plans []*legPlan) [][]*legPlan {
+	var stages [][]*legPlan
+	for _, p := range plans {
+		for len(stages) <= p.stage {
+			stages = append(stages, nil)
+		}
+		stages[p.stage] = append(stages[p.stage], p)
+	}
+	return stages
 }
 
 // Start validates and queues a run, then executes it in the background.
@@ -360,7 +429,7 @@ func (o *Orchestrator) Start(ctx context.Context, spec api.RunSpec) (int64, erro
 		p.tcpPort = o.allocTCP(p.server.AgentID)
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
-	ar := &activeRun{id: runID, spec: spec, plans: plans, cancel: cancel}
+	ar := &activeRun{id: runID, spec: spec, plans: plans, stages: stagesOf(plans), cancel: cancel}
 	o.active[runID] = ar
 	o.mu.Unlock()
 
@@ -423,25 +492,58 @@ func (o *Orchestrator) sendCancels(ar *activeRun) {
 func (o *Orchestrator) execute(ctx context.Context, ar *activeRun) {
 	defer o.release(ar)
 	bg := context.Background()
-	fail := func(status, msg string) {
-		o.sendCancels(ar)
-		log.Printf("run %d %s: %s", ar.id, status, msg)
-		o.store.FinishRun(bg, ar.id, status, "fail", msg, api.RunSummary{})
-	}
 	o.store.SetRunStatus(bg, ar.id, "running")
+	status, errMsg := "done", ""
+	for i, stage := range ar.stages {
+		if err := o.runStage(ctx, ar, stage); err != nil {
+			if ctx.Err() != nil {
+				status, errMsg = "canceled", "canceled by operator"
+			} else {
+				status, errMsg = "failed", fmt.Sprintf("stage %d of %d: %v", i+1, len(ar.stages), err)
+			}
+			break
+		}
+		if len(ar.stages) > 1 && i < len(ar.stages)-1 {
+			select {
+			case <-ctx.Done():
+				status, errMsg = "canceled", "canceled by operator"
+			case <-time.After(2 * time.Second): // let servers release their ports
+			}
+			if status != "done" {
+				break
+			}
+		}
+	}
+	o.sendCancels(ar) // stops any stragglers; a no-op on agents with nothing running
+	sum, verdict := o.score(ar)
+	if status != "done" {
+		verdict = "fail"
+	}
+	for _, p := range ar.plans {
+		o.store.SaveLeg(bg, p.leg, p.clientRes, p.serverRes)
+	}
+	o.store.FinishRun(bg, ar.id, status, verdict, errMsg, sum)
+	log.Printf("run %d %s: %s, %.1f Gbps aggregate", ar.id, status, verdict, sum.ToolGbps)
+}
+
+// runStage starts the servers of one stage, then its clients at a shared time,
+// and waits for their results. Legs that never report keep nil results.
+func (o *Orchestrator) runStage(ctx context.Context, ar *activeRun, plans []*legPlan) error {
 	spec := ar.spec
-	tool := o.tool(spec)
-	inbox := make(chan msg, len(ar.plans)*8)
+	inbox := make(chan msg, len(plans)*8)
 	byTask := map[string]*legPlan{}
 	var taskIDs []string
 	defer func() { o.hub.forget(taskIDs...) }()
 
-	base := api.Task{RunID: ar.id, Tool: tool, DurationSec: spec.DurationSec, MsgSize: spec.MsgSize, QPs: spec.QPs, TOS: spec.TOS, MTU: spec.MTU}
+	base := api.Task{RunID: ar.id, Tool: o.tool(spec), DurationSec: spec.DurationSec, QPs: spec.QPs, TOS: spec.TOS, MTU: spec.MTU, Bidir: spec.Bidir, Streams: spec.Streams}
+	if api.IsIP(spec.Test) {
+		base.Protocol = spec.Test
+	}
 
 	// 1. Start every server and wait until all are listening.
-	for _, p := range ar.plans {
+	for _, p := range plans {
 		t := base
-		t.ID, t.Kind, t.LegID = newID(), api.TaskServer, p.leg.ID
+		t.ID, t.Kind, t.LegID, t.MsgSize = newID(), api.TaskServer, p.leg.ID, p.leg.MsgSize
 		t.RdmaDev, t.PortNum, t.Netdev, t.LocalIP, t.PeerIP, t.TCPPort = p.server.RdmaDev, p.server.PortNum, p.server.Netdev, p.server.IP, p.client.IP, p.tcpPort
 		p.serverTask = t
 		byTask[t.ID] = p
@@ -449,14 +551,14 @@ func (o *Orchestrator) execute(ctx context.Context, ar *activeRun) {
 		o.hub.send(p.server.AgentID, t, inbox)
 	}
 	readyBy := time.After(30 * time.Second)
-	for waiting := len(ar.plans); waiting > 0; {
+	for waiting := len(plans); waiting > 0; {
 		select {
 		case <-ctx.Done():
-			fail("canceled", "canceled by operator")
-			return
+			o.sendCancels(ar)
+			return ctx.Err()
 		case <-readyBy:
-			fail("failed", fmt.Sprintf("%d server(s) did not report ready within 30 s", waiting))
-			return
+			o.sendCancels(ar)
+			return fmt.Errorf("%d server(s) did not report ready within 30 s", waiting)
 		case m := <-inbox:
 			p := byTask[m.taskID]
 			if m.event != nil && m.event.Type == api.EventServerReady && !p.ready {
@@ -470,17 +572,18 @@ func (o *Orchestrator) execute(ctx context.Context, ar *activeRun) {
 				} else if m.result.Error != "" {
 					msg = m.result.Error
 				}
-				fail("failed", fmt.Sprintf("server %s %s: %s", p.server.Host, p.server.IP, msg))
-				return
+				o.sendCancels(ar)
+				return fmt.Errorf("server %s %s: %s", p.server.Host, p.server.IP, msg)
 			}
 		}
 	}
 
 	// 2. Start every client at one shared time so aggregate load is simultaneous.
-	ar.startAt = time.Now().Add(3 * time.Second)
-	for _, p := range ar.plans {
+	startAt := time.Now().Add(3 * time.Second)
+	for _, p := range plans {
+		p.startAt = startAt
 		t := base
-		t.ID, t.Kind, t.LegID, t.StartAt = newID(), api.TaskClient, p.leg.ID, ar.startAt
+		t.ID, t.Kind, t.LegID, t.MsgSize, t.StartAt = newID(), api.TaskClient, p.leg.ID, p.leg.MsgSize, startAt
 		t.RdmaDev, t.PortNum, t.Netdev, t.LocalIP, t.PeerIP, t.TCPPort = p.client.RdmaDev, p.client.PortNum, p.client.Netdev, p.client.IP, p.server.IP, p.tcpPort
 		p.clientTask = t
 		byTask[t.ID] = p
@@ -490,14 +593,14 @@ func (o *Orchestrator) execute(ctx context.Context, ar *activeRun) {
 
 	// 3. Collect results. Servers normally exit with their client; any still
 	// running 15 s after the last client are canceled.
-	deadline := time.After(time.Until(ar.startAt) + time.Duration(spec.DurationSec)*time.Second + 90*time.Second)
+	deadline := time.After(time.Until(startAt) + time.Duration(spec.DurationSec)*time.Second + 90*time.Second)
 	var grace <-chan time.Time
-	canceled := false
-	for !allDone(ar.plans) {
+	var err error
+	for !allDone(plans) {
 		select {
 		case <-ctx.Done():
-			if !canceled {
-				canceled = true
+			if err == nil {
+				err = ctx.Err()
 				o.sendCancels(ar)
 				grace = time.After(15 * time.Second)
 			}
@@ -506,7 +609,7 @@ func (o *Orchestrator) execute(ctx context.Context, ar *activeRun) {
 			o.sendCancels(ar)
 			grace = time.After(0)
 		case <-grace:
-			goto done
+			return err
 		case m := <-inbox:
 			if m.result == nil {
 				continue
@@ -517,27 +620,12 @@ func (o *Orchestrator) execute(ctx context.Context, ar *activeRun) {
 			} else {
 				p.serverRes = m.result
 			}
-			if grace == nil && allClientsDone(ar.plans) {
+			if grace == nil && allClientsDone(plans) {
 				grace = time.After(15 * time.Second)
 			}
 		}
 	}
-done:
-	o.sendCancels(ar) // stops any stragglers; a no-op on agents with nothing running
-	status := "done"
-	if canceled {
-		status = "canceled"
-	}
-	sum, verdict := o.score(ar)
-	for _, p := range ar.plans {
-		o.store.SaveLeg(bg, p.leg, p.clientRes, p.serverRes)
-	}
-	errMsg := ""
-	if canceled {
-		errMsg = "canceled by operator"
-	}
-	o.store.FinishRun(bg, ar.id, status, verdict, errMsg, sum)
-	log.Printf("run %d %s: %s, %.1f Gbps aggregate", ar.id, status, verdict, sum.ToolGbps)
+	return err
 }
 
 func allDone(ps []*legPlan) bool {
@@ -558,30 +646,35 @@ func allClientsDone(ps []*legPlan) bool {
 	return true
 }
 
-// counterSide picks the port whose hardware counter measures one leg alone:
-// the server port in a fan-out, the client port in a fan-in.
-func counterSide(ps []*legPlan, p *legPlan, test string) (portID int64, tx bool, ok bool) {
+// counterSide picks the port whose byte counter measures one leg alone within
+// its stage: the server port in a fan-out, the client port in a fan-in. tx is
+// the direction data flows on that port; nic selects netdev counters for IP tests.
+func counterSide(ar *activeRun, p *legPlan) (portID int64, tx, nic, ok bool) {
 	uses := map[int64]int{}
-	for _, q := range ps {
+	for _, q := range ar.stages[p.stage] {
 		uses[q.client.PortID]++
 		uses[q.server.PortID]++
 	}
-	// write: data flows client -> server. read: server -> client.
+	nic = api.IsIP(ar.spec.Test)
+	// write/send/tcp/udp: data flows client -> server. read: server -> client.
+	serverTx := ar.spec.Test == "read" || ar.spec.Test == "read_lat"
+	if ar.spec.Bidir {
+		serverTx = false // measure the receive side on either end
+	}
 	if uses[p.server.PortID] == 1 {
-		return p.server.PortID, test == "read", true
+		return p.server.PortID, serverTx, nic, true
 	}
 	if uses[p.client.PortID] == 1 {
-		return p.client.PortID, test == "write", true
+		return p.client.PortID, !serverTx, nic, true
 	}
-	return 0, false, false
+	return 0, false, nic, false
 }
 
 func (o *Orchestrator) score(ar *activeRun) (api.RunSummary, string) {
 	sum := api.RunSummary{ByFabric: map[string]float64{}}
-	from := ar.startAt.Add(2 * time.Second)
-	to := ar.startAt.Add(time.Duration(ar.spec.DurationSec-1) * time.Second)
 	rank := map[string]int{"pass": 0, "warn": 1, "fail": 2}
 	worst := "pass"
+	lat := api.IsLatency(ar.spec.Test)
 	for _, p := range ar.plans {
 		l := &p.leg
 		l.ErrorDeltas = map[string]int64{}
@@ -593,16 +686,20 @@ func (o *Orchestrator) score(ar *activeRun) (api.RunSummary, string) {
 				l.ErrorDeltas[k] += v
 			}
 		}
-		if p.clientRes != nil {
-			l.ToolGbps = p.clientRes.AvgGbps
+		if c := p.clientRes; c != nil {
+			l.ToolGbps, l.Latency, l.Retransmits, l.LossPct, l.JitterMs = c.AvgGbps, c.Latency, c.Retransmits, c.LossPct, c.JitterMs
 		}
 		if l.ToolGbps == 0 && p.serverRes != nil {
 			l.ToolGbps = p.serverRes.AvgGbps
 		}
-		if id, tx, ok := counterSide(ar.plans, p, ar.spec.Test); ok {
-			l.CounterGbps = o.metrics.counterGbps(id, from, to, tx)
-		} else {
-			l.Note = "both ports shared with other legs; no per-leg counter rate"
+		if !lat && !p.startAt.IsZero() {
+			from := p.startAt.Add(2 * time.Second)
+			to := p.startAt.Add(time.Duration(ar.spec.DurationSec-1) * time.Second)
+			if id, tx, nic, ok := counterSide(ar, p); ok {
+				l.CounterGbps = o.metrics.counterGbps(id, from, to, tx, nic)
+			} else {
+				l.Note = "both ports shared with other legs; no per-leg counter rate"
+			}
 		}
 		l.Verdict = "pass"
 		measured := l.CounterGbps
@@ -614,7 +711,13 @@ func (o *Orchestrator) score(ar *activeRun) (api.RunSummary, string) {
 			l.Verdict, l.Note = "fail", "no result from client"
 		case p.clientRes.Error != "":
 			l.Verdict, l.Note = "fail", p.clientRes.Error
-		case l.ExpectedGbps > 0 && measured < ar.spec.PassPct/100*l.ExpectedGbps:
+		case lat && l.Latency == nil:
+			l.Verdict, l.Note = "fail", "no latency result"
+		case lat && ar.spec.MaxLatP99Us > 0 && l.Latency.P99Us > ar.spec.MaxLatP99Us:
+			l.Verdict, l.Note = "fail", fmt.Sprintf("p99 %.2f µs is above %.2f µs", l.Latency.P99Us, ar.spec.MaxLatP99Us)
+		case ar.spec.Test == "udp" && l.LossPct > ar.spec.MaxLossPct:
+			l.Verdict, l.Note = "fail", fmt.Sprintf("%.2f%% loss is above %.2f%%", l.LossPct, ar.spec.MaxLossPct)
+		case !lat && ar.spec.Test != "udp" && l.ExpectedGbps > 0 && measured < ar.spec.PassPct/100*l.ExpectedGbps:
 			l.Verdict = "fail"
 			l.Note = fmt.Sprintf("%.1f Gbps is below %.0f%% of %.0f Gbps", measured, ar.spec.PassPct, l.ExpectedGbps)
 		}
@@ -628,18 +731,24 @@ func (o *Orchestrator) score(ar *activeRun) (api.RunSummary, string) {
 			if len(bad) > 0 {
 				sort.Strings(bad)
 				l.Verdict, l.Note = "warn", "error counters grew: "+strings.Join(bad, ", ")
+			} else if ar.spec.Test == "tcp" && l.Retransmits > 0 {
+				l.Verdict, l.Note = "warn", fmt.Sprintf("%d TCP retransmits", l.Retransmits)
 			}
 		}
 		if rank[l.Verdict] > rank[worst] {
 			worst = l.Verdict
 		}
-		sum.ToolGbps += l.ToolGbps
-		sum.CounterGbps += l.CounterGbps
-		f := l.Fabric
-		if f == "" {
-			f = "unassigned"
+		// Aggregates sum the legs of the last stage: in a sweep that is the
+		// largest size, and in a serial matrix it is the last link alone.
+		if p.stage == len(ar.stages)-1 {
+			sum.ToolGbps += l.ToolGbps
+			sum.CounterGbps += l.CounterGbps
+			f := l.Fabric
+			if f == "" {
+				f = "unassigned"
+			}
+			sum.ByFabric[f] += l.ToolGbps
 		}
-		sum.ByFabric[f] += l.ToolGbps
 	}
 	return sum, worst
 }
@@ -662,8 +771,14 @@ func (o *Orchestrator) Live(r *api.Run) {
 		if p == nil {
 			continue
 		}
-		if id, tx, ok := counterSide(ar.plans, p, ar.spec.Test); ok {
+		if p.startAt.IsZero() || (p.clientRes != nil && p.serverRes != nil) {
+			continue // not in the running stage
+		}
+		if id, tx, nic, ok := counterSide(ar, p); ok {
 			t, rx := o.metrics.live(id)
+			if nic {
+				t, rx = o.metrics.liveNIC(id)
+			}
 			if tx {
 				r.Legs[i].LiveGbps = t
 			} else {

@@ -162,8 +162,13 @@ cat <<EOF
    Admin login:   admin / $PASSWORD$( [ "$GENERATED" -eq 1 ] && echo "   (generated; saved in CT at /etc/srnet/admin-password)")
    CA sha256:     $FP
 
+ Web UI:        https://$CT_IP:8443   (admin login above)
+
  Install the agent on each host with a fresh token:
    pct exec $CTID -- srnet token
+
+ Add your SONiC switch so its port counters land next to the host counters:
+   pct exec $CTID -- srnet-controller switch --name z9864f --address <switch ip> --snmp-community <ro community> --gnmi-user <user> --gnmi-password <pw>
 
  Or from inside the container: pct enter $CTID, then 'srnet hosts', 'srnet run --help'.
 ================================================================================

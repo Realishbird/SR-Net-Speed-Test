@@ -27,13 +27,15 @@ type portMeta struct {
 }
 
 type bytesPoint struct {
-	t      time.Time
-	tx, rx float64
+	t            time.Time
+	tx, rx       float64 // RDMA port counters, bytes
+	nicTx, nicRx float64 // netdev counters, bytes (IP traffic)
 }
 
 type liveRate struct {
-	t      time.Time
-	tx, rx float64 // Gbps
+	t            time.Time
+	tx, rx       float64 // Gbps from RDMA counters
+	nicTx, nicRx float64 // Gbps from netdev counters
 }
 
 // metrics keeps recent per-port byte counters in memory (for live views and
@@ -113,19 +115,26 @@ func (m *metrics) track(portID int64, s api.Sample) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if okT && okR {
-		r := append(m.ring[portID], bytesPoint{s.Time, tx, rx})
+		pt := bytesPoint{t: s.Time, tx: tx, rx: rx, nicTx: s.Values["nic_tx_bytes"], nicRx: s.Values["nic_rx_bytes"]}
+		r := m.ring[portID]
+		lr := liveRate{t: s.Time, tx: s.Values["rdma_tx_gbps"], rx: s.Values["rdma_rx_gbps"]}
+		if n := len(r); n > 0 {
+			if dt := s.Time.Sub(r[n-1].t).Seconds(); dt > 0 && pt.nicTx >= r[n-1].nicTx && pt.nicRx >= r[n-1].nicRx {
+				lr.nicTx = (pt.nicTx - r[n-1].nicTx) * 8 / dt / 1e9
+				lr.nicRx = (pt.nicRx - r[n-1].nicRx) * 8 / dt / 1e9
+			}
+		}
+		r = append(r, pt)
 		cut := 0
 		for cut < len(r) && time.Since(r[cut].t) > ringAge {
 			cut++
 		}
 		m.ring[portID] = r[cut:]
-	}
-	if g, ok := s.Values["rdma_tx_gbps"]; ok {
-		m.latest[portID] = liveRate{s.Time, g, s.Values["rdma_rx_gbps"]}
+		m.latest[portID] = lr
 	}
 }
 
-// live returns the most recent rate on a port, or 0 if it is stale.
+// live returns the most recent RDMA rate on a port, or 0 if it is stale.
 func (m *metrics) live(portID int64) (tx, rx float64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -136,9 +145,21 @@ func (m *metrics) live(portID int64) (tx, rx float64) {
 	return r.tx, r.rx
 }
 
+// liveNIC is live for the netdev (IP) counters.
+func (m *metrics) liveNIC(portID int64) (tx, rx float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.latest[portID]
+	if !ok || time.Since(r.t) > 20*time.Second {
+		return 0, 0
+	}
+	return r.nicTx, r.nicRx
+}
+
 // counterGbps is the average rate on a port between from and to, from the
-// hardware byte counters. tx selects the transmit direction.
-func (m *metrics) counterGbps(portID int64, from, to time.Time, tx bool) float64 {
+// byte counters. tx selects the transmit direction; nic selects the netdev
+// counters (IP traffic) instead of the RDMA port counters.
+func (m *metrics) counterGbps(portID int64, from, to time.Time, tx, nic bool) float64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var a, b *bytesPoint
@@ -158,14 +179,33 @@ func (m *metrics) counterGbps(portID int64, from, to time.Time, tx bool) float64
 	if dt < 1 {
 		return 0
 	}
-	d := b.rx - a.rx
-	if tx {
+	var d float64
+	switch {
+	case nic && tx:
+		d = b.nicTx - a.nicTx
+	case nic:
+		d = b.nicRx - a.nicRx
+	case tx:
 		d = b.tx - a.tx
+	default:
+		d = b.rx - a.rx
 	}
 	if d < 0 {
 		return 0
 	}
 	return d * 8 / dt / 1e9
+}
+
+// push queues already-formatted Prometheus lines (switch collectors use it).
+func (m *metrics) push(lines []byte) {
+	if m.vmURL == "" || len(lines) == 0 {
+		return
+	}
+	select {
+	case m.out <- lines:
+	default:
+		log.Printf("metrics: VictoriaMetrics writer is behind; dropped %d bytes", len(lines))
+	}
 }
 
 // writer posts batches to VictoriaMetrics' Prometheus import endpoint.

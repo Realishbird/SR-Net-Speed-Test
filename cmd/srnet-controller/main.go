@@ -56,8 +56,52 @@ func main() {
 		if err := cfg.Save(*cfgPath); err != nil {
 			log.Fatal(err)
 		}
+		if err := writeDashboards(cfg); err != nil {
+			log.Printf("grafana dashboards: %v", err)
+		}
 		fp, _ := controller.CAFingerprint(cfg.CACert)
 		fmt.Printf("config written to %s\nCA fingerprint (sha256): %s\n", *cfgPath, fp)
+	case "switch":
+		// srnet-controller switch add --name sw1 --address 10.0.0.2 --snmp-community public --gnmi-user admin --gnmi-password x --gnmi-tls
+		name := fs.String("name", "", "switch name")
+		addr := fs.String("address", "", "management IP or host")
+		remove := fs.Bool("remove", false, "remove the named switch")
+		snmpVer := fs.String("snmp-version", "2c", "1 or 2c")
+		community := fs.String("snmp-community", "", "read-only community")
+		gnmiUser := fs.String("gnmi-user", "", "gNMI username")
+		gnmiPass := fs.String("gnmi-password", "", "gNMI password")
+		gnmiPort := fs.Int("gnmi-port", 8080, "gNMI port")
+		gnmiTLS := fs.Bool("gnmi-tls", true, "gNMI over TLS (certificate not verified)")
+		fs.Parse(args)
+		if *name == "" {
+			log.Fatal("--name is required")
+		}
+		cfg, err := controller.LoadConfig(*cfgPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		var kept []controller.SwitchConfig
+		for _, sw := range cfg.Switches {
+			if sw.Name != *name {
+				kept = append(kept, sw)
+			}
+		}
+		if !*remove {
+			if *addr == "" {
+				log.Fatal("--address is required")
+			}
+			kept = append(kept, controller.SwitchConfig{Name: *name, Address: *addr, SNMPVersion: *snmpVer, SNMPCommunity: *community,
+				GNMIPort: *gnmiPort, GNMIUser: *gnmiUser, GNMIPassword: *gnmiPass, GNMITLS: *gnmiTLS})
+		}
+		cfg.Switches = kept
+		if err := cfg.Save(*cfgPath); err != nil {
+			log.Fatal(err)
+		}
+		n, err := controller.WriteGnmicConfig(cfg, cfg.GnmicConfigPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("%d switch(es) configured, %d with gNMI; restart srnet-controller and gnmic to apply\n", len(kept), n)
 	case "passwd":
 		password := fs.String("admin-password-file", "", "file holding the new admin password; prompts when empty")
 		fs.Parse(args)
@@ -106,6 +150,23 @@ func main() {
 	}
 }
 
+// writeDashboards drops the bundled Grafana dashboards where provisioning picks them up.
+func writeDashboards(cfg controller.Config) error {
+	dash, err := controller.GrafanaDashboards()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(cfg.GrafanaDashDir, 0o755); err != nil {
+		return err
+	}
+	for name, b := range dash {
+		if err := os.WriteFile(cfg.GrafanaDashDir+"/"+name, b, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func setPassword(cfg *controller.Config, file string) error {
 	var pw string
 	if file != "" {
@@ -133,9 +194,10 @@ func setPassword(cfg *controller.Config, file string) error {
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage: srnet-controller <command> [--config /etc/srnet/controller.json]
 
-  init     write the config, TLS certificates and admin password
+  init     write the config, TLS certificates, admin password and Grafana dashboards
   serve    run the controller (systemd starts this)
   passwd   change the admin password
+  switch   add or remove a switch to collect from (--name, --address, --snmp-community, --gnmi-user ...)
   version  print the version`)
 	os.Exit(2)
 }

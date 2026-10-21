@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Realishbird/SR-Net-Speed-Test/internal/api"
@@ -102,7 +103,7 @@ func TestBuildCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "ib_write_bw -d mlx5_0 -R -T 106 -p 18515 -m 4096 -s 65536 -q 1 -D 60 -F --report_gbits 172.27.100.10"
+	want := "ib_write_bw -d mlx5_0 -R -T 106 -p 18515 -m 4096 -s 65536 -D 60 -F -q 1 --report_gbits 172.27.100.10"
 	if got := join(args); got != want {
 		t.Errorf("got  %s\nwant %s", got, want)
 	}
@@ -140,4 +141,82 @@ func join(a []string) string {
 		s += x
 	}
 	return s
+}
+
+func TestBuildCommandOtherTools(t *testing.T) {
+	base := api.Task{Kind: api.TaskClient, RdmaDev: "mlx5_0", LocalIP: "172.27.100.1", PeerIP: "172.27.100.10", TCPPort: 18516, DurationSec: 30, MsgSize: 2, QPs: 1, TOS: 106, MTU: 4096}
+	lat := base
+	lat.Tool = api.ToolWriteLat
+	args, err := BuildCommand(lat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := join(args); got != "ib_write_lat -d mlx5_0 -R -T 106 -p 18516 -m 4096 -s 2 -D 30 -F 172.27.100.10" {
+		t.Errorf("lat: %s", got)
+	}
+	bidir := base
+	bidir.Tool, bidir.Bidir = api.ToolSendBW, true
+	args, _ = BuildCommand(bidir)
+	if got := join(args); !strings.Contains(got, " -b ") {
+		t.Errorf("bidir flag missing: %s", got)
+	}
+	ip := base
+	ip.Tool, ip.Streams, ip.Protocol, ip.MsgSize = api.ToolIperf3, 8, "udp", 65507
+	args, err = BuildCommand(ip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := join(args); got != "iperf3 --json -p 18516 -B 172.27.100.1 -c 172.27.100.10 -t 30 -P 8 -l 65507 -S 106 -u -b 0" {
+		t.Errorf("iperf3 client: %s", got)
+	}
+	ip.Kind = api.TaskServer
+	args, _ = BuildCommand(ip)
+	if got := join(args); got != "iperf3 --json -p 18516 -B 172.27.100.1 -s -1" {
+		t.Errorf("iperf3 server: %s", got)
+	}
+}
+
+const latOut = `---------------------------------------------------------------------------------------
+                    RDMA_Write Latency Test
+---------------------------------------------------------------------------------------
+ #bytes #iterations    t_min[usec]    t_max[usec]  t_typical[usec]    t_avg[usec]    t_stdev[usec]   99% percentile[usec]   99.9% percentile[usec]
+ 2       1000000          1.63           27.11          1.72              1.74            0.09            2.05                    4.31
+---------------------------------------------------------------------------------------
+`
+
+func TestParsePerftestLat(t *testing.T) {
+	lat, ok := ParsePerftestLat(latOut)
+	if !ok {
+		t.Fatal("expected a row")
+	}
+	if lat.MinUs != 1.63 || lat.TypicalUs != 1.72 || lat.P99Us != 2.05 || lat.P999Us != 4.31 {
+		t.Errorf("lat = %+v", lat)
+	}
+	if _, ok := ParsePerftestLat("Failed to connect\n"); ok {
+		t.Error("error output must not parse")
+	}
+}
+
+func TestParseIperf3(t *testing.T) {
+	tcp := `{"end":{"sum_sent":{"bits_per_second":9.4e10,"retransmits":17},"sum_received":{"bits_per_second":9.38e10}}}`
+	r, ok := ParseIperf3("some banner\n" + tcp)
+	if !ok || r.Gbps < 93.7 || r.Gbps > 93.9 || r.Retransmits != 17 {
+		t.Errorf("tcp = %+v ok=%v", r, ok)
+	}
+	udp := `{"end":{"sum":{"bits_per_second":2.5e10,"jitter_ms":0.012,"lost_percent":0.4}}}`
+	r, ok = ParseIperf3(udp)
+	if !ok || r.Gbps != 25 || r.LossPct != 0.4 || r.JitterMs != 0.012 {
+		t.Errorf("udp = %+v ok=%v", r, ok)
+	}
+	if _, ok := ParseIperf3(`{"error":"unable to connect to server"}`); ok {
+		t.Error("iperf3 error must not parse as a result")
+	}
+}
+
+func TestParseLLDP(t *testing.T) {
+	out := "lldp.enp1s0f0np0.via=LLDP\nlldp.enp1s0f0np0.chassis.name=sonic-z9864\nlldp.enp1s0f0np0.port.ifname=Ethernet64\nlldp.enp1s0f0np0.port.descr=Ethernet64\nlldp.eno1.chassis.name=mgmt-sw\nlldp.eno1.port.ifname=ge-0/0/3\n"
+	n := ParseLLDP(out)
+	if n["enp1s0f0np0"] != [2]string{"sonic-z9864", "Ethernet64"} || n["eno1"][1] != "ge-0/0/3" {
+		t.Errorf("lldp = %v", n)
+	}
 }
