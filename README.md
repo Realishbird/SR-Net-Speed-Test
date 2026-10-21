@@ -33,7 +33,7 @@ The web UI at `https://<lxc ip>:8443` (admin login) covers hosts and naming, lau
 Get a one-time install command from the controller:
 
 ```bash
-pct exec <CTID> -- srnet token
+pct exec <CTID> -- /usr/local/bin/srnet token
 ```
 
 It prints a line like this, valid for one hour, to paste on the host:
