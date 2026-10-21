@@ -134,20 +134,11 @@ getent passwd srnet >/dev/null || useradd --system --gid srnet --home-dir /var/l
 install -d -m 0750 -o srnet -g srnet /etc/srnet /var/lib/srnet /var/lib/srnet/bin
 rm -f /var/lib/srnet/bin/srnet-agent /var/lib/srnet/bin/srnet-agent.next /var/lib/srnet/bin/srnet-agent.prev /var/lib/srnet/bin/trial
 
-# ethtool -m needs root on most drivers; allow exactly that command and nothing else.
-cat > /etc/sudoers.d/srnet-ethtool <<'EOF'
-srnet ALL=(root) NOPASSWD: /usr/sbin/ethtool -m *
-EOF
-chmod 0440 /etc/sudoers.d/srnet-ethtool
-visudo -cf /etc/sudoers.d/srnet-ethtool >/dev/null || die "generated sudoers rule failed validation"
-
-# lldpcli is setuid _lldpd and only group adm may run it, so the agent could
-# never read its switch neighbours. Allow exactly the read-only query.
-cat > /etc/sudoers.d/srnet-lldp <<'EOF'
-srnet ALL=(root) NOPASSWD: /usr/sbin/lldpctl -f keyvalue
-EOF
-chmod 0440 /etc/sudoers.d/srnet-lldp
-visudo -cf /etc/sudoers.d/srnet-lldp >/dev/null || die "generated sudoers rule failed validation"
+# Earlier versions wrote sudo rules for ethtool -m and lldpctl. They never
+# worked (sudo cannot change user under the unit's capability bounding set)
+# and only filled auth.log; CAP_NET_ADMIN covers ethtool -m and group adm
+# covers lldpctl, so the rules go.
+rm -f /etc/sudoers.d/srnet-ethtool /etc/sudoers.d/srnet-lldp
 
 cat > /etc/systemd/system/srnet-agent.service <<'EOF'
 [Unit]

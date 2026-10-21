@@ -204,25 +204,7 @@ func (s *Server) switchPortStats(ctx context.Context) (map[string]*api.TopoSwitc
 // an unknown chassis name is taken to be that switch.
 func buildTopology(hosts []hostRec, switches []SwitchConfig, ports map[string]*api.TopoSwitchPort, source map[string]string, live func(portID int64) (tx, rx float64), hostLive func(host string) (api.HostStats, bool), online func(agentID int64) bool) api.Topology {
 	t := api.Topology{At: time.Now(), Switches: []api.TopoSwitch{}, Hosts: []api.TopoHost{}, Runs: []api.TopoRun{}}
-	resolveSwitch := func(chassis string) string {
-		for _, sw := range switches {
-			if strings.EqualFold(sw.Name, chassis) || strings.EqualFold(sw.Address, chassis) {
-				return sw.Name
-			}
-		}
-		// lldpd reports the switch's hostname; SONiC's is often the model or
-		// a site name, so accept a prefix match either way before giving up.
-		for _, sw := range switches {
-			a, b := strings.ToLower(sw.Name), strings.ToLower(chassis)
-			if a != "" && b != "" && (strings.HasPrefix(a, b) || strings.HasPrefix(b, a)) {
-				return sw.Name
-			}
-		}
-		if len(switches) == 1 && chassis != "" {
-			return switches[0].Name
-		}
-		return ""
-	}
+	resolveSwitch := func(chassis string) string { return resolveSwitchName(switches, chassis) }
 	used := map[string]bool{}
 	for _, h := range hosts {
 		th := api.TopoHost{ID: h.ID, Name: h.Name, Hostname: h.Hostname, Tags: h.Tags, Online: online(h.ID), Ports: []api.TopoHostPort{}}

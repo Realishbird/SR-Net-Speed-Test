@@ -24,6 +24,7 @@ type portMeta struct {
 	Netdev  string
 	Label   string
 	Fabric  string
+	HasIP   bool // an address is configured, so the port is meant to be in use
 }
 
 type bytesPoint struct {

@@ -43,6 +43,13 @@ type Server struct {
 	agentCache map[string]int64              // secret hash -> agent id
 	portCache  map[int64]map[string]portMeta // agent id -> "dev/port" -> meta
 	hostName   map[int64]string
+	// adminOK remembers the one credential that last passed bcrypt, keyed by
+	// its SHA-256, together with the password hash it was checked against.
+	// The UI polls several endpoints every few seconds and a bcrypt check
+	// costs tens of milliseconds each, which on a small LXC is CPU spent on
+	// nothing; a changed password hash invalidates the entry by itself.
+	adminOK     [32]byte
+	adminOKHash string
 }
 
 func NewServer(ctx context.Context, cfg Config) (*Server, error) {
@@ -124,14 +131,34 @@ func randomToken(n int) string {
 func (s *Server) admin(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
-		if !ok || subtle.ConstantTimeCompare([]byte(user), []byte(s.cfg.AdminUser)) != 1 ||
-			bcrypt.CompareHashAndPassword([]byte(s.cfg.AdminPasswordHash), []byte(pass)) != nil {
+		if !ok || !s.adminLogin(user, pass) {
 			w.Header().Set("WWW-Authenticate", `Basic realm="srnet"`)
 			httpError(w, http.StatusUnauthorized, "admin login required")
 			return
 		}
 		h(w, r)
 	}
+}
+
+// adminLogin checks a Basic auth credential against the configured admin,
+// remembering the last good one so repeated requests skip bcrypt.
+func (s *Server) adminLogin(user, pass string) bool {
+	key := sha256.Sum256([]byte(user + "\x00" + pass))
+	s.mu.Lock()
+	adminUser, hash := s.cfg.AdminUser, s.cfg.AdminPasswordHash
+	cached := s.adminOKHash == hash && hash != "" && subtle.ConstantTimeCompare(s.adminOK[:], key[:]) == 1
+	s.mu.Unlock()
+	if cached {
+		return true
+	}
+	if subtle.ConstantTimeCompare([]byte(user), []byte(adminUser)) != 1 ||
+		bcrypt.CompareHashAndPassword([]byte(hash), []byte(pass)) != nil {
+		return false
+	}
+	s.mu.Lock()
+	s.adminOK, s.adminOKHash = key, hash
+	s.mu.Unlock()
+	return true
 }
 
 type agentKey struct{}
@@ -228,7 +255,7 @@ func (s *Server) refreshPortCache(ctx context.Context) {
 		names[h.ID] = h.Name
 		m := map[string]portMeta{}
 		for _, p := range h.Ports {
-			m[p.RdmaDev+"/"+strconv.Itoa(p.PortNum)] = portMeta{PortID: p.ID, Host: h.Name, RdmaDev: p.RdmaDev, PortNum: p.PortNum, Netdev: p.Netdev, Label: p.Label, Fabric: p.Fabric}
+			m[p.RdmaDev+"/"+strconv.Itoa(p.PortNum)] = portMeta{PortID: p.ID, Host: h.Name, RdmaDev: p.RdmaDev, PortNum: p.PortNum, Netdev: p.Netdev, Label: p.Label, Fabric: p.Fabric, HasIP: len(p.Addrs) > 0}
 		}
 		pc[h.ID] = m
 	}

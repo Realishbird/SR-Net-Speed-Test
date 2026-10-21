@@ -321,7 +321,9 @@ async function pageHosts(token) {
   };
   await refresh(); setRefresh(refresh, 5000);
 }
-async function patch(path, u) { try { await api('PATCH', path, u); toast('Saved', 'pass', 1500); refreshFn?.(); } catch (e) { fail(e); } }
+// After a save the table is refreshed only when nothing is being edited:
+// Tab moves focus to the next cell and a rebuild would drop it mid-typing.
+async function patch(path, u) { try { await api('PATCH', path, u); toast('Saved', 'pass', 1500); if (!busy()) refreshFn?.(); } catch (e) { fail(e); } }
 async function installCommand() {
   try {
     const t = await api('POST', '/tokens');
@@ -745,7 +747,7 @@ function delSwitch(name) { confirmBox('Remove switch', `Stop collecting from "${
 async function pageAlerts(token) {
   if (!mount(token, `<div class="page-head"><h1>Alerts</h1><span class="spacer"></span><label class="row inline sub"><input type="checkbox" id="all" onchange="refreshFn()"> include resolved</label>
       <button class="danger" id="clear-all" onclick="clearAlerts()">Clear all</button></div>
-    <p class="help">Opened by the controller for agents that stop reporting, ports that leave ACTIVE, error counters that grow while idle, hot transceivers, failed runs and failed updates. They close themselves when the condition clears; "Clear" resolves one by hand (an alert whose cause is still present comes back on the next check).</p>
+    <p class="help">Opened by the controller for agents that stop reporting, ports with an address that leave ACTIVE, error counters that grow while no test runs (counters that grow during a run belong to that run's result), hot transceivers, failed runs and failed updates. They close themselves when the condition clears, idle-error alerts after 15 minutes without further growth; "Clear" resolves one by hand (an alert whose cause is still present comes back on the next check).</p>
     <div class="tbl"><table><thead><tr><th>State</th><th>Kind</th><th>Host</th><th>Port</th><th>Message</th><th>Opened</th><th>Resolved</th><th></th></tr></thead><tbody id="alerts"></tbody></table></div>`)) return;
   const refresh = async () => {
     const all = $('#all')?.checked;

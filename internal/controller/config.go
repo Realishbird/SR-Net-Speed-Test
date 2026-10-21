@@ -60,7 +60,7 @@ func DefaultConfig() Config {
 		AdminUser:          "admin",
 		InstallScriptURL:   "https://raw.githubusercontent.com/Realishbird/SR-Net-Speed-Test/main/install.sh",
 		GnmicConfigPath:    "/etc/srnet/gnmic.yaml",
-		GrafanaDashDir:     "/var/lib/srnet/grafana",
+		GrafanaDashDir:     "/var/lib/grafana/dashboards/srnet", // where install-controller.sh points Grafana's file provisioner
 	}
 }
 
