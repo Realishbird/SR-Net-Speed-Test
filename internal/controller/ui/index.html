@@ -5,67 +5,141 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SR-Net-Speed-Test</title>
 <style>
-:root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --line:#ddd; --card:#f6f7f9; --accent:#2563eb; --pass:#15803d; --warn:#b45309; --fail:#b91c1c; }
-@media (prefers-color-scheme: dark) { :root { --bg:#111418; --fg:#e6e6e6; --muted:#9aa; --line:#2a3038; --card:#1a1f26; --accent:#60a5fa; --pass:#4ade80; --warn:#fbbf24; --fail:#f87171; } }
-* { box-sizing: border-box; }
-body { margin:0; font: 14px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
-header { display:flex; gap:20px; align-items:center; padding:10px 20px; border-bottom:1px solid var(--line); }
-header b { font-size:16px; }
-header a { color:var(--fg); text-decoration:none; padding:4px 8px; border-radius:6px; }
-header a.on { background:var(--card); color:var(--accent); }
-main { padding:16px 20px; max-width:1500px; }
-h2 { font-size:18px; margin:0 0 12px; }
+:root {
+  --bg:#f5f6f8; --surface:#ffffff; --fg:#15181d; --muted:#67707c; --line:#e3e6ea; --hover:#f0f2f5;
+  --accent:#2f6fed; --accent-fg:#ffffff; --pass:#1a8a4a; --warn:#b7650c; --fail:#c9302c; --info:#2f6fed;
+  --shadow:0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.1);
+  --radius:12px; --mono:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0f1216; --surface:#171b21; --fg:#e8eaed; --muted:#99a2ad; --line:#272d36; --hover:#1e242c;
+    --accent:#6ea0ff; --accent-fg:#0b1220; --pass:#4ade80; --warn:#fbbf24; --fail:#f87171; --info:#6ea0ff;
+    --shadow:0 1px 2px rgba(0,0,0,.4);
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0f1216; --surface:#171b21; --fg:#e8eaed; --muted:#99a2ad; --line:#272d36; --hover:#1e242c;
+  --accent:#6ea0ff; --accent-fg:#0b1220; --pass:#4ade80; --warn:#fbbf24; --fail:#f87171; --info:#6ea0ff;
+  --shadow:0 1px 2px rgba(0,0,0,.4);
+}
+* { box-sizing:border-box; }
+html, body { height:100%; }
+body { margin:0; font:14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--fg); }
+a { color:var(--accent); }
+.app { display:grid; grid-template-columns:220px 1fr; min-height:100%; }
+nav { background:var(--surface); border-right:1px solid var(--line); padding:18px 12px; display:flex; flex-direction:column; gap:4px; position:sticky; top:0; height:100vh; }
+nav .brand { font-weight:700; font-size:15px; padding:6px 10px 14px; letter-spacing:.2px; }
+nav .brand small { display:block; font-weight:400; color:var(--muted); font-size:12px; }
+nav a { display:flex; align-items:center; gap:10px; padding:9px 10px; border-radius:8px; color:var(--fg); text-decoration:none; font-weight:500; }
+nav a:hover { background:var(--hover); }
+nav a.on { background:color-mix(in srgb, var(--accent) 14%, transparent); color:var(--accent); }
+nav a svg { width:18px; height:18px; flex:none; stroke:currentColor; fill:none; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+nav .badge { margin-left:auto; }
+nav .foot { margin-top:auto; padding:10px; color:var(--muted); font-size:12px; display:flex; flex-direction:column; gap:6px; }
+main { padding:28px 32px 60px; min-width:0; }
+.page-head { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:18px; }
+.page-head h1 { font-size:22px; margin:0; font-weight:650; }
+.page-head .spacer { flex:1; }
+.sub { color:var(--muted); font-size:13px; }
+.card { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); padding:16px 18px; margin-bottom:16px; }
+.card h2 { font-size:14px; margin:0 0 10px; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:.4px; }
+.tiles { display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:12px; margin-bottom:16px; }
+.tile { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); padding:14px 16px; }
+.tile .k { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.4px; }
+.tile .v { font-size:26px; font-weight:650; margin-top:4px; font-variant-numeric:tabular-nums; }
+.tile .v small { font-size:13px; color:var(--muted); font-weight:400; margin-left:4px; }
+.tbl { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); overflow:auto; margin-bottom:16px; }
 table { border-collapse:collapse; width:100%; }
-th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
-th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; }
-td.num, th.num { text-align:right; font-variant-numeric: tabular-nums; }
-input, select, button { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:5px 8px; }
-input.cell { width:110px; border-color:transparent; background:transparent; }
-input.cell:focus { border-color:var(--accent); background:var(--bg); }
-button.primary { background:var(--accent); color:#fff; border-color:var(--accent); cursor:pointer; }
-button { cursor:pointer; }
-.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-bottom:16px; }
+th, td { text-align:left; padding:9px 12px; border-bottom:1px solid var(--line); white-space:nowrap; vertical-align:middle; }
+thead th { position:sticky; top:0; background:var(--surface); color:var(--muted); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.4px; z-index:1; }
+tbody tr:last-child td { border-bottom:0; }
+tbody tr:hover td { background:var(--hover); }
+td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+td.wrap { white-space:normal; }
+.empty { color:var(--muted); padding:22px 12px; text-align:center; }
+input, select, button, textarea { font:inherit; color:inherit; background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:7px 10px; }
+input:focus, select:focus, textarea:focus { outline:2px solid color-mix(in srgb, var(--accent) 40%, transparent); outline-offset:0; border-color:var(--accent); }
+input.cell { width:120px; border-color:transparent; background:transparent; padding:4px 6px; border-radius:6px; }
+input.cell:hover { border-color:var(--line); }
+input.cell:focus { border-color:var(--accent); background:var(--surface); }
+button { cursor:pointer; font-weight:500; }
+button:hover { background:var(--hover); }
+button.primary { background:var(--accent); color:var(--accent-fg); border-color:var(--accent); }
+button.primary:hover { filter:brightness(1.08); background:var(--accent); }
+button.danger { color:var(--fail); border-color:color-mix(in srgb, var(--fail) 40%, var(--line)); }
+button.sm { padding:4px 9px; font-size:12px; }
+button:disabled { opacity:.5; cursor:default; }
 .row { display:flex; gap:12px; flex-wrap:wrap; align-items:end; }
-.row label { display:flex; flex-direction:column; gap:3px; font-size:12px; color:var(--muted); }
-.v { font-weight:600; padding:2px 8px; border-radius:999px; font-size:12px; }
-.v.pass { color:var(--pass); background:color-mix(in srgb, var(--pass) 15%, transparent); }
-.v.warn { color:var(--warn); background:color-mix(in srgb, var(--warn) 15%, transparent); }
-.v.fail { color:var(--fail); background:color-mix(in srgb, var(--fail) 15%, transparent); }
-.v.running, .v.queued { color:var(--accent); background:color-mix(in srgb, var(--accent) 15%, transparent); }
-.dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--fail); margin-right:6px; }
-.dot.on { background:var(--pass); }
-.big { font-size:28px; font-weight:700; }
+.row label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); }
+.row label.inline { flex-direction:row; align-items:center; color:var(--fg); }
+.badge { display:inline-block; font-weight:600; padding:2px 9px; border-radius:999px; font-size:11.5px; line-height:1.6; text-transform:lowercase; }
+.badge.pass, .badge.done, .badge.active { color:var(--pass); background:color-mix(in srgb, var(--pass) 14%, transparent); }
+.badge.warn, .badge.skipped, .badge.canceled { color:var(--warn); background:color-mix(in srgb, var(--warn) 14%, transparent); }
+.badge.fail, .badge.failed, .badge.open, .badge.down { color:var(--fail); background:color-mix(in srgb, var(--fail) 14%, transparent); }
+.badge.running, .badge.queued, .badge.updating, .badge.pending, .badge.info { color:var(--info); background:color-mix(in srgb, var(--info) 14%, transparent); }
+.badge.muted { color:var(--muted); background:var(--hover); }
+.dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--fail); box-shadow:0 0 0 3px color-mix(in srgb, var(--fail) 18%, transparent); }
+.dot.on { background:var(--pass); box-shadow:0 0 0 3px color-mix(in srgb, var(--pass) 18%, transparent); }
 .muted { color:var(--muted); }
-pre { background:var(--card); padding:10px; border-radius:8px; overflow:auto; font-size:12px; }
-#msg { color:var(--fail); min-height:1.4em; }
-a.link { color:var(--accent); cursor:pointer; text-decoration:underline; }
+.mono { font-family:var(--mono); font-size:12.5px; }
+pre { background:var(--hover); border:1px solid var(--line); padding:12px; border-radius:8px; overflow:auto; font:12.5px/1.5 var(--mono); margin:0; white-space:pre-wrap; word-break:break-all; }
+textarea { width:100%; font:12.5px/1.5 var(--mono); resize:vertical; }
+.live { color:var(--info); font-size:12px; display:inline-flex; align-items:center; gap:6px; }
+.live::before { content:""; width:7px; height:7px; border-radius:50%; background:var(--info); animation:pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:.25 } }
+.bar { height:6px; background:var(--hover); border-radius:999px; overflow:hidden; min-width:90px; }
+.bar i { display:block; height:100%; background:var(--accent); border-radius:999px; }
+.toasts { position:fixed; right:18px; bottom:18px; display:flex; flex-direction:column; gap:8px; z-index:50; max-width:420px; }
+.toast { background:var(--surface); border:1px solid var(--line); border-left:4px solid var(--info); border-radius:10px; padding:10px 14px; box-shadow:0 8px 24px rgba(0,0,0,.18); animation:in .15s ease-out; }
+.toast.fail { border-left-color:var(--fail); } .toast.pass { border-left-color:var(--pass); } .toast.warn { border-left-color:var(--warn); }
+@keyframes in { from { transform:translateY(8px); opacity:0 } }
+.overlay { position:fixed; inset:0; background:rgba(0,0,0,.45); display:flex; align-items:center; justify-content:center; z-index:40; padding:16px; }
+.modal { background:var(--surface); border:1px solid var(--line); border-radius:14px; box-shadow:0 20px 60px rgba(0,0,0,.35); width:min(720px, 100%); max-height:90vh; overflow:auto; }
+.modal header { display:flex; align-items:center; padding:16px 20px; border-bottom:1px solid var(--line); font-weight:650; font-size:16px; }
+.modal header button { margin-left:auto; }
+.modal .body { padding:18px 20px; }
+.modal footer { display:flex; gap:8px; justify-content:flex-end; padding:14px 20px; border-top:1px solid var(--line); }
+.help { font-size:12.5px; color:var(--muted); margin:4px 0 12px; }
+.chips { display:flex; gap:6px; flex-wrap:wrap; }
+.chip { font-size:12px; padding:2px 8px; border-radius:999px; background:var(--hover); border:1px solid var(--line); }
+.kv { display:grid; grid-template-columns:max-content 1fr; gap:6px 18px; font-size:13px; }
+.kv b { font-weight:500; color:var(--muted); }
+@media (max-width: 860px) {
+  .app { grid-template-columns:1fr; }
+  nav { position:static; height:auto; flex-direction:row; flex-wrap:wrap; border-right:0; border-bottom:1px solid var(--line); padding:10px 12px; }
+  nav .brand { width:100%; padding-bottom:6px; } nav .brand small { display:none; }
+  nav a { padding:7px 10px; } nav a span.t { display:none; } nav .foot { display:none; }
+  main { padding:18px 16px 50px; }
+}
 </style>
 </head>
 <body>
-<header>
-  <b>SR-Net-Speed-Test</b>
-  <a href="#hosts" id="nav-hosts">Hosts</a>
-  <a href="#runs" id="nav-runs">Runs</a>
-  <a href="#new" id="nav-new">New run</a>
-  <a href="#suites" id="nav-suites">Suites</a>
-  <a href="#fleet" id="nav-fleet">Fleet</a>
-  <a href="#alerts" id="nav-alerts">Alerts <span id="alert-count" class="v fail" style="display:none"></span></a>
-  <a id="grafana" href="#" target="_blank">Grafana</a>
-  <span class="muted" id="ver" style="margin-left:auto"></span>
-</header>
-<main>
-  <div id="msg"></div>
-  <div id="view"></div>
-</main>
+<div class="app">
+<nav>
+  <div class="brand">SR-Net-Speed-Test<small id="ver">controller</small></div>
+  <a href="#overview" data-page="overview"><svg viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span class="t">Overview</span></a>
+  <a href="#hosts" data-page="hosts"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><path d="M7 7h.01M7 17h.01"/></svg><span class="t">Hosts</span></a>
+  <a href="#runs" data-page="runs"><svg viewBox="0 0 24 24"><path d="M4 19V5M4 15l5-5 4 4 7-8"/></svg><span class="t">Runs</span></a>
+  <a href="#new" data-page="new"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg><span class="t">New run</span></a>
+  <a href="#suites" data-page="suites"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/></svg><span class="t">Suites</span></a>
+  <a href="#fleet" data-page="fleet"><svg viewBox="0 0 24 24"><path d="M12 3v12M8 11l4 4 4-4"/><path d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg><span class="t">Fleet</span></a>
+  <a href="#alerts" data-page="alerts"><svg viewBox="0 0 24 24"><path d="M12 3l9.5 17h-19z"/><path d="M12 10v4M12 17h.01"/></svg><span class="t">Alerts</span><span class="badge fail" id="alert-count" style="display:none"></span></a>
+  <a id="grafana" href="#" target="_blank"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 15l3-4 3 2 4-6"/></svg><span class="t">Grafana</span></a>
+  <div class="foot"><span id="clock"></span><button class="sm" onclick="toggleTheme()">Toggle theme</button></div>
+</nav>
+<main id="view"></main>
+</div>
+<div class="toasts" id="toasts"></div>
 <script>
-const $ = (s, el=document) => el.querySelector(s);
-const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const fmt = (n, d=1) => (n ?? 0).toFixed(d);
-let timer = null;
-// Only one page poller may run; each render checks it still owns the page.
-function poll(fn, ms) { clearInterval(timer); timer = setInterval(fn, ms); }
-const here = () => location.hash || '#hosts';
-function render(page, html) { if (here() !== page) return false; $('#view').innerHTML = html; return true; }
+/* ---------- helpers ---------- */
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmt = (n, d = 1) => (n == null || isNaN(n) ? 0 : +n).toFixed(d);
+const when = s => s ? new Date(s).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }) : '';
+const ago = s => { if (!s) return ''; const m = Math.round((Date.now() - new Date(s)) / 60000); return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m / 60) + ' h ago' : Math.round(m / 1440) + ' d ago'; };
+const badge = (s, cls) => s ? `<span class="badge ${cls || s}">${esc(s)}</span>` : '';
+const list = s => String(s || '').split(',').map(x => x.trim()).filter(Boolean);
 
 async function api(method, path, body) {
   const opt = { method, headers: {} };
@@ -73,175 +147,263 @@ async function api(method, path, body) {
   const r = await fetch('/api/v1' + path, opt);
   if (r.status === 204) return null;
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.error || r.statusText);
+  if (!r.ok) throw new Error(j.error || r.statusText || ('HTTP ' + r.status));
   return j;
 }
-function say(e) { $('#msg').textContent = e ? (e.message || e) : ''; }
 
-function route() {
-  clearInterval(timer);
-  say('');
-  const h = location.hash || '#hosts';
-  document.querySelectorAll('header a').forEach(a => a.classList.toggle('on', h.startsWith(a.getAttribute('href'))));
-  if (h.startsWith('#run/')) return showRun(+h.slice(5));
-  if (h === '#runs') return showRuns();
-  if (h === '#new') return showNew();
-  if (h === '#suites') return showSuites();
-  if (h === '#fleet') return showFleet();
-  if (h === '#alerts') return showAlerts();
-  return showHosts();
+function toast(msg, cls = 'info', ms = 5000) {
+  const el = document.createElement('div');
+  el.className = 'toast ' + cls; el.textContent = msg?.message || msg;
+  $('#toasts').appendChild(el);
+  setTimeout(() => el.remove(), ms);
 }
+const fail = e => toast(e, 'fail', 8000);
+
+function modal({ title, body, actions = [], onClose }) {
+  closeModal();
+  const ov = document.createElement('div'); ov.className = 'overlay'; ov.id = 'modal';
+  ov.innerHTML = `<div class="modal" role="dialog"><header>${esc(title)}<button class="sm" onclick="closeModal()">Close</button></header><div class="body">${body}</div>
+    ${actions.length ? `<footer>${actions.map((a, i) => `<button class="${a.cls || ''}" data-i="${i}">${esc(a.label)}</button>`).join('')}</footer>` : ''}</div>`;
+  ov.addEventListener('click', e => { if (e.target === ov) closeModal(); });
+  ov.querySelectorAll('footer button').forEach(b => b.onclick = async () => { const a = actions[+b.dataset.i]; if (a.run) { b.disabled = true; try { await a.run(); } finally { b.disabled = false; } } if (a.close !== false) closeModal(); });
+  ov.onclose = onClose;
+  document.body.appendChild(ov);
+  return ov;
+}
+function closeModal() { const m = $('#modal'); if (m) { m.onclose?.(); m.remove(); } }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+function confirmBox(title, text, label, run) { modal({ title, body: `<p>${esc(text)}</p>`, actions: [{ label: 'Cancel' }, { label, cls: 'danger', run }] }); }
+
+async function copyText(t, btn) { try { await navigator.clipboard.writeText(t); if (btn) { const o = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => btn.textContent = o, 1500); } } catch { toast('Copy failed; select the text and copy it by hand', 'warn'); } }
+
+function toggleTheme() {
+  const cur = document.documentElement.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  const next = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem('theme', next); } catch {}
+}
+try { const t = localStorage.getItem('theme'); if (t) document.documentElement.dataset.theme = t; } catch {}
+
+/* ---------- router and refresh loop ----------
+   A page renders its shell once, then its refresh() only updates data regions.
+   Refreshes are skipped while the user is editing, has text selected, a dialog
+   is open, or the tab is hidden, so nothing on screen is pulled away. */
+let nav = 0, timer = null, refreshFn = null;
+function setRefresh(fn, ms) {
+  clearInterval(timer); refreshFn = fn;
+  if (fn) timer = setInterval(() => { if (busy()) return; fn().catch(fail); }, ms);
+}
+function busy() {
+  if (document.hidden || $('#modal')) return true;
+  const a = document.activeElement;
+  if (a && $('#view').contains(a) && ['INPUT', 'TEXTAREA', 'SELECT'].includes(a.tagName)) return true;
+  const sel = getSelection(); return !!(sel && sel.type === 'Range' && String(sel).length);
+}
+const here = () => location.hash || '#overview';
+function route() {
+  const token = ++nav;
+  setRefresh(null);
+  closeModal();
+  const h = here();
+  document.querySelectorAll('nav a[data-page]').forEach(a => a.classList.toggle('on', h.split('/')[0] === '#' + a.dataset.page));
+  const go = p => p(token).catch(fail);
+  if (h.startsWith('#run/')) return go(t => pageRun(t, +h.slice(5)));
+  if (h === '#hosts') return go(pageHosts);
+  if (h === '#runs') return go(pageRuns);
+  if (h === '#new') return go(pageNew);
+  if (h === '#suites') return go(pageSuites);
+  if (h === '#fleet') return go(pageFleet);
+  if (h === '#alerts') return go(pageAlerts);
+  return go(pageOverview);
+}
+// mount writes the shell only if the user is still on the page that asked for it
+function mount(token, html) { if (token !== nav) return false; $('#view').innerHTML = html; return true; }
+function set(id, html) { const el = document.getElementById(id); if (el && el.innerHTML !== html) el.innerHTML = html; }
 window.addEventListener('hashchange', route);
 
-/* Hosts */
-async function showHosts() {
-  const page = here();
-  const hosts = await api('GET', '/hosts').catch(say) || [];
-  let html = `<div class="row" style="margin-bottom:12px"><h2 style="margin:0">Hosts</h2>
-    <button onclick="newToken()">Agent install command</button>
-    <label>Import CSV <input type="file" id="csv" accept=".csv"></label>
-    <span class="muted">host,name,tags,site,rack,ip,label,fabric,expected_gbps</span></div>
-    <pre id="token" style="display:none"></pre>
-    <table><tr><th></th><th>Name</th><th>Hostname</th><th>Tags (comma)</th><th>Site</th><th>Agent</th>
-    <th>Port</th><th>IP</th><th>State</th><th class="num">Speed</th><th>Label</th><th>Fabric</th><th class="num">Expected Gbps</th><th>Switch port</th><th class="num">Live TX / RX</th></tr>`;
-  if (!hosts.length) html += `<tr><td colspan="15" class="muted">No hosts enrolled yet. Click "Agent install command" and run it on a host.</td></tr>`;
-  for (const h of hosts) {
-    const ports = h.ports.length ? h.ports : [null];
-    ports.forEach((p, i) => {
-      html += '<tr>';
-      if (i === 0) {
-        const rs = `rowspan="${ports.length}"`;
-        html += `<td ${rs}><span class="dot ${h.online?'on':''}" title="${h.online?'online':'offline'}"></span></td>
-          <td ${rs}><input class="cell" value="${esc(h.name)}" onchange="patchHost(${h.id},{name:this.value})"></td>
-          <td ${rs} class="muted">${esc(h.hostname)}</td>
-          <td ${rs}><input class="cell" value="${esc(h.tags.join(','))}" onchange="patchHost(${h.id},{tags:this.value.split(',').map(s=>s.trim()).filter(Boolean)})"></td>
-          <td ${rs}><input class="cell" value="${esc(h.site)}" onchange="patchHost(${h.id},{site:this.value})"></td>
-          <td ${rs} class="muted">${esc(h.agent_version)}<br>${esc(h.arch)}</td>`;
-      }
-      if (!p) { html += '<td colspan="9" class="muted">no RDMA ports found</td></tr>'; return; }
-      const sw = p.lldp_switch || p.lldp_port ? `${esc(p.lldp_switch)} / ${esc(p.lldp_port)}` : '<span class="muted">-</span>';
-      html += `<td>${esc(p.rdma_dev)}/${p.port_num} <span class="muted">${esc(p.netdev)}</span></td>
-        <td>${esc(p.addrs.join(', '))}</td>
-        <td><span class="v ${p.state==='ACTIVE'?'pass':'fail'}">${esc(p.state)}</span></td>
-        <td class="num">${p.speed_mbps/1000}G</td>
-        <td><input class="cell" value="${esc(p.label)}" onchange="patchPort(${p.id},{label:this.value})"></td>
-        <td><input class="cell" style="width:70px" value="${esc(p.fabric)}" onchange="patchPort(${p.id},{fabric:this.value})"></td>
-        <td class="num"><input class="cell num" style="width:70px;text-align:right" value="${p.expected_gbps||''}" placeholder="${p.speed_mbps/1000}" onchange="patchPort(${p.id},{expected_gbps:+this.value||0})"></td>
-        <td>${sw}</td>
-        <td class="num">${fmt(p.tx_gbps)} / ${fmt(p.rx_gbps)}</td></tr>`;
-    });
-  }
-  if (!render(page, html + '</table>')) return;
+/* ---------- overview ---------- */
+async function pageOverview(token) {
+  if (!mount(token, `<div class="page-head"><h1>Overview</h1><span class="spacer"></span><span class="sub" id="ov-upd"></span></div>
+    <div class="tiles" id="ov-tiles"></div>
+    <div class="card"><h2>Recent runs</h2><div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th>ID</th><th>Name</th><th>Test</th><th>Status</th><th>Verdict</th><th class="num">Gbps</th><th>Started</th></tr></thead><tbody id="ov-runs"></tbody></table></div></div>
+    <div class="card"><h2>Open alerts</h2><div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th>Kind</th><th>Host</th><th>Port</th><th>Message</th><th>Since</th></tr></thead><tbody id="ov-alerts"></tbody></table></div></div>`)) return;
+  const refresh = async () => {
+    const [hosts, runs, alerts, st] = await Promise.all([api('GET', '/hosts'), api('GET', '/runs'), api('GET', '/alerts'), api('GET', '/status')]);
+    const online = hosts.filter(h => h.online).length, ports = hosts.flatMap(h => h.ports), up = ports.filter(p => p.state === 'ACTIVE').length;
+    const running = runs.filter(r => r.status === 'running' || r.status === 'queued').length;
+    const tx = ports.reduce((a, p) => a + (p.tx_gbps || 0), 0);
+    set('ov-tiles', `
+      <div class="tile"><div class="k">Hosts online</div><div class="v">${online}<small>of ${hosts.length}</small></div></div>
+      <div class="tile"><div class="k">RDMA ports active</div><div class="v">${up}<small>of ${ports.length}</small></div></div>
+      <div class="tile"><div class="k">Fabric traffic now</div><div class="v">${fmt(tx)}<small>Gbps TX</small></div></div>
+      <div class="tile"><div class="k">Runs in progress</div><div class="v">${running}</div></div>
+      <div class="tile"><div class="k">Open alerts</div><div class="v" style="color:${alerts.length ? 'var(--fail)' : 'inherit'}">${alerts.length}</div></div>
+      <div class="tile"><div class="k">Controller</div><div class="v" style="font-size:18px">${esc(st.version)}<small>${st.switches} switch${st.switches === 1 ? '' : 'es'}</small></div></div>`);
+    set('ov-runs', runs.length ? runs.slice(0, 8).map(r => `<tr><td><a href="#run/${r.id}">${r.id}</a></td><td><a href="#run/${r.id}">${esc(r.name)}</a></td><td>${esc(r.spec.test)}</td><td>${badge(r.status)}</td><td>${badge(r.verdict)}</td><td class="num">${fmt(r.status === 'running' ? r.summary.live_gbps : r.summary.tool_gbps)}</td><td class="muted">${ago(r.started_at)}</td></tr>`).join('')
+      : `<tr><td colspan="7" class="empty">No runs yet. <a href="#new">Start one</a>.</td></tr>`);
+    set('ov-alerts', alerts.length ? alerts.map(a => `<tr><td>${badge(a.kind, 'fail')}</td><td>${esc(a.host)}</td><td>${esc(a.port)}</td><td class="wrap">${esc(a.message)}</td><td class="muted">${ago(a.opened_at)}</td></tr>`).join('')
+      : `<tr><td colspan="5" class="empty">Nothing open.</td></tr>`);
+    set('ov-upd', 'updated ' + new Date().toLocaleTimeString());
+  };
+  await refresh(); setRefresh(refresh, 5000);
+}
+
+/* ---------- hosts ---------- */
+async function pageHosts(token) {
+  if (!mount(token, `<div class="page-head"><h1>Hosts</h1><span class="spacer"></span>
+      <label class="sub">Import CSV <input type="file" id="csv" accept=".csv" style="display:none"></label><button onclick="$('#csv').click()">Import CSV</button>
+      <button class="primary" onclick="installCommand()">Agent install command</button></div>
+    <p class="help">Names, tags, labels and expected rates are editable in place; a change saves when you leave the field. CSV columns: host, name, tags, site, rack, ip, label, fabric, expected_gbps.</p>
+    <div class="tbl"><table><thead><tr><th></th><th>Name</th><th>Hostname</th><th>Tags</th><th>Site</th><th>Agent</th><th>Port</th><th>IP</th><th>State</th><th class="num">Speed</th><th>Label</th><th>Fabric</th><th class="num">Expected Gbps</th><th>Switch port</th><th class="num">Live TX / RX</th></tr></thead><tbody id="hosts"></tbody></table></div>`)) return;
   $('#csv').onchange = async e => {
     const f = e.target.files[0]; if (!f) return;
-    try { const r = await api('POST', '/hosts/import', await f.text()); say(r.problems.length ? r.problems.join('; ') : ''); showHosts(); } catch (x) { say(x); }
+    try { const r = await api('POST', '/hosts/import', await f.text()); toast(`Applied ${r.applied} row(s)` + (r.problems.length ? `; ${r.problems.length} problem(s): ` + r.problems.join('; ') : ''), r.problems.length ? 'warn' : 'pass', 9000); refresh(); } catch (x) { fail(x); }
+    e.target.value = '';
   };
-  poll(async () => {
-    if (document.activeElement && document.activeElement.classList.contains('cell')) return;
-    showHosts();
-  }, 5000);
-}
-async function patchHost(id, u) { try { await api('PATCH', '/hosts/' + id, u); say(''); } catch (e) { say(e); } }
-async function patchPort(id, u) { try { await api('PATCH', '/ports/' + id, u); say(''); } catch (e) { say(e); } }
-async function newToken() {
-  try { const t = await api('POST', '/tokens'); const el = $('#token'); el.style.display = 'block'; el.textContent = `# valid until ${new Date(t.expires_at).toLocaleTimeString()}\n${t.install_command}`; } catch (e) { say(e); }
-}
-
-/* Runs */
-async function showRuns() {
-  const page = here();
-  const runs = await api('GET', '/runs').catch(say) || [];
-  let html = `<h2>Runs</h2><table><tr><th>ID</th><th>Name</th><th>Test</th><th>Status</th><th>Verdict</th><th class="num">Tool Gbps</th><th class="num">Counter Gbps</th><th>Started</th></tr>`;
-  if (!runs.length) html += `<tr><td colspan="8" class="muted">No runs yet.</td></tr>`;
-  for (const r of runs) html += `<tr><td><a class="link" href="#run/${r.id}">${r.id}</a></td><td><a class="link" href="#run/${r.id}">${esc(r.name)}</a></td><td>${esc(r.spec.test)}</td>
-    <td><span class="v ${r.status}">${r.status}</span></td><td>${r.verdict ? `<span class="v ${r.verdict}">${r.verdict}</span>` : ''}</td>
-    <td class="num">${fmt(r.summary.tool_gbps)}</td><td class="num">${fmt(r.summary.counter_gbps)}</td><td class="muted">${r.started_at ? new Date(r.started_at).toLocaleString() : '-'}</td></tr>`;
-  if (!render(page, html + '</table>')) return;
-  poll(showRuns, 5000);
-}
-
-async function showRun(id) {
-  const page = here();
-  let r; try { r = await api('GET', '/runs/' + id); } catch (e) { return say(e); }
-  const live = r.status === 'running' || r.status === 'queued';
-  const lat = r.spec.test.endsWith('_lat');
-  const s = r.spec;
-  let html = `<div class="row" style="margin-bottom:12px"><h2 style="margin:0">Run ${r.id}: ${esc(r.name)}</h2>
-    <span class="v ${r.status}">${r.status}</span> ${r.verdict ? `<span class="v ${r.verdict}">${r.verdict}</span>` : ''}
-    ${live ? `<button onclick="cancelRun(${r.id})">Cancel</button>` : ''}
-    <a class="link" href="#new" onclick='sessionStorage.setItem("spec", ${JSON.stringify(JSON.stringify(s))})'>Run again</a>
-    <a class="link" href="#suites" onclick='sessionStorage.setItem("suitespec", ${JSON.stringify(JSON.stringify(s))})'>Add to a suite</a>
-    ${!live ? `<span class="muted">Report:</span> <a class="link" href="/api/v1/runs/${r.id}/report.csv">CSV</a> <a class="link" href="/api/v1/runs/${r.id}/report.html" target="_blank">HTML</a>` : ''}</div>`;
-  if (r.error) html += `<div class="card" style="color:var(--fail)">${esc(r.error)}</div>`;
-  html += `<div class="card"><div class="row">
-    <div><div class="muted">${live ? 'Live aggregate' : 'Aggregate (tool)'}</div><div class="big">${fmt(live ? r.summary.live_gbps : r.summary.tool_gbps)} <span class="muted" style="font-size:14px">Gbps</span></div></div>
-    ${!live && !lat ? `<div><div class="muted">Aggregate (counters)</div><div class="big">${fmt(r.summary.counter_gbps)}</div></div>` : ''}
-    ${Object.entries(r.summary.by_fabric || {}).map(([f, g]) => `<div><div class="muted">Fabric ${esc(f)}</div><div class="big">${fmt(g)}</div></div>`).join('')}
-    <div class="muted" style="margin-left:auto">${esc(s.test)} · ${s.duration_sec}s · size ${s.msg_size}${s.sizes?.length ? ' sweep ' + s.sizes.join('/') : ''} · qps ${s.qps}${s.streams > 1 ? ' · streams ' + s.streams : ''}${s.bidir ? ' · bidir' : ''}${s.serial ? ' · serial' : ''}${s.mesh ? ' · mesh' : ''}<br>
-    ${r.started_at ? new Date(r.started_at).toLocaleString() : ''} ${r.ended_at ? '→ ' + new Date(r.ended_at).toLocaleTimeString() : ''}</div></div></div>`;
-  html += '<table><tr><th>#</th><th>Client</th><th>Server</th><th>Fabric</th><th class="num">Size</th>';
-  html += lat ? '<th class="num">Min µs</th><th class="num">Typ µs</th><th class="num">Avg µs</th><th class="num">P99 µs</th><th class="num">P99.9 µs</th><th class="num">Max µs</th>'
-              : `<th class="num">Expected</th><th class="num">${live ? 'Live' : 'Tool'} Gbps</th><th class="num">Counter Gbps</th>${s.test === 'tcp' ? '<th class="num">Retrans</th>' : s.test === 'udp' ? '<th class="num">Loss %</th><th class="num">Jitter ms</th>' : ''}`;
-  html += '<th>Errors</th><th>Verdict</th><th>Note</th></tr>';
-  for (const l of r.legs || []) {
-    const errs = Object.entries(l.error_deltas || {}).map(([k, v]) => `${k} +${v}`).join(', ');
-    html += `<tr><td>${l.index + 1}</td><td>${esc(l.client_host)} <span class="muted">${esc(l.client_ip)}</span></td><td>${esc(l.server_host)} <span class="muted">${esc(l.server_ip)}</span></td><td>${esc(l.fabric)}</td><td class="num">${l.msg_size || ''}</td>`;
-    if (lat) { const t = l.latency || {}; html += `<td class="num">${fmt(t.min_us, 2)}</td><td class="num">${fmt(t.typical_us, 2)}</td><td class="num">${fmt(t.avg_us, 2)}</td><td class="num">${fmt(t.p99_us, 2)}</td><td class="num">${fmt(t.p999_us, 2)}</td><td class="num">${fmt(t.max_us, 2)}</td>`; }
-    else {
-      html += `<td class="num">${fmt(l.expected_gbps, 0)}</td><td class="num">${fmt(live && !l.verdict ? l.live_gbps : l.tool_gbps)}</td><td class="num">${fmt(l.counter_gbps)}</td>`;
-      if (s.test === 'tcp') html += `<td class="num">${l.retransmits || 0}</td>`;
-      if (s.test === 'udp') html += `<td class="num">${fmt(l.loss_pct, 2)}</td><td class="num">${fmt(l.jitter_ms, 3)}</td>`;
+  const refresh = async () => {
+    const hosts = await api('GET', '/hosts');
+    let html = '';
+    for (const h of hosts) {
+      const ports = h.ports.length ? h.ports : [null];
+      ports.forEach((p, i) => {
+        html += '<tr>';
+        if (i === 0) {
+          const rs = `rowspan="${ports.length}"`;
+          html += `<td ${rs}><span class="dot ${h.online ? 'on' : ''}" title="${h.online ? 'online' : 'offline, last seen ' + ago(h.last_seen)}"></span></td>
+            <td ${rs}><input class="cell" value="${esc(h.name)}" onchange="patch('/hosts/${h.id}',{name:this.value})"></td>
+            <td ${rs} class="muted">${esc(h.hostname)}</td>
+            <td ${rs}><input class="cell" value="${esc(h.tags.join(', '))}" placeholder="tag, tag" onchange="patch('/hosts/${h.id}',{tags:list(this.value)})"></td>
+            <td ${rs}><input class="cell" style="width:90px" value="${esc(h.site)}" onchange="patch('/hosts/${h.id}',{site:this.value})"></td>
+            <td ${rs} class="muted">${esc(h.agent_version)}<br><span class="mono">${esc(h.arch)}</span></td>`;
+        }
+        if (!p) { html += '<td colspan="9" class="muted">no RDMA ports found</td></tr>'; return; }
+        const sw = p.lldp_switch || p.lldp_port ? `${esc(p.lldp_switch)} <span class="muted">${esc(p.lldp_port)}</span>` : '<span class="muted">-</span>';
+        html += `<td><b>${esc(p.rdma_dev)}/${p.port_num}</b> <span class="muted">${esc(p.netdev)}</span></td>
+          <td class="mono">${esc(p.addrs.join(', '))}</td>
+          <td>${badge(p.state, p.state === 'ACTIVE' ? 'pass' : 'fail')}</td>
+          <td class="num">${p.speed_mbps / 1000}G</td>
+          <td><input class="cell" value="${esc(p.label)}" placeholder="label" onchange="patch('/ports/${p.id}',{label:this.value})"></td>
+          <td><input class="cell" style="width:70px" value="${esc(p.fabric)}" placeholder="fabric" onchange="patch('/ports/${p.id}',{fabric:this.value})"></td>
+          <td class="num"><input class="cell" style="width:70px;text-align:right" value="${p.expected_gbps || ''}" placeholder="${p.speed_mbps / 1000}" onchange="patch('/ports/${p.id}',{expected_gbps:+this.value||0})"></td>
+          <td>${sw}</td>
+          <td class="num">${fmt(p.tx_gbps)} / ${fmt(p.rx_gbps)}</td></tr>`;
+      });
     }
-    html += `<td class="muted">${esc(errs)}</td><td>${l.verdict ? `<span class="v ${l.verdict}">${l.verdict}</span>` : ''}</td><td class="muted">${esc(l.note)}</td></tr>`;
-  }
-  if (!render(page, html + '</table>')) return;
-  if (live) poll(() => showRun(id), 2000);
+    set('hosts', html || `<tr><td colspan="15" class="empty">No hosts enrolled yet. Click "Agent install command" and run it on each test host.</td></tr>`);
+  };
+  await refresh(); setRefresh(refresh, 5000);
 }
-async function cancelRun(id) { try { await api('POST', `/runs/${id}/cancel`); } catch (e) { say(e); } }
+async function patch(path, u) { try { await api('PATCH', path, u); toast('Saved', 'pass', 1500); refreshFn?.(); } catch (e) { fail(e); } }
+async function installCommand() {
+  try {
+    const t = await api('POST', '/tokens');
+    modal({ title: 'Install an agent', body: `<p class="help">Run this as root on each Ubuntu or Debian test host. The token is single-use and expires at ${new Date(t.expires_at).toLocaleTimeString()}; open this dialog again for another host.</p>
+      <pre id="cmd">${esc(t.install_command)}</pre>`, actions: [{ label: 'Copy command', cls: 'primary', close: false, run: function () { copyText(t.install_command, $('#modal footer button.primary')); } }, { label: 'Done' }] });
+  } catch (e) { fail(e); }
+}
 
-/* New run */
+/* ---------- runs ---------- */
+async function pageRuns(token) {
+  if (!mount(token, `<div class="page-head"><h1>Runs</h1><span class="spacer"></span><a href="#new"><button class="primary">New run</button></a></div>
+    <div class="tbl"><table><thead><tr><th>ID</th><th>Name</th><th>Test</th><th>Topology</th><th>Status</th><th>Verdict</th><th class="num">Tool Gbps</th><th class="num">Counter Gbps</th><th>Started</th></tr></thead><tbody id="runs"></tbody></table></div>`)) return;
+  const refresh = async () => {
+    const runs = await api('GET', '/runs');
+    set('runs', runs.length ? runs.map(r => `<tr><td><a href="#run/${r.id}">${r.id}</a></td><td><a href="#run/${r.id}">${esc(r.name)}</a></td><td>${esc(r.spec.test)}</td><td class="muted">${topoName(r.spec)}</td>
+      <td>${badge(r.status)}</td><td>${badge(r.verdict)}</td><td class="num">${fmt(r.status === 'running' ? r.summary.live_gbps : r.summary.tool_gbps)}</td><td class="num">${fmt(r.summary.counter_gbps)}</td><td class="muted" title="${when(r.started_at)}">${ago(r.started_at) || '-'}</td></tr>`).join('')
+      : `<tr><td colspan="9" class="empty">No runs yet.</td></tr>`);
+  };
+  await refresh(); setRefresh(refresh, 5000);
+}
+function topoName(s) { return s.mesh ? 'mesh' : s.legs?.length ? 'legs' : s.pairs ? 'pairs' : s.serial ? 'serial' : 'fan'; }
+
+async function pageRun(token, id) {
+  let r; try { r = await api('GET', '/runs/' + id); } catch (e) { mount(token, `<div class="page-head"><h1>Run ${id}</h1></div><div class="card">${esc(e.message)}</div>`); return; }
+  const s = r.spec, lat = s.test.endsWith('_lat');
+  const head = lat ? '<th class="num">Min µs</th><th class="num">Typical µs</th><th class="num">Avg µs</th><th class="num">P99 µs</th><th class="num">P99.9 µs</th><th class="num">Max µs</th>'
+    : `<th class="num">Expected</th><th class="num" id="th-gbps">Gbps</th><th class="num">Counter Gbps</th>${s.test === 'tcp' ? '<th class="num">Retransmits</th>' : s.test === 'udp' ? '<th class="num">Loss %</th><th class="num">Jitter ms</th>' : ''}`;
+  if (!mount(token, `<div class="page-head"><h1>Run ${r.id}: ${esc(r.name)}</h1><span id="run-badges"></span><span class="spacer"></span><span id="run-actions"></span></div>
+    <div id="run-error"></div>
+    <div class="tiles" id="run-tiles"></div>
+    <div class="card"><div class="kv">
+      <b>Test</b><span>${esc(s.test)} · ${s.duration_sec} s · message size ${s.msg_size}${s.sizes?.length ? ' (sweep ' + s.sizes.join(', ') + ')' : ''} · qps ${s.qps}${s.streams > 1 ? ' · ' + s.streams + ' streams' : ''}${s.bidir ? ' · bidirectional' : ''}${s.serial ? ' · serial' : ''}${s.mesh ? ' · full mesh' : ''}</span>
+      <b>Thresholds</b><span>${s.pass_pct}% of line rate${s.max_lat_p99_us ? ' · p99 ≤ ' + s.max_lat_p99_us + ' µs' : ''}${s.test === 'udp' ? ' · loss ≤ ' + s.max_loss_pct + '%' : ''}</span>
+      <b>When</b><span id="run-when"></span></div></div>
+    <div class="tbl"><table><thead><tr><th>#</th><th>Client</th><th>Server</th><th>Fabric</th><th class="num">Size</th>${head}<th>Error counters</th><th>Verdict</th><th>Note</th></tr></thead><tbody id="legs"></tbody></table></div>`)) return;
+  const paint = r => {
+    const live = r.status === 'running' || r.status === 'queued';
+    set('run-badges', `${badge(r.status)} ${badge(r.verdict)} ${live ? '<span class="live">live</span>' : ''}`);
+    set('run-actions', `${live ? `<button class="danger" onclick="cancelRun(${r.id})">Cancel run</button> ` : ''}
+      <button onclick='sessionStorage.setItem("spec", ${JSON.stringify(JSON.stringify(s))}); location.hash="#new"'>Run again</button>
+      <button onclick='sessionStorage.setItem("suitespec", ${JSON.stringify(JSON.stringify(s))}); location.hash="#suites"'>Add to a suite</button>
+      ${!live ? `<a href="/api/v1/runs/${r.id}/report.csv"><button>CSV</button></a> <a href="/api/v1/runs/${r.id}/report.html" target="_blank"><button>Report</button></a>` : ''}`);
+    set('run-error', r.error ? `<div class="card" style="border-color:var(--fail);color:var(--fail)">${esc(r.error)}</div>` : '');
+    const fab = Object.entries(r.summary.by_fabric || {}).map(([f, g]) => `<div class="tile"><div class="k">Fabric ${esc(f)}</div><div class="v">${fmt(g)}<small>Gbps</small></div></div>`).join('');
+    set('run-tiles', lat ? `<div class="tile"><div class="k">Legs</div><div class="v">${(r.legs || []).length}</div></div>${fab}`
+      : `<div class="tile"><div class="k">${live ? 'Live aggregate' : 'Aggregate (tool)'}</div><div class="v">${fmt(live ? r.summary.live_gbps : r.summary.tool_gbps)}<small>Gbps</small></div></div>
+         ${!live ? `<div class="tile"><div class="k">Aggregate (NIC counters)</div><div class="v">${fmt(r.summary.counter_gbps)}<small>Gbps</small></div></div>` : ''}${fab}
+         <div class="tile"><div class="k">Legs</div><div class="v">${(r.legs || []).length}</div></div>`);
+    set('run-when', `${when(r.started_at) || 'queued'}${r.ended_at ? ' to ' + new Date(r.ended_at).toLocaleTimeString() : ''}`);
+    const th = $('#th-gbps'); if (th) th.textContent = live ? 'Live Gbps' : 'Tool Gbps';
+    set('legs', (r.legs || []).map(l => {
+      const errs = Object.entries(l.error_deltas || {}).map(([k, v]) => `${k} +${v}`).join(', ');
+      let row = `<tr><td>${l.index + 1}</td><td>${esc(l.client_host)} <span class="muted mono">${esc(l.client_ip)}</span></td><td>${esc(l.server_host)} <span class="muted mono">${esc(l.server_ip)}</span></td><td>${esc(l.fabric)}</td><td class="num">${l.msg_size || ''}</td>`;
+      if (lat) { const t = l.latency || {}; row += `<td class="num">${fmt(t.min_us, 2)}</td><td class="num">${fmt(t.typical_us, 2)}</td><td class="num">${fmt(t.avg_us, 2)}</td><td class="num">${fmt(t.p99_us, 2)}</td><td class="num">${fmt(t.p999_us, 2)}</td><td class="num">${fmt(t.max_us, 2)}</td>`; }
+      else {
+        const g = live && !l.verdict ? l.live_gbps : l.tool_gbps, pct = l.expected_gbps ? Math.min(100, 100 * (g || 0) / l.expected_gbps) : 0;
+        row += `<td class="num">${fmt(l.expected_gbps, 0)}</td><td class="num"><div style="display:flex;gap:8px;align-items:center;justify-content:flex-end">${fmt(g)}<div class="bar"><i style="width:${pct}%"></i></div></div></td><td class="num">${fmt(l.counter_gbps)}</td>`;
+        if (s.test === 'tcp') row += `<td class="num">${l.retransmits || 0}</td>`;
+        if (s.test === 'udp') row += `<td class="num">${fmt(l.loss_pct, 2)}</td><td class="num">${fmt(l.jitter_ms, 3)}</td>`;
+      }
+      return row + `<td class="muted">${esc(errs)}</td><td>${badge(l.verdict)}</td><td class="muted wrap">${esc(l.note)}</td></tr>`;
+    }).join('') || `<tr><td colspan="14" class="empty">No legs.</td></tr>`);
+    return live;
+  };
+  if (paint(r)) setRefresh(async () => { const r = await api('GET', '/runs/' + id); if (!paint(r)) setRefresh(null); }, 2000);
+}
+function cancelRun(id) { confirmBox('Cancel run', `Stop run ${id} on every host now?`, 'Cancel run', async () => { await api('POST', `/runs/${id}/cancel`); toast('Cancel sent', 'warn'); }); }
+
+/* ---------- new run ---------- */
 const tests = { write: 'RDMA write bandwidth', read: 'RDMA read bandwidth', send: 'RDMA send bandwidth', write_lat: 'RDMA write latency', read_lat: 'RDMA read latency', send_lat: 'RDMA send latency', tcp: 'TCP (iperf3)', udp: 'UDP (iperf3)' };
-async function showNew() {
-  const page = here();
-  const hosts = await api('GET', '/hosts').catch(say) || [];
+async function pageNew(token) {
+  const hosts = await api('GET', '/hosts');
   const prev = JSON.parse(sessionStorage.getItem('spec') || 'null'); sessionStorage.removeItem('spec');
-  const names = hosts.map(h => h.name);
-  const tags = [...new Set(hosts.flatMap(h => h.tags))].map(t => 'tag:' + t);
+  const names = hosts.map(h => h.name), tags = [...new Set(hosts.flatMap(h => h.tags))].map(t => 'tag:' + t);
   const opts = [...names, ...tags].map(n => `<option value="${esc(n)}">`).join('');
   const topo = prev ? (prev.mesh ? 'mesh' : prev.legs?.length ? 'legs' : prev.pairs ? 'pairs' : 'cs') : 'cs';
-  render(page, `<h2>New run</h2><datalist id="sel">${opts}</datalist>
-  <form id="f" class="card" onsubmit="return startRun(event)">
-    <div class="row">
-      <label>Name <input name="name" value="${esc(prev?.name || '')}" placeholder="optional"></label>
-      <label>Test <select name="test">${Object.entries(tests).map(([k, v]) => `<option value="${k}" ${prev?.test === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+  const v = (k, d = '') => esc(prev?.[k] ?? d);
+  if (!mount(token, `<div class="page-head"><h1>New run</h1></div><datalist id="sel">${opts}</datalist>
+  <form id="f" onsubmit="return startRun(event)">
+    <div class="card"><h2>What</h2><div class="row">
+      <label>Name <input name="name" value="${v('name')}" placeholder="optional" style="width:220px"></label>
+      <label>Test <select name="test">${Object.entries(tests).map(([k, t]) => `<option value="${k}" ${prev?.test === k ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
       <label>Topology <select name="topo" onchange="topoChange(this.value)">
-        <option value="cs" ${topo==='cs'?'selected':''}>Clients to servers (fan-out / fan-in)</option>
-        <option value="pairs" ${topo==='pairs'?'selected':''}>Pairs (client i to server i)</option>
-        <option value="mesh" ${topo==='mesh'?'selected':''}>Full mesh</option>
-        <option value="legs" ${topo==='legs'?'selected':''}>Explicit legs</option></select></label>
-    </div>
-    <div class="row" id="t-cs"><label>Clients <input name="clients" list="sel" size="40" value="${esc((prev?.clients||[]).join(', '))}" placeholder="host, tag:client, 172.27.100.1, port label"></label>
-      <label>Servers <input name="servers" list="sel" size="40" value="${esc((prev?.servers||[]).join(', '))}" placeholder="host, tag:server"></label></div>
-    <div class="row" id="t-mesh" style="display:none"><label>Hosts <input name="hosts" list="sel" size="60" value="${esc((prev?.hosts||[]).join(', '))}" placeholder="every ordered pair among these"></label></div>
-    <div class="row" id="t-legs" style="display:none"><label>Legs <input name="legs" size="60" value="${esc((prev?.legs||[]).map(l=>l.client+'>'+l.server).join(', '))}" placeholder="client>server, client>server"></label></div>
-    <div class="row">
-      <label>Duration s <input name="duration_sec" type="number" min="5" value="${prev?.duration_sec || 60}" style="width:80px"></label>
-      <label>Message size <input name="msg_size" type="number" min="1" value="${prev?.msg_size || ''}" placeholder="per test" style="width:100px"></label>
-      <label>Sweep sizes <input name="sizes" value="${esc((prev?.sizes||[]).join(', '))}" placeholder="4096, 65536, 1048576" style="width:160px"></label>
-      <label>QPs <input name="qps" type="number" min="1" value="${prev?.qps || 1}" style="width:60px"></label>
-      <label>Streams (iperf3) <input name="streams" type="number" min="1" value="${prev?.streams || 1}" style="width:60px"></label>
-      <label>Pass % of line rate <input name="pass_pct" type="number" min="1" max="100" value="${prev?.pass_pct || 90}" style="width:70px"></label>
-      <label>Max p99 µs (latency) <input name="max_lat_p99_us" type="number" step="0.01" value="${prev?.max_lat_p99_us || ''}" placeholder="report only" style="width:100px"></label>
-      <label>Max loss % (udp) <input name="max_loss_pct" type="number" step="0.1" value="${prev?.max_loss_pct || 1}" style="width:70px"></label>
-      <label><span><input name="bidir" type="checkbox" ${prev?.bidir ? 'checked' : ''}> Bidirectional</span></label>
-      <label><span><input name="serial" type="checkbox" ${prev?.serial ? 'checked' : ''}> Serial (one leg at a time, link matrix)</span></label>
-    </div>
-    <div class="row" style="margin-top:12px"><button class="primary" type="submit">Start</button><span class="muted">Servers start first; all clients start together 3 s later.</span></div>
-  </form>`);
+        <option value="cs" ${topo === 'cs' ? 'selected' : ''}>Clients to servers (fan-out / fan-in)</option>
+        <option value="pairs" ${topo === 'pairs' ? 'selected' : ''}>Pairs (client i to server i)</option>
+        <option value="mesh" ${topo === 'mesh' ? 'selected' : ''}>Full mesh</option>
+        <option value="legs" ${topo === 'legs' ? 'selected' : ''}>Explicit legs</option></select></label></div></div>
+    <div class="card"><h2>Who</h2>
+      <div class="row" id="t-cs"><label>Clients <input name="clients" list="sel" style="width:340px" value="${esc((prev?.clients || []).join(', '))}" placeholder="host, tag:client, 172.27.100.1, port label"></label>
+        <label>Servers <input name="servers" list="sel" style="width:340px" value="${esc((prev?.servers || []).join(', '))}" placeholder="host, tag:server"></label></div>
+      <div class="row" id="t-mesh" style="display:none"><label>Hosts <input name="hosts" list="sel" style="width:520px" value="${esc((prev?.hosts || []).join(', '))}" placeholder="every ordered pair among these"></label></div>
+      <div class="row" id="t-legs" style="display:none"><label>Legs <input name="legs" style="width:520px" value="${esc((prev?.legs || []).map(l => l.client + '>' + l.server).join(', '))}" placeholder="client>server, client>server"></label></div>
+      <p class="help" style="margin:10px 0 0">Selectors are host names, <span class="mono">tag:&lt;tag&gt;</span>, RDMA IPs or port labels. Legs are paired by shared subnet. ${hosts.length ? 'Known: ' + [...names, ...tags].map(n => `<span class="chip">${esc(n)}</span>`).join(' ') : 'No hosts enrolled yet.'}</p></div>
+    <div class="card"><h2>How</h2><div class="row">
+      <label>Duration (s) <input name="duration_sec" type="number" min="5" value="${v('duration_sec', 60)}" style="width:90px"></label>
+      <label>Message size <input name="msg_size" type="number" min="1" value="${v('msg_size') || ''}" placeholder="per test" style="width:110px"></label>
+      <label>Sweep sizes <input name="sizes" value="${esc((prev?.sizes || []).join(', '))}" placeholder="4096, 65536, 1048576" style="width:180px"></label>
+      <label>QPs <input name="qps" type="number" min="1" value="${v('qps', 1)}" style="width:70px"></label>
+      <label>Streams (iperf3) <input name="streams" type="number" min="1" value="${v('streams', 1)}" style="width:70px"></label>
+      <label class="inline"><input name="bidir" type="checkbox" ${prev?.bidir ? 'checked' : ''}> Bidirectional</label>
+      <label class="inline"><input name="serial" type="checkbox" ${prev?.serial ? 'checked' : ''}> Serial (one leg at a time, link matrix)</label></div></div>
+    <div class="card"><h2>Pass criteria</h2><div class="row">
+      <label>Pass at % of line rate <input name="pass_pct" type="number" min="1" max="100" value="${v('pass_pct', 90)}" style="width:80px"></label>
+      <label>Max p99 µs (latency tests) <input name="max_lat_p99_us" type="number" step="0.01" value="${prev?.max_lat_p99_us || ''}" placeholder="report only" style="width:120px"></label>
+      <label>Max loss % (UDP) <input name="max_loss_pct" type="number" step="0.1" value="${v('max_loss_pct', 1)}" style="width:80px"></label></div></div>
+    <div class="row"><button class="primary" type="submit" id="start">Start run</button><span class="sub">Servers start first; all clients start together 3 s later.</span></div>
+  </form>`)) return;
   topoChange(topo);
 }
 function topoChange(t) { $('#t-cs').style.display = (t === 'cs' || t === 'pairs') ? '' : 'none'; $('#t-mesh').style.display = t === 'mesh' ? '' : 'none'; $('#t-legs').style.display = t === 'legs' ? '' : 'none'; }
-function list(s) { return s.split(',').map(x => x.trim()).filter(Boolean); }
 async function startRun(ev) {
   ev.preventDefault();
   const f = new FormData(ev.target), g = k => f.get(k);
@@ -250,117 +412,122 @@ async function startRun(ev) {
     sizes: list(g('sizes')).map(Number).filter(Boolean) };
   const topo = g('topo');
   if (topo === 'mesh') { spec.mesh = true; spec.hosts = list(g('hosts')); }
-  else if (topo === 'legs') spec.legs = list(g('legs')).map(l => { const [c, s] = l.split('>'); return { client: (c||'').trim(), server: (s||'').trim() }; });
+  else if (topo === 'legs') spec.legs = list(g('legs')).map(l => { const [c, s] = l.split('>'); return { client: (c || '').trim(), server: (s || '').trim() }; });
   else { spec.clients = list(g('clients')); spec.servers = list(g('servers')); spec.pairs = topo === 'pairs'; }
-  try { const r = await api('POST', '/runs', spec); location.hash = '#run/' + r.id; } catch (e) { say(e); }
+  const b = $('#start'); b.disabled = true;
+  try { const r = await api('POST', '/runs', spec); location.hash = '#run/' + r.id; } catch (e) { fail(e); b.disabled = false; }
   return false;
 }
 
-/* Suites and schedules */
-async function showSuites() {
-  const page = here();
-  const [suites, scheds, sruns] = await Promise.all([api('GET', '/suites'), api('GET', '/schedules'), api('GET', '/suite-runs')]).catch(e => { say(e); return [[], [], []]; });
-  const added = JSON.parse(sessionStorage.getItem('suitespec') || 'null'); sessionStorage.removeItem('suitespec');
-  let html = `<h2>Suites</h2><p class="muted">A suite is an ordered list of runs executed back to back. Edit the JSON (an array of run specs, the same fields the New run form sends), or open a finished run and click "Add to a suite".</p>`;
-  for (const su of suites) html += suiteCard(su);
-  html += suiteCard({ id: 0, name: '', specs: added ? [added] : [] });
-  html += `<h2>Schedules</h2><form class="card row" onsubmit="return addSchedule(event)">
-    <label>Name <input name="name" required placeholder="nightly"></label>
-    <label>Suite <select name="suite_id">${suites.map(su => `<option value="${su.id}">${esc(su.name)}</option>`).join('')}</select></label>
-    <label>Cron (5 fields, controller local time) <input name="cron" required value="0 2 * * *" size="14"></label>
-    <button class="primary" ${suites.length ? '' : 'disabled'}>Add schedule</button></form>
-    <table><tr><th>ID</th><th>Name</th><th>Suite</th><th>Cron</th><th>Enabled</th><th>Last run</th><th>Next run</th><th></th></tr>`;
-  if (!scheds.length) html += `<tr><td colspan="8" class="muted">No schedules.</td></tr>`;
-  for (const sc of scheds) html += `<tr><td>${sc.id}</td><td>${esc(sc.name)}</td><td>${esc(sc.suite_name)}</td><td><code>${esc(sc.cron)}</code></td>
-    <td><input type="checkbox" ${sc.enabled ? 'checked' : ''} onchange='toggleSchedule(${JSON.stringify(sc)}, this.checked)'></td>
-    <td class="muted">${sc.last_run_at ? new Date(sc.last_run_at).toLocaleString() : '-'}</td><td class="muted">${sc.next_run_at ? new Date(sc.next_run_at).toLocaleString() : '-'}</td>
-    <td><button onclick="delSchedule(${sc.id})">Delete</button></td></tr>`;
-  html += `</table><h2 style="margin-top:20px">Suite runs</h2><table><tr><th>ID</th><th>Suite</th><th>Trigger</th><th>Status</th><th>Verdict</th><th>Runs</th><th>Started</th><th></th></tr>`;
-  if (!sruns.length) html += `<tr><td colspan="8" class="muted">No suite runs yet.</td></tr>`;
-  for (const r of sruns) html += `<tr><td>${r.id}</td><td>${esc(r.suite_name)}</td><td>${esc(r.trigger)}</td><td><span class="v ${r.status}">${r.status}</span></td>
-    <td>${r.verdict ? `<span class="v ${r.verdict}">${r.verdict}</span>` : ''}</td><td>${r.run_ids.map(id => `<a class="link" href="#run/${id}">${id}</a>`).join(' ')}</td>
-    <td class="muted">${new Date(r.started_at).toLocaleString()}</td><td>${r.status === 'running' ? `<button onclick="api('POST','/suite-runs/${r.id}/cancel').then(showSuites,say)">Cancel</button>` : ''}</td></tr>`;
-  if (!render(page, html + '</table>')) return;
+/* ---------- suites and schedules ---------- */
+async function pageSuites(token) {
+  if (!mount(token, `<div class="page-head"><h1>Suites</h1><span class="spacer"></span><button class="primary" onclick="editSuite()">New suite</button></div>
+    <p class="help">A suite is an ordered list of runs executed back to back, for repeatable acceptance tests. Open a finished run and choose "Add to a suite" to copy its settings.</p>
+    <div class="tbl"><table><thead><tr><th>Suite</th><th>Runs</th><th></th></tr></thead><tbody id="suites"></tbody></table></div>
+    <div class="page-head" style="margin-top:8px"><h1 style="font-size:18px">Schedules</h1><span class="spacer"></span><button onclick="editSchedule()">New schedule</button></div>
+    <div class="tbl"><table><thead><tr><th>Name</th><th>Suite</th><th>Cron</th><th>Enabled</th><th>Last run</th><th>Next run</th><th></th></tr></thead><tbody id="schedules"></tbody></table></div>
+    <div class="page-head" style="margin-top:8px"><h1 style="font-size:18px">Suite runs</h1></div>
+    <div class="tbl"><table><thead><tr><th>ID</th><th>Suite</th><th>Trigger</th><th>Status</th><th>Verdict</th><th>Runs</th><th>Started</th><th></th></tr></thead><tbody id="suite-runs"></tbody></table></div>`)) return;
+  const refresh = async () => {
+    const [suites, scheds, sruns] = await Promise.all([api('GET', '/suites'), api('GET', '/schedules'), api('GET', '/suite-runs')]);
+    window._suites = suites;
+    set('suites', suites.length ? suites.map(su => `<tr><td><b>${esc(su.name)}</b></td><td class="wrap muted">${su.specs.map(sp => `<span class="chip">${esc(sp.name || sp.test)}</span>`).join(' ')}</td>
+      <td style="text-align:right"><button class="sm primary" onclick="runSuite(${su.id})">Run now</button> <button class="sm" onclick="editSuite(${su.id})">Edit</button> <button class="sm danger" onclick="delSuite(${su.id}, '${esc(su.name)}')">Delete</button></td></tr>`).join('')
+      : `<tr><td colspan="3" class="empty">No suites yet.</td></tr>`);
+    set('schedules', scheds.length ? scheds.map(sc => `<tr><td><b>${esc(sc.name)}</b></td><td>${esc(sc.suite_name)}</td><td class="mono">${esc(sc.cron)}</td>
+      <td><input type="checkbox" ${sc.enabled ? 'checked' : ''} onchange='toggleSchedule(${JSON.stringify(sc)}, this.checked)'></td>
+      <td class="muted">${when(sc.last_run_at) || '-'}</td><td class="muted">${when(sc.next_run_at) || '-'}</td>
+      <td style="text-align:right"><button class="sm danger" onclick="delSchedule(${sc.id}, '${esc(sc.name)}')">Delete</button></td></tr>`).join('')
+      : `<tr><td colspan="7" class="empty">No schedules. Cron is 5 fields in the controller's local time, for example <span class="mono">0 2 * * *</span> for 02:00 every night.</td></tr>`);
+    set('suite-runs', sruns.length ? sruns.map(r => `<tr><td>${r.id}</td><td>${esc(r.suite_name)}</td><td class="muted">${esc(r.trigger)}</td><td>${badge(r.status)}</td><td>${badge(r.verdict)}</td>
+      <td>${r.run_ids.map(id => `<a href="#run/${id}">${id}</a>`).join(' ')}</td><td class="muted">${when(r.started_at)}</td>
+      <td style="text-align:right">${r.status === 'running' ? `<button class="sm danger" onclick="api('POST','/suite-runs/${r.id}/cancel').then(refreshFn,fail)">Cancel</button>` : ''}</td></tr>`).join('')
+      : `<tr><td colspan="8" class="empty">No suite runs yet.</td></tr>`);
+    const added = sessionStorage.getItem('suitespec');
+    if (added) { sessionStorage.removeItem('suitespec'); editSuite(0, [JSON.parse(added)]); }
+  };
+  await refresh(); setRefresh(refresh, 5000);
 }
-function suiteCard(su) {
-  return `<form class="card" onsubmit="return saveSuite(event, ${su.id})">
-    <div class="row"><label>Name <input name="name" value="${esc(su.name)}" required placeholder="new suite"></label>
-      <button class="primary">${su.id ? 'Save' : 'Create'}</button>
-      ${su.id ? `<button type="button" onclick="api('POST','/suites/${su.id}/run').then(showSuites,say)">Run now</button><button type="button" onclick="delSuite(${su.id})">Delete</button>` : ''}
-      <span class="muted">${su.specs.length} run(s)</span></div>
-    <textarea name="specs" rows="${Math.min(14, 3 + su.specs.length * 2)}" style="width:100%;margin-top:8px;font:12px/1.4 ui-monospace,monospace;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px">${esc(JSON.stringify(su.specs, null, 1).replace(/\n\s*/g, ' ').replace(/\{ /g, '\n {').replace(/^\[\n/, '[\n').replace(/ \]$/, '\n]'))}</textarea></form>`;
+function editSuite(id, extraSpecs) {
+  const su = (window._suites || []).find(s => s.id === id) || { id: 0, name: '', specs: [] };
+  const specs = [...su.specs, ...(extraSpecs || [])];
+  modal({ title: su.id ? 'Edit suite' : 'New suite', body: `<div class="row"><label>Name <input id="su-name" value="${esc(su.name)}" placeholder="nightly acceptance" style="width:300px"></label></div>
+    <p class="help" style="margin-top:12px">Runs, as a JSON list. Each entry takes the same fields as the New run form (test, clients, servers, hosts, mesh, legs, serial, sizes, duration_sec, msg_size, qps, streams, bidir, pass_pct, max_lat_p99_us, max_loss_pct).</p>
+    <textarea id="su-specs" rows="14">${esc(JSON.stringify(specs, null, 2))}</textarea>`,
+    actions: [{ label: 'Cancel' }, { label: su.id ? 'Save' : 'Create', cls: 'primary', close: false, run: async () => {
+      let parsed; try { parsed = JSON.parse($('#su-specs').value); if (!Array.isArray(parsed)) parsed = [parsed]; } catch (e) { return fail('Runs are not valid JSON: ' + e.message); }
+      try { await api(su.id ? 'PUT' : 'POST', su.id ? '/suites/' + su.id : '/suites', { name: $('#su-name').value, specs: parsed }); toast('Suite saved', 'pass'); closeModal(); refreshFn?.(); } catch (e) { fail(e); }
+    } }] });
 }
-async function saveSuite(ev, id) {
-  ev.preventDefault();
-  const f = new FormData(ev.target);
-  let specs; try { specs = JSON.parse(f.get('specs')); } catch (e) { say('specs: ' + e.message); return false; }
-  try { await api(id ? 'PUT' : 'POST', id ? '/suites/' + id : '/suites', { name: f.get('name'), specs }); say(''); showSuites(); } catch (e) { say(e); }
-  return false;
+async function runSuite(id) { try { const r = await api('POST', `/suites/${id}/run`); toast(`Suite run ${r.id} started`, 'pass'); refreshFn?.(); } catch (e) { fail(e); } }
+function delSuite(id, name) { confirmBox('Delete suite', `Delete "${name}" and its schedules? Past results are kept.`, 'Delete', async () => { await api('DELETE', '/suites/' + id); refreshFn?.(); }); }
+function editSchedule() {
+  const suites = window._suites || [];
+  if (!suites.length) return toast('Create a suite first', 'warn');
+  modal({ title: 'New schedule', body: `<div class="row"><label>Name <input id="sc-name" placeholder="nightly" style="width:200px"></label>
+    <label>Suite <select id="sc-suite">${suites.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></label>
+    <label>Cron (controller local time) <input id="sc-cron" value="0 2 * * *" class="mono" style="width:160px"></label></div>
+    <p class="help" style="margin-top:12px">Examples: <span class="mono">0 2 * * *</span> nightly at 02:00 · <span class="mono">*/30 * * * *</span> every 30 minutes · <span class="mono">0 6 * * 1</span> Mondays at 06:00.</p>`,
+    actions: [{ label: 'Cancel' }, { label: 'Add', cls: 'primary', close: false, run: async () => {
+      try { await api('POST', '/schedules', { name: $('#sc-name').value, suite_id: +$('#sc-suite').value, cron: $('#sc-cron').value, enabled: true }); toast('Schedule added', 'pass'); closeModal(); refreshFn?.(); } catch (e) { fail(e); }
+    } }] });
 }
-async function delSuite(id) { try { await api('DELETE', '/suites/' + id); showSuites(); } catch (e) { say(e); } }
-async function addSchedule(ev) {
-  ev.preventDefault();
-  const f = new FormData(ev.target);
-  try { await api('POST', '/schedules', { name: f.get('name'), suite_id: +f.get('suite_id'), cron: f.get('cron'), enabled: true }); say(''); showSuites(); } catch (e) { say(e); }
-  return false;
-}
-async function toggleSchedule(sc, on) { try { await api('PUT', '/schedules/' + sc.id, { ...sc, enabled: on }); showSuites(); } catch (e) { say(e); } }
-async function delSchedule(id) { try { await api('DELETE', '/schedules/' + id); showSuites(); } catch (e) { say(e); } }
+async function toggleSchedule(sc, on) { try { await api('PUT', '/schedules/' + sc.id, { ...sc, enabled: on }); toast(on ? 'Schedule enabled' : 'Schedule disabled', 'pass', 1500); refreshFn?.(); } catch (e) { fail(e); } }
+function delSchedule(id, name) { confirmBox('Delete schedule', `Delete schedule "${name}"?`, 'Delete', async () => { await api('DELETE', '/schedules/' + id); refreshFn?.(); }); }
 
-/* Fleet: releases and agent updates */
-async function showFleet(check) {
-  const page = here();
-  const [rel, jobs, hosts] = await Promise.all([api('GET', '/releases' + (check ? '?check=1' : '')), api('GET', '/updates'), api('GET', '/hosts')]).catch(e => { say(e); return [{ mirrored: [] }, [], []]; });
-  const versions = [...new Set(hosts.map(h => h.agent_version))];
-  let html = `<div class="row" style="margin-bottom:12px"><h2 style="margin:0">Fleet</h2><span class="muted">controller ${esc(rel.controller_version)} · agents on ${versions.map(esc).join(', ') || 'none'}</span>
-    <button onclick="showFleet(true)">Check GitHub</button>${rel.latest_on_github ? `<span>latest on GitHub: <b>${esc(rel.latest_on_github)}</b></span>` : ''}
-    <form class="row" onsubmit="return fetchRelease(event)"><label>Mirror release <input name="version" placeholder="${esc(rel.latest_on_github || 'v0.3.0')}" size="10"></label><button>Fetch</button></form></div>`;
-  html += `<div class="card"><div class="row"><b>Mirrored releases</b></div><table><tr><th>Version</th><th>Arches</th><th>Mirrored</th><th></th></tr>`;
-  if (!rel.mirrored.length) html += `<tr><td colspan="4" class="muted">Nothing mirrored yet. Fetch a release, then push it to the agents.</td></tr>`;
-  for (const r of rel.mirrored) html += `<tr><td><b>${esc(r.version)}</b></td><td>${r.arches.join(', ')}</td><td class="muted">${new Date(r.mirrored_at).toLocaleString()}</td>
-    <td><form class="row" onsubmit="return startUpdate(event, '${esc(r.version)}')"><input name="hosts" placeholder="all hosts, or names / tag:x" size="26"><button class="primary">Update agents</button></form></td></tr>`;
-  html += `</table></div><h2>Update jobs</h2>`;
-  if (!jobs.length) html += `<p class="muted">No update jobs yet.</p>`;
-  for (const j of jobs) {
-    html += `<div class="card"><div class="row"><b>Job ${j.id}</b> to ${esc(j.version)} <span class="v ${j.status === 'done' ? 'pass' : j.status === 'failed' ? 'fail' : 'running'}">${j.status}</span><span class="muted">${new Date(j.created_at).toLocaleString()}</span></div>
-      <table><tr><th>Host</th><th>From</th><th>Status</th><th>Note</th></tr>${j.hosts.map(h => `<tr><td>${esc(h.name)}</td><td class="muted">${esc(h.from)}</td><td><span class="v ${h.status === 'done' ? 'pass' : h.status === 'failed' ? 'fail' : h.status === 'skipped' ? 'warn' : 'running'}">${h.status}</span></td><td class="muted">${esc(h.note)}</td></tr>`).join('')}</table></div>`;
-  }
-  if (!render(page, html)) return;
-  if (jobs.some(j => j.status === 'running')) poll(() => showFleet(), 3000);
+/* ---------- fleet ---------- */
+async function pageFleet(token) {
+  if (!mount(token, `<div class="page-head"><h1>Fleet</h1><span class="spacer"></span><button onclick="checkGitHub()">Check GitHub</button><button class="primary" onclick="fetchRelease()">Mirror a release</button></div>
+    <div class="tiles" id="fleet-tiles"></div>
+    <div class="card"><h2>Mirrored releases</h2><div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th>Version</th><th>Builds</th><th>Mirrored</th><th></th></tr></thead><tbody id="releases"></tbody></table></div></div>
+    <div id="jobs"></div>`)) return;
+  const refresh = async () => {
+    const [rel, jobs, hosts] = await Promise.all([api('GET', '/releases'), api('GET', '/updates'), api('GET', '/hosts')]);
+    const versions = {}; hosts.forEach(h => versions[h.agent_version || 'unknown'] = (versions[h.agent_version || 'unknown'] || 0) + 1);
+    set('fleet-tiles', `<div class="tile"><div class="k">Controller</div><div class="v" style="font-size:20px">${esc(rel.controller_version)}</div></div>
+      <div class="tile"><div class="k">Agents</div><div class="v" style="font-size:20px">${Object.entries(versions).map(([v, n]) => `${esc(v)} <small>× ${n}</small>`).join('<br>') || '<small>none</small>'}</div></div>
+      <div class="tile"><div class="k">Latest on GitHub</div><div class="v" style="font-size:20px" id="latest">${esc(rel.latest_on_github || '?')}</div></div>`);
+    set('releases', rel.mirrored.length ? rel.mirrored.map(r => `<tr><td><b>${esc(r.version)}</b></td><td>${r.arches.map(a => `<span class="chip">${a}</span>`).join(' ')}</td><td class="muted">${when(r.mirrored_at)}</td>
+      <td style="text-align:right"><button class="sm primary" onclick="startUpdate('${esc(r.version)}')">Update agents</button></td></tr>`).join('')
+      : `<tr><td colspan="4" class="empty">Nothing mirrored. Click "Mirror a release" to pull one from GitHub, then push it to the agents.</td></tr>`);
+    set('jobs', jobs.map(j => `<div class="card"><h2>Update job ${j.id} to ${esc(j.version)} ${badge(j.status, j.status === 'done' ? 'pass' : j.status === 'failed' ? 'fail' : 'running')} <span class="muted" style="text-transform:none;letter-spacing:0">${when(j.created_at)}</span></h2>
+      <div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th>Host</th><th>From</th><th>Status</th><th>Note</th></tr></thead><tbody>${j.hosts.map(h => `<tr><td>${esc(h.name)}</td><td class="muted">${esc(h.from)}</td><td>${badge(h.status)}</td><td class="muted wrap">${esc(h.note)}</td></tr>`).join('')}</tbody></table></div></div>`).join('')
+      || `<p class="help">No update jobs yet. Updates go one host at a time; a host that does not come back on the new version is rolled back by its launcher.</p>`);
+    setRefresh(refresh, jobs.some(j => j.status === 'running') ? 3000 : 15000);
+  };
+  await refresh();
 }
-async function fetchRelease(ev) {
-  ev.preventDefault();
-  const v = new FormData(ev.target).get('version') || 'latest';
-  say('fetching ' + v + ' from GitHub...');
-  try { await api('POST', '/releases/fetch', { version: v }); say(''); showFleet(); } catch (e) { say(e); }
-  return false;
+async function checkGitHub() { try { const rel = await api('GET', '/releases?check=1'); set('latest', esc(rel.latest_on_github)); toast('Latest on GitHub: ' + rel.latest_on_github, 'info'); } catch (e) { fail(e); } }
+function fetchRelease() {
+  modal({ title: 'Mirror a release', body: `<div class="row"><label>Version <input id="rel-v" placeholder="latest" class="mono" style="width:160px"></label></div><p class="help" style="margin-top:12px">Downloads the agent binaries and checksums from GitHub Releases into the controller. Leave empty for the newest release.</p>`,
+    actions: [{ label: 'Cancel' }, { label: 'Fetch', cls: 'primary', close: false, run: async () => { try { const r = await api('POST', '/releases/fetch', { version: $('#rel-v').value || 'latest' }); toast(`Mirrored ${r.version}`, 'pass'); closeModal(); refreshFn?.(); } catch (e) { fail(e); } } }] });
 }
-async function startUpdate(ev, version) {
-  ev.preventDefault();
-  const hosts = list(new FormData(ev.target).get('hosts'));
-  try { await api('POST', '/updates', { version, hosts }); say(''); showFleet(); } catch (e) { say(e); }
-  return false;
+function startUpdate(version) {
+  modal({ title: 'Update agents to ' + version, body: `<div class="row"><label>Hosts <input id="upd-hosts" placeholder="all hosts" style="width:360px"></label></div><p class="help" style="margin-top:12px">Leave empty for every host, or list names and <span class="mono">tag:&lt;tag&gt;</span> selectors. Hosts busy with a test are waited for; each host must report the new version before the next one starts.</p>`,
+    actions: [{ label: 'Cancel' }, { label: 'Start update', cls: 'primary', close: false, run: async () => { try { const j = await api('POST', '/updates', { version, hosts: list($('#upd-hosts').value) }); toast(`Update job ${j.id} started`, 'pass'); closeModal(); refreshFn?.(); } catch (e) { fail(e); } } }] });
 }
 
-/* Alerts */
-async function showAlerts(all) {
-  const page = here();
-  const alerts = await api('GET', '/alerts' + (all ? '?all=1' : '')).catch(say) || [];
-  let html = `<div class="row" style="margin-bottom:12px"><h2 style="margin:0">Alerts</h2><label><input type="checkbox" ${all ? 'checked' : ''} onchange="showAlerts(this.checked)"> include resolved</label></div>
-    <table><tr><th>State</th><th>Kind</th><th>Host</th><th>Port</th><th>Message</th><th>Opened</th><th>Resolved</th></tr>`;
-  if (!alerts.length) html += `<tr><td colspan="7" class="muted">No ${all ? '' : 'open '}alerts.</td></tr>`;
-  for (const a of alerts) html += `<tr><td><span class="v ${a.resolved_at ? 'pass' : 'fail'}">${a.resolved_at ? 'resolved' : 'open'}</span></td><td>${esc(a.kind)}</td><td>${esc(a.host)}</td><td>${esc(a.port)}</td>
-    <td style="white-space:normal">${esc(a.message)}</td><td class="muted">${new Date(a.opened_at).toLocaleString()}</td><td class="muted">${a.resolved_at ? new Date(a.resolved_at).toLocaleString() : ''}</td></tr>`;
-  if (!render(page, html + '</table>')) return;
-  poll(() => showAlerts(all), 10000);
+/* ---------- alerts ---------- */
+async function pageAlerts(token) {
+  if (!mount(token, `<div class="page-head"><h1>Alerts</h1><span class="spacer"></span><label class="row inline sub"><input type="checkbox" id="all" onchange="refreshFn()"> include resolved</label></div>
+    <p class="help">Opened by the controller for agents that stop reporting, ports that leave ACTIVE, error counters that grow while idle, hot transceivers, failed runs and failed updates. They close themselves when the condition clears.</p>
+    <div class="tbl"><table><thead><tr><th>State</th><th>Kind</th><th>Host</th><th>Port</th><th>Message</th><th>Opened</th><th>Resolved</th></tr></thead><tbody id="alerts"></tbody></table></div>`)) return;
+  const refresh = async () => {
+    const all = $('#all')?.checked;
+    const alerts = await api('GET', '/alerts' + (all ? '?all=1' : ''));
+    set('alerts', alerts.length ? alerts.map(a => `<tr><td>${badge(a.resolved_at ? 'resolved' : 'open', a.resolved_at ? 'pass' : 'fail')}</td><td>${esc(a.kind)}</td><td>${esc(a.host)}</td><td>${esc(a.port)}</td><td class="wrap">${esc(a.message)}</td><td class="muted">${when(a.opened_at)}</td><td class="muted">${when(a.resolved_at)}</td></tr>`).join('')
+      : `<tr><td colspan="7" class="empty">No ${all ? '' : 'open '}alerts.</td></tr>`);
+  };
+  await refresh(); setRefresh(refresh, 10000);
 }
+
+/* ---------- global ---------- */
 async function alertBadge() {
-  const n = (await api('GET', '/alerts').catch(() => [])).length;
-  const b = $('#alert-count'); b.textContent = n; b.style.display = n ? '' : 'none';
+  try { const n = (await api('GET', '/alerts')).length; const b = $('#alert-count'); b.textContent = n; b.style.display = n ? '' : 'none'; } catch {}
 }
-alertBadge(); setInterval(alertBadge, 30000);
-
-api('GET', '/status').then(s => { $('#ver').textContent = s.version; $('#grafana').href = s.grafana_url || (location.protocol + '//' + location.hostname + ':3000'); }).catch(() => {});
+api('GET', '/status').then(s => { $('#ver').textContent = 'controller ' + s.version; $('#grafana').href = s.grafana_url || ('http://' + location.hostname + ':3000'); }).catch(() => {});
+alertBadge(); setInterval(() => { if (!document.hidden) alertBadge(); }, 30000);
+setInterval(() => { $('#clock').textContent = new Date().toLocaleTimeString(); }, 1000);
 route();
 </script>
 </body>
