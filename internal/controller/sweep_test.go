@@ -197,3 +197,22 @@ func TestSwitchVLANsFromSonicTable(t *testing.T) {
 		t.Errorf("host port fabrics: %+v (unset takes the VLAN, a set one is kept for the mismatch)", p)
 	}
 }
+
+func TestTwinPCIeFunctionsDrawOneCable(t *testing.T) {
+	ports := []api.TopoHostPort{
+		{Netdev: "enP2p1s0f0np0", Switch: "Z9864F", SwitchPort: "Ethernet0"},                    // second function, no address, reported first
+		{Netdev: "enp1s0f0np0", IP: "172.27.100.10", Switch: "Z9864F", SwitchPort: "Ethernet0"}, // the configured one
+		{Netdev: "enp1s0f1np1"}, // uncabled
+		{Netdev: "eno1", IP: "10.0.0.1", Switch: "Z9864F", SwitchPort: "Ethernet120"},
+	}
+	collapseTwins(ports)
+	if p := ports[0]; p.TwinOf != "enp1s0f0np0" || p.SwitchPort != "" {
+		t.Errorf("twin: %+v", p)
+	}
+	if p := ports[1]; p.TwinOf != "" || p.SwitchPort != "Ethernet0" {
+		t.Errorf("configured port: %+v", p)
+	}
+	if p := ports[3]; p.TwinOf != "" || p.SwitchPort != "Ethernet120" {
+		t.Errorf("other port touched: %+v", p)
+	}
+}
