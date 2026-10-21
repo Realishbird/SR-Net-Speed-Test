@@ -80,6 +80,7 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	go al.loop(ctx)
 	go s.suites.scheduler(ctx)
 	go s.gnmicLoop(ctx)
+	go s.lldpLoop(ctx)
 	return s, nil
 }
 

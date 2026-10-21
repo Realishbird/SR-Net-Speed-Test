@@ -428,7 +428,7 @@ function drawTopology(t) {
 }
 async function pageTopology(token) {
   if (!mount(token, `<div class="page-head"><h1>Topology</h1><span class="spacer"></span><span class="sub" id="tp-legs"></span><span class="sub" id="tp-upd"></span></div>
-    <p class="help">Drawn from each host's LLDP neighbour and the switch's own port counters. Line width follows the live rate; the legs of a run in progress glow. A host port with "no LLDP" has not reported a neighbour yet: re-run install.sh on that host once so the agent may query lldpctl.</p>
+    <p class="help">Drawn from each host's LLDP neighbour and the switch's own port counters. Line width follows the live rate; the legs of a run in progress glow. Switch ports come from the switch's own LLDP table (polled every minute) or from the host's lldpd; "no LLDP" means neither has seen a neighbour on that port yet.</p>
     <div class="card topo" style="padding:10px 10px 4px" id="tp-svg"></div><div id="tp-warn"></div>
     <div class="card"><h2>Switch ports in use</h2><div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th>Switch</th><th>Port</th><th>Link</th><th>Host port</th><th>Fabric</th><th class="num">In Gbps</th><th class="num">Out Gbps</th><th class="num">Discards in / out</th><th class="num">Errors in / out</th><th class="num">FCS</th></tr></thead><tbody id="tp-ports"></tbody></table></div></div>
     <div class="card"><h2>Hosts under test</h2><div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th></th><th>Host</th><th class="num">CPU</th><th class="num">Load</th><th class="num">Memory</th><th>Ports</th><th>Switch ports</th><th class="num">TX / RX Gbps</th></tr></thead><tbody id="tp-hosts"></tbody></table></div></div>`)) return;

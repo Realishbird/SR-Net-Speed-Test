@@ -1,12 +1,16 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -232,57 +236,156 @@ type lldpEntry struct {
 	Switch, Port string
 }
 
-// switchLLDP reads every configured switch's own LLDP table out of
-// VictoriaMetrics (gnmic subscribes to it) and keys it by the neighbour's
+// switchLLDP asks every switch with gNMI settings for its own LLDP table
+// (a gNMI Get of /openconfig-lldp:lldp/interfaces, run through gnmic with
+// the same config file its subscriptions use) and keys the neighbours by
 // system name and port description, lower-cased, which on a Linux host are
 // its hostname and netdev. A host whose agent cannot run lldpctl is still
-// placed, because the switch saw it.
-func (s *Server) switchLLDP(ctx context.Context) map[string]lldpEntry {
+// placed, because the switch saw it. This is a Get rather than a
+// subscription because Enterprise SONiC refuses the wildcard interface
+// list in a Subscribe ("wildcard path not supported") and LLDP changes
+// when cables move, not more often.
+func (s *Server) switchLLDP(ctx context.Context) (map[string]lldpEntry, error) {
 	out := map[string]lldpEntry{}
-	switches := s.switchList()
-	if len(switches) == 0 || s.metrics.vmURL == "" {
-		return out
-	}
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
 	bySource := map[string]SwitchConfig{}
-	for _, sw := range switches {
-		if sw.GNMIUser != "" {
-			bySource[strings.ToLower(sw.Name)] = sw
-			bySource[strings.ToLower(sw.Address)] = sw
-			bySource[strings.ToLower(fmt.Sprintf("%s:%d", sw.Address, sw.GNMIPort))] = sw
-		}
-	}
-	// Each leaf is its own series; join system-name and port-description on
-	// the interface and neighbour keys.
-	type key struct{ source, iface, id string }
-	names := map[key]string{}
-	descs := map[key]string{}
-	for leaf, dst := range map[string]map[key]string{"system_name": names, "port_description": descs} {
-		rows, err := s.metrics.vmQuery(ctx, `last_over_time(`+gnmiMetric("lldp.*neighbor_state_"+leaf)+`[5m])`)
-		if err != nil {
-			return out
-		}
-		for _, r := range rows {
-			k := key{strings.ToLower(r.Labels["source"]), r.Labels["name"], r.Labels["id"]}
-			if v := r.Labels[leaf]; v != "" && k.iface != "" {
-				dst[k] = v
-			}
-		}
-	}
-	for k, sys := range names {
-		desc := descs[k]
-		if desc == "" {
+	for _, sw := range cfg.Switches {
+		if sw.GNMIUser == "" || sw.Address == "" {
 			continue
 		}
-		sw, ok := bySource[k.source]
+		port := sw.GNMIPort
+		if port == 0 {
+			port = 8080
+		}
+		host, _, _ := strings.Cut(sw.Address, ":")
+		bySource[strings.ToLower(sw.Name)] = sw
+		bySource[strings.ToLower(host)] = sw
+		bySource[strings.ToLower(fmt.Sprintf("%s:%d", host, port))] = sw
+	}
+	if len(bySource) == 0 {
+		return out, nil
+	}
+	if _, err := os.Stat(cfg.GnmicConfigPath); err != nil {
+		return out, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, cfg.GnmicPath, "--config", cfg.GnmicConfigPath, "--encoding", "json_ietf", "--format", "json",
+		"get", "--path", "/openconfig-lldp:lldp/interfaces")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	raw, err := cmd.Output()
+	if err != nil && len(raw) == 0 {
+		msg := strings.TrimSpace(stderr.String())
+		if len(msg) > 300 {
+			msg = msg[:300]
+		}
+		return out, fmt.Errorf("gnmic get lldp: %v: %s", err, msg)
+	}
+	for source, neighbours := range parseLLDPGet(raw) {
+		src := strings.ToLower(source)
+		sw, ok := bySource[src]
 		if !ok {
-			name, _, _ := strings.Cut(k.source, ":")
+			name, _, _ := strings.Cut(src, ":")
 			if sw, ok = bySource[name]; !ok {
 				continue
 			}
 		}
-		out[strings.ToLower(sys)+"|"+strings.ToLower(desc)] = lldpEntry{Switch: sw.Name, Port: k.iface}
+		for _, n := range neighbours {
+			if n.SystemName == "" || n.PortDesc == "" {
+				continue
+			}
+			out[strings.ToLower(n.SystemName)+"|"+strings.ToLower(n.PortDesc)] = lldpEntry{Switch: sw.Name, Port: n.Iface}
+		}
 	}
-	return out
+	return out, nil
+}
+
+// lldpNeighbour is one row of a switch's LLDP table.
+type lldpNeighbour struct {
+	Iface, SystemName, PortDesc, PortID string
+}
+
+// parseLLDPGet reads gnmic's JSON rendering of a Get on
+// /openconfig-lldp:lldp/interfaces: a list of responses, one per target,
+// each with "source" and "updates" whose "values" hold the OpenConfig tree.
+// The tree is walked generically because the exact nesting and module
+// prefixes ("openconfig-lldp:interface") vary between switches: an object
+// with a "name" and a "neighbors" child is an interface, and a "state"
+// object below it that carries a system-name or port-description is a
+// neighbour.
+func parseLLDPGet(raw []byte) map[string][]lldpNeighbour {
+	var resp []struct {
+		Source  string `json:"source"`
+		Updates []struct {
+			Values map[string]any `json:"values"`
+		} `json:"updates"`
+	}
+	res := map[string][]lldpNeighbour{}
+	// With log: true gnmic may print a few log lines first; the answer
+	// starts at the first line that opens the JSON list.
+	if i := bytes.Index(raw, []byte("\n[")); i >= 0 && !bytes.HasPrefix(bytes.TrimSpace(raw), []byte("[")) {
+		raw = raw[i+1:]
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return res
+	}
+	for _, r := range resp {
+		var walk func(v any, iface string)
+		walk = func(v any, iface string) {
+			switch t := v.(type) {
+			case map[string]any:
+				m := make(map[string]any, len(t))
+				for k, x := range t {
+					m[stripModule(k)] = x
+				}
+				if n, ok := m["name"].(string); ok {
+					if _, has := m["neighbors"]; has {
+						iface = n
+					}
+				}
+				if st, ok := m["state"].(map[string]any); ok && iface != "" {
+					nb := lldpNeighbour{Iface: iface}
+					for k, x := range st {
+						sv, _ := x.(string)
+						switch stripModule(k) {
+						case "system-name":
+							nb.SystemName = sv
+						case "port-description":
+							nb.PortDesc = sv
+						case "port-id":
+							nb.PortID = sv
+						}
+					}
+					if nb.SystemName != "" || nb.PortDesc != "" {
+						res[r.Source] = append(res[r.Source], nb)
+					}
+				}
+				for _, x := range t {
+					walk(x, iface)
+				}
+			case []any:
+				for _, x := range t {
+					walk(x, iface)
+				}
+			}
+		}
+		for _, u := range r.Updates {
+			walk(u.Values, "")
+		}
+	}
+	return res
+}
+
+// stripModule drops a YANG module prefix: "openconfig-lldp:interface" is
+// "interface".
+func stripModule(k string) string {
+	if i := strings.LastIndex(k, ":"); i >= 0 {
+		return k[i+1:]
+	}
+	return k
 }
 
 // fillLLDP completes each host port's switch neighbour from the switches'
@@ -290,7 +393,9 @@ func (s *Server) switchLLDP(ctx context.Context) map[string]lldpEntry {
 // the Topology and per-leg switch figures work even before every host runs
 // lldpctl. The host's own report wins when it has one.
 func (s *Server) fillLLDP(ctx context.Context, hosts []hostRec) {
-	lldp := s.cachedLLDP(ctx)
+	s.mu.Lock()
+	lldp := s.lldp
+	s.mu.Unlock()
 	if len(lldp) == 0 {
 		return
 	}
@@ -308,23 +413,34 @@ func (s *Server) fillLLDP(ctx context.Context, hosts []hostRec) {
 	}
 }
 
-// cachedLLDP keeps the switch LLDP map for a minute: the Hosts page polls
-// every few seconds and the table changes when cables move, not before.
-func (s *Server) cachedLLDP(ctx context.Context) map[string]lldpEntry {
-	s.mu.Lock()
-	fresh := s.lldpAt.Add(time.Minute).After(time.Now())
-	m := s.lldp
-	s.mu.Unlock()
-	if fresh {
-		return m
+// lldpLoop refreshes the switch LLDP table once a minute, off the request
+// path: a Get takes a second or two and the table changes when cables
+// move, not between Hosts page polls. A failed poll keeps the last table
+// and logs once per change of error text.
+func (s *Server) lldpLoop(ctx context.Context) {
+	lastErr := ""
+	for {
+		m, err := s.switchLLDP(ctx)
+		if err != nil {
+			if msg := err.Error(); msg != lastErr {
+				log.Printf("switch lldp: %v", err)
+				lastErr = msg
+			}
+		} else {
+			if lastErr != "" {
+				log.Printf("switch lldp: %d neighbours", len(m))
+			}
+			lastErr = ""
+			s.mu.Lock()
+			s.lldp, s.lldpAt = m, time.Now()
+			s.mu.Unlock()
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Minute):
+		}
 	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	m = s.switchLLDP(ctx)
-	s.mu.Lock()
-	s.lldp, s.lldpAt = m, time.Now()
-	s.mu.Unlock()
-	return m
 }
 
 // buildTopology joins hosts, their LLDP neighbours and the switch port
