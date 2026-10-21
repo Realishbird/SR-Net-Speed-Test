@@ -360,7 +360,7 @@ async function alertBadge() {
 }
 alertBadge(); setInterval(alertBadge, 30000);
 
-api('GET', '/status').then(s => { $('#ver').textContent = s.version; $('#grafana').href = s.grafana_url || (location.protocol + '//' + location.hostname + ':3000'); }).catch(() => {});
+api('GET', '/status').then(s => { $('#ver').textContent = s.version; $('#grafana').href = s.grafana_url || ('http://' + location.hostname + ':3000'); }).catch(() => {});
 route();
 </script>
 </body>
