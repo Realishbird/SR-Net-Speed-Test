@@ -151,6 +151,21 @@ func TestSwitchLLDPFillsHostPorts(t *testing.T) {
 	}
 }
 
+func TestSendTestExpectsRNRAndFlushCounters(t *testing.T) {
+	for _, c := range []struct {
+		test, key string
+		isError   bool
+	}{
+		{"send", "rnr_nak_retry_err", false}, {"send", "resp_cqe_error", false}, {"send_lat", "resp_cqe_error", false},
+		{"send", "out_of_sequence", true}, {"write", "rnr_nak_retry_err", true}, {"read", "resp_cqe_error", true},
+		{"send", "np_cnp_sent", false}, // congestion signalling is never an error
+	} {
+		if got := counterIsError(c.test, c.key); got != c.isError {
+			t.Errorf("%s %s: isError %v, want %v", c.test, c.key, got, c.isError)
+		}
+	}
+}
+
 func TestSwitchVLANsFromSonicTable(t *testing.T) {
 	raw := []byte(`[{"source":"z9864f","timestamp":1,"time":"2026-10-21T20:19:47Z","updates":[{"Path":"sonic-vlan:sonic-vlan/VLAN_MEMBER","values":{"sonic-vlan:sonic-vlan/VLAN_MEMBER":{"sonic-vlan:VLAN_MEMBER":{"VLAN_MEMBER_LIST":[
 		{"ifname":"Ethernet0","name":"Vlan100","tagging_mode":"untagged"},
