@@ -61,6 +61,9 @@ type Orchestrator struct {
 	// switches lists the configured switches, for per-leg switch counters.
 	// Nil when the server has not wired it (tests).
 	switches func() []SwitchConfig
+	// lldp completes host ports' switch neighbours from the switch side.
+	// Nil when the server has not wired it (tests).
+	lldp func(ctx context.Context, hosts []hostRec)
 
 	mu       sync.Mutex
 	portLock map[int64]int64        // port id -> run id
@@ -398,6 +401,9 @@ func (o *Orchestrator) Start(ctx context.Context, spec api.RunSpec) (int64, erro
 	if err != nil {
 		return 0, err
 	}
+	if o.lldp != nil {
+		o.lldp(ctx, hosts)
+	}
 	plans, err := plan(hosts, spec)
 	if err != nil {
 		return 0, &userError{err}
@@ -726,7 +732,7 @@ func (o *Orchestrator) score(ar *activeRun) (api.RunSummary, string) {
 		if l.ToolGbps == 0 && p.serverRes != nil {
 			l.ToolGbps = p.serverRes.AvgGbps
 		}
-		if !lat && !p.startAt.IsZero() {
+		if !lat && !p.startAt.IsZero() && p.clientRes != nil && p.clientRes.Error == "" {
 			from := p.startAt.Add(2 * time.Second)
 			to := p.startAt.Add(time.Duration(ar.spec.DurationSec-1) * time.Second)
 			if id, dir, nic, ok := counterSide(ar, p); ok {

@@ -189,7 +189,10 @@ func Run(ctx context.Context, cfg Config) error {
 				break
 			}
 			log.Printf("poll: %v (retry in %s)", err, backoff)
-			time.Sleep(backoff)
+			select {
+			case <-ctx.Done():
+			case <-time.After(backoff):
+			}
 			backoff = min(backoff*2, 30*time.Second)
 			continue
 		}

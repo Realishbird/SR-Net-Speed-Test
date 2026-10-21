@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -53,11 +52,7 @@ func (s *Server) applySwitches(ctx context.Context, list []SwitchConfig, action 
 		return fmt.Errorf("save config: %w", err)
 	}
 	s.snmp.set(list)
-	if n, err := WriteGnmicConfig(cfg, cfg.GnmicConfigPath); err != nil {
-		log.Printf("gnmic config: %v", err)
-	} else {
-		log.Printf("gnmic config written for %d switch(es)", n)
-	}
+	s.writeGnmic(ctx)
 	s.store.Audit(ctx, action, detail)
 	return nil
 }

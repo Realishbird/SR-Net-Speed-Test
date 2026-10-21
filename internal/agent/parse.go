@@ -76,15 +76,18 @@ func allFloats(re *regexp.Regexp, text string) []float64 {
 	return out
 }
 
-// ethtoolModule runs `ethtool -m`, trying the narrowly scoped sudo rule first
-// because some drivers return success with no EEPROM data when unprivileged.
+// ethtoolModule runs `ethtool -m`. The agent's unit grants it CAP_NET_ADMIN,
+// which is all the EEPROM read needs, so it runs the command directly. The
+// sudo rule older installs wrote is tried only when that returns nothing:
+// under the unit's capability bounding set sudo cannot work at all, and
+// trying it first logged a failed sudo to auth.log every few seconds per port.
 func ethtoolModule(ctx context.Context, netdev string) string {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	if out, err := exec.CommandContext(ctx, "sudo", "-n", "/usr/sbin/ethtool", "-m", netdev).Output(); err == nil && len(out) > 0 {
+	if out, err := exec.CommandContext(ctx, "ethtool", "-m", netdev).Output(); err == nil && len(out) > 0 {
 		return string(out)
 	}
-	out, _ := exec.CommandContext(ctx, "ethtool", "-m", netdev).Output()
+	out, _ := exec.CommandContext(ctx, "sudo", "-n", "/usr/sbin/ethtool", "-m", netdev).Output()
 	return string(out)
 }
 

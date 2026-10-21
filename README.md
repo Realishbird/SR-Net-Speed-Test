@@ -43,7 +43,7 @@ curl -fsSL https://raw.githubusercontent.com/Realishbird/SR-Net-Speed-Test/main/
   | sudo bash -s -- --controller https://10.0.0.5:8443 --token <token> --ca-sha256 <fingerprint>
 ```
 
-`install.sh` installs `rdma-core`, `perftest`, `iperf3`, `ethtool`, `chrony` and `lldpd` from apt, downloads the signed-checksum agent binary for the host's architecture (amd64 or arm64), pins the controller's CA by fingerprint, enrolls, and starts `srnet-agent.service` as the unprivileged `srnet` user. The only sudo rules it adds are `ethtool -m` for transceiver readings and `lldpctl -f keyvalue` for switch neighbours. Re-running upgrades in place; `--uninstall` removes everything.
+`install.sh` installs `rdma-core`, `perftest`, `iperf3`, `ethtool`, `chrony` and `lldpd` from apt, downloads the signed-checksum agent binary for the host's architecture (amd64 or arm64), pins the controller's CA by fingerprint, enrolls, and starts `srnet-agent.service` as the unprivileged `srnet` user. It adds no sudo rules: the service's ambient `CAP_NET_ADMIN` covers `ethtool -m` for transceiver readings and its supplementary group `adm` covers `lldpctl` for switch neighbours (the sudo rules older versions wrote never worked under the service's capability bounding set and are removed on upgrade). Re-running upgrades in place; `--uninstall` removes everything.
 
 ## 3. Name your devices
 
@@ -148,7 +148,7 @@ In the UI, open any finished run and click "Add to a suite" to copy its spec int
 
 ## Alerts and reports
 
-The controller opens an alert when an agent stops reporting for 2 minutes, a port leaves ACTIVE, error counters grow while no test runs on that port, a transceiver reports 70 C or more (`transceiver_max_c` in `controller.json`), a run or suite fails, or an update fails. Alerts close themselves when the condition clears; the Alerts page has "Clear" per alert and "Clear all" for the ones that do not (a failed update, a failed run), and `srnet alerts --clear ID` / `--clear-all` do the same. `srnet alerts` and the Alerts page list them; set `alert_webhook_url` in `/etc/srnet/controller.json` to POST a JSON body (`state`, `kind`, `host`, `port`, `message`, `text`) to Slack, Teams, Alertmanager or a script on every open and resolve.
+The controller opens an alert when an agent stops reporting for 2 minutes, a port with an address leaves ACTIVE (a port with no IP is taken to be unused), error counters grow while no test runs on that port (growth during a run belongs to that run's result and does not alert; an idle-error alert closes by itself after 15 minutes without further growth), a transceiver reports 70 C or more (`transceiver_max_c` in `controller.json`), a run or suite fails, or an update fails. Alerts close themselves when the condition clears; the Alerts page has "Clear" per alert and "Clear all" for the ones that do not (a failed update, a failed run), and `srnet alerts --clear ID` / `--clear-all` do the same. `srnet alerts` and the Alerts page list them; set `alert_webhook_url` in `/etc/srnet/controller.json` to POST a JSON body (`state`, `kind`, `host`, `port`, `message`, `text`) to Slack, Teams, Alertmanager or a script on every open and resolve.
 
 Every run has a CSV and an HTML report (print to PDF from the browser): `srnet report 42 --format csv -o run42.csv`, `srnet report 42 --format html -o run42.html`, or the links on the run page.
 

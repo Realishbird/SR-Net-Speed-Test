@@ -9,7 +9,7 @@
  "version": 1,
  "refresh": "1m",
  "time": {
-  "from": "now-15m",
+  "from": "now-6h",
   "to": "now"
  },
  "editable": true,
@@ -57,7 +57,7 @@
   },
   {
    "type": "stat",
-   "title": "RDMA ports ACTIVE",
+   "title": "Configured ports ACTIVE",
    "datasource": {
     "type": "prometheus",
     "uid": "srnet-vm"
@@ -88,14 +88,14 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "sum(srnet_rdma_port_active)",
+     "expr": "count(max by (host, rdma_dev, port) (srnet_rdma_port_active{configured=\"yes\"}) == 1) or vector(0)",
      "legendFormat": ""
     }
    ]
   },
   {
    "type": "stat",
-   "title": "RDMA ports DOWN",
+   "title": "Configured ports DOWN",
    "datasource": {
     "type": "prometheus",
     "uid": "srnet-vm"
@@ -134,7 +134,7 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "count(srnet_rdma_port_active == 0) or vector(0)",
+     "expr": "count(max by (host, rdma_dev, port) (srnet_rdma_port_active{configured=\"yes\"}) == 0) or vector(0)",
      "legendFormat": ""
     }
    ]
@@ -204,7 +204,7 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "srnet_rdma_port_active",
+     "expr": "max by (fabric, host, netdev, port, port_label, rdma_dev, configured) (srnet_rdma_port_active)",
      "format": "table",
      "instant": true
     }
@@ -257,7 +257,7 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "srnet_dom_temp_c",
+     "expr": "max by (host, netdev) (srnet_dom_temp_c)",
      "legendFormat": "{{host}} {{netdev}}"
     }
    ]
@@ -297,17 +297,17 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "increase(srnet_rdma_hw_out_of_sequence{run_id=\"\"}[1h])",
+     "expr": "sum by (host, rdma_dev, __name__) (increase(srnet_rdma_hw_out_of_sequence{run_id=\"\"}[1h]) keep_metric_names)",
      "legendFormat": "{{host}} {{netdev}}{{rdma_dev}} {{__name__}}"
     },
     {
      "refId": "B",
-     "expr": "increase(srnet_rdma_hw_packet_seq_err{run_id=\"\"}[1h])",
+     "expr": "sum by (host, rdma_dev, __name__) (increase(srnet_rdma_hw_packet_seq_err{run_id=\"\"}[1h]) keep_metric_names)",
      "legendFormat": "{{host}} {{netdev}}{{rdma_dev}} {{__name__}}"
     },
     {
      "refId": "C",
-     "expr": "increase(srnet_nic_rx_crc_errors_phy{run_id=\"\"}[1h])",
+     "expr": "sum by (host, netdev, __name__) (increase(srnet_nic_rx_crc_errors_phy{run_id=\"\"}[1h]) keep_metric_names)",
      "legendFormat": "{{host}} {{netdev}}{{rdma_dev}} {{__name__}}"
     }
    ]
@@ -347,7 +347,7 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "srnet_load1",
+     "expr": "max by (host) (srnet_load1)",
      "legendFormat": "{{host}}"
     }
    ]

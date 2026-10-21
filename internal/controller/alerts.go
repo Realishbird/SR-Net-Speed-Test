@@ -25,8 +25,13 @@ type alerter struct {
 
 	mu        sync.Mutex
 	wasOnline map[int64]bool
-	idleErr   map[string]float64 // port key -> last idle error counter total
+	idleErr   map[string]float64   // port key -> last idle error counter total
+	idleGrew  map[string]time.Time // port key -> when an errors_idle alert last saw growth
 }
+
+// idleQuietFor is how long a port's error counters must stay flat before an
+// errors_idle alert closes itself.
+const idleQuietFor = 15 * time.Minute
 
 // idleErrorKeys are hw_counters whose growth while no test runs points at a bad link.
 var idleErrorKeys = []string{"rdma_hw_out_of_sequence", "rdma_hw_packet_seq_err", "rdma_hw_local_ack_timeout_err", "rdma_port_rcv_errors", "rdma_symbol_error", "nic_rx_crc_errors_phy", "nic_rx_symbol_err_phy"}
@@ -36,7 +41,7 @@ func newAlerter(s *Store, h *hub, cfg Config) *alerter {
 	if hot == 0 {
 		hot = 70
 	}
-	return &alerter{store: s, hub: h, webhook: cfg.AlertWebhookURL, hotC: hot, offlineFor: 2 * time.Minute, wasOnline: map[int64]bool{}, idleErr: map[string]float64{}}
+	return &alerter{store: s, hub: h, webhook: cfg.AlertWebhookURL, hotC: hot, offlineFor: 2 * time.Minute, wasOnline: map[int64]bool{}, idleErr: map[string]float64{}, idleGrew: map[string]time.Time{}}
 }
 
 func (a *alerter) open(ctx context.Context, al api.Alert) {
@@ -82,6 +87,9 @@ func (a *alerter) notify(state string, al api.Alert) {
 // onSamples checks each telemetry batch for link down, hot optics and error
 // counters growing while no test runs on that port.
 func (a *alerter) onSamples(ctx context.Context, host string, ports map[string]portMeta, batch []api.Sample) {
+	if host == "" {
+		return // an agent the port cache has not caught up with yet; nothing to name
+	}
 	for _, s := range batch {
 		if s.RdmaDev == "" {
 			continue
@@ -95,34 +103,60 @@ func (a *alerter) onSamples(ctx context.Context, host string, ports map[string]p
 			port = meta.Label
 		}
 		if active, ok := s.Values["rdma_port_active"]; ok {
-			if active == 0 {
+			// A port with no address is not cabled or not meant to be used;
+			// a second NIC port left empty is normal, not a fault.
+			if active == 0 && meta.HasIP {
 				a.open(ctx, api.Alert{Kind: "link_down", Host: host, Port: port, Message: fmt.Sprintf("%s %s is not ACTIVE", host, port)})
 			} else {
-				a.resolve(ctx, "link_down", host, port)
+				a.resolve(ctx, "link_down", host, port) // up, or unconfigured and so not a fault
 			}
 		}
 		if t, ok := s.Values["dom_temp_c"]; ok {
-			if t >= a.hotC {
+			if t > a.hotC { // over the limit; a reading at the limit is still within it, and resolve sits 5 C lower so it cannot flap
 				a.open(ctx, api.Alert{Kind: "transceiver_hot", Host: host, Port: port, Message: fmt.Sprintf("%s %s transceiver at %.1f C (limit %.0f C)", host, port, t, a.hotC)})
 			} else if t < a.hotC-5 {
 				a.resolve(ctx, "transceiver_hot", host, port)
 			}
 		}
-		if len(s.RunIDs) == 0 {
-			total := 0.0
-			for _, k := range idleErrorKeys {
-				total += s.Values[k]
-			}
-			key := host + "|" + port
-			a.mu.Lock()
-			prev, seen := a.idleErr[key]
-			a.idleErr[key] = total
-			a.mu.Unlock()
-			if seen && total > prev {
-				a.open(ctx, api.Alert{Kind: "errors_idle", Host: host, Port: port, Message: fmt.Sprintf("%s %s: error counters grew by %.0f while idle", host, port, total-prev)})
-			}
+		total := 0.0
+		for _, k := range idleErrorKeys {
+			total += s.Values[k]
+		}
+		switch grew, quiet := a.idleErrors(host+"|"+port, total, s.Time, len(s.RunIDs) > 0); {
+		case grew > 0:
+			a.open(ctx, api.Alert{Kind: "errors_idle", Host: host, Port: port, Message: fmt.Sprintf("%s %s: error counters grew by %.0f while idle", host, port, grew)})
+		case quiet:
+			a.resolve(ctx, "errors_idle", host, port)
 		}
 	}
+}
+
+// idleErrors tracks one port's idle error counter total. grew is how much it
+// rose since the previous idle sample, and quiet reports that an alert's
+// counters have stayed flat for idleQuietFor, so the alert can close.
+//
+// A sample taken while a test runs on the host resets the baseline: counters
+// that grow under test load (sequence errors and timeouts under a fan-in)
+// belong to that run's result, and without the reset the first idle sample
+// after every run raised an errors_idle alert for the test's own growth.
+func (a *alerter) idleErrors(key string, total float64, at time.Time, running bool) (grew float64, quiet bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if running {
+		delete(a.idleErr, key)
+		return 0, false
+	}
+	prev, seen := a.idleErr[key]
+	a.idleErr[key] = total
+	if seen && total > prev {
+		a.idleGrew[key] = at
+		return total - prev, false
+	}
+	if last, open := a.idleGrew[key]; open && at.Sub(last) >= idleQuietFor {
+		delete(a.idleGrew, key)
+		return 0, true
+	}
+	return 0, false
 }
 
 // loop checks agent liveness every 30 s.

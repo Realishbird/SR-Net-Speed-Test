@@ -3,11 +3,13 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -115,7 +117,7 @@ func main() {
 		if err := cfg.Save(*cfgPath); err != nil {
 			log.Fatal(err)
 		}
-		n, err := controller.WriteGnmicConfig(cfg, cfg.GnmicConfigPath)
+		n, err := controller.WriteGnmicConfig(cfg, cfg.GnmicConfigPath, nil) // the running controller adds the transceiver ports
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -132,6 +134,15 @@ func main() {
 		}
 		if err := cfg.Save(*cfgPath); err != nil {
 			log.Fatal(err)
+		}
+		// The srnet CLI reads the password from this file; a stale copy
+		// would lock it out after the change.
+		if pwFile := cfg.CLIPasswordFile(); pwFile != "" && *password != pwFile {
+			if st, err := os.Stat(pwFile); err == nil && st.Mode().IsRegular() {
+				if err := os.WriteFile(pwFile, []byte(lastPassword+"\n"), 0o600); err != nil {
+					log.Printf("could not update %s for the srnet CLI: %v", pwFile, err)
+				}
+			}
 		}
 		fmt.Println("admin password updated; restart srnet-controller to apply")
 	case "serve":
@@ -150,6 +161,10 @@ func main() {
 			Handler:           srv.Handler(),
 			ReadHeaderTimeout: 10 * time.Second,
 			TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
+			// Browsers that have not accepted the self-signed certificate
+			// abort the handshake on every retry; one line per attempt is
+			// noise, not news. Everything else the server logs stays.
+			ErrorLog: log.New(dropTLSHandshake{os.Stderr}, "", log.LstdFlags),
 		}
 		go func() {
 			<-ctx.Done()
@@ -185,6 +200,20 @@ func writeDashboards(cfg controller.Config) error {
 	return nil
 }
 
+// dropTLSHandshake swallows net/http's "TLS handshake error" lines.
+type dropTLSHandshake struct{ w io.Writer }
+
+func (d dropTLSHandshake) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte("TLS handshake error")) {
+		return len(p), nil
+	}
+	return d.w.Write(p)
+}
+
+// lastPassword is the password setPassword last hashed, for the passwd
+// command to mirror into the CLI's password file.
+var lastPassword string
+
 func setPassword(cfg *controller.Config, file string) error {
 	var pw string
 	if file != "" {
@@ -206,6 +235,7 @@ func setPassword(cfg *controller.Config, file string) error {
 		return err
 	}
 	cfg.AdminPasswordHash = string(h)
+	lastPassword = pw
 	return nil
 }
 

@@ -15,6 +15,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -43,6 +44,15 @@ type Server struct {
 	agentCache map[string]int64              // secret hash -> agent id
 	portCache  map[int64]map[string]portMeta // agent id -> "dev/port" -> meta
 	hostName   map[int64]string
+	// adminOK remembers the one credential that last passed bcrypt, keyed by
+	// its SHA-256, together with the password hash it was checked against.
+	// The UI polls several endpoints every few seconds and a bcrypt check
+	// costs tens of milliseconds each, which on a small LXC is CPU spent on
+	// nothing; a changed password hash invalidates the entry by itself.
+	adminOK     [32]byte
+	adminOKHash string
+	lldp        map[string]lldpEntry // switch-side LLDP table, see cachedLLDP
+	lldpAt      time.Time
 }
 
 func NewServer(ctx context.Context, cfg Config) (*Server, error) {
@@ -55,11 +65,6 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	go m.writer(ctx)
 	snmp := newSNMPCollector(cfg.Switches, m)
 	go snmp.loop(ctx)
-	if n, err := WriteGnmicConfig(cfg, cfg.GnmicConfigPath); err != nil {
-		log.Printf("gnmic config: %v", err)
-	} else if n > 0 {
-		log.Printf("gnmic config written for %d switch(es) to %s", n, cfg.GnmicConfigPath)
-	}
 	orch := newOrchestrator(store, h, m)
 	al := newAlerter(store, h, cfg)
 	s := &Server{
@@ -69,10 +74,68 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 		agentCache: map[string]int64{}, portCache: map[int64]map[string]portMeta{}, hostName: map[int64]string{},
 	}
 	orch.switches = s.switchList
+	orch.lldp = s.fillLLDP
 	s.refreshPortCache(ctx)
+	s.writeGnmic(ctx)
 	go al.loop(ctx)
 	go s.suites.scheduler(ctx)
+	go s.gnmicLoop(ctx)
 	return s, nil
+}
+
+// gnmicPorts lists, per switch, the ports whose transceivers gnmic should
+// subscribe to: every port a host's LLDP maps to that switch, plus every
+// port the switch itself reports as up (gNMI oper-status or the SNMP
+// poller), since those are the ones with a module in them.
+func (s *Server) gnmicPorts(ctx context.Context) map[string][]string {
+	out := map[string][]string{}
+	switches := s.switchList()
+	if hosts, err := s.store.Hosts(ctx); err == nil {
+		s.fillLLDP(ctx, hosts)
+		for _, h := range hosts {
+			for _, p := range h.Ports {
+				if name := resolveSwitchName(switches, p.LLDPSwitch); name != "" && p.LLDPPort != "" {
+					out[name] = append(out[name], p.LLDPPort)
+				}
+			}
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if ports, _, err := s.switchPortStats(ctx); err == nil {
+		for _, p := range ports {
+			if p.Up != nil && *p.Up {
+				out[p.Switch] = append(out[p.Switch], p.Name)
+			}
+		}
+	}
+	return out
+}
+
+// writeGnmic renders the gnmic config for the current switches and ports.
+func (s *Server) writeGnmic(ctx context.Context) {
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+	if n, err := WriteGnmicConfig(cfg, cfg.GnmicConfigPath, s.gnmicPorts(ctx)); err != nil {
+		log.Printf("gnmic config: %v", err)
+	} else if n > 0 {
+		log.Printf("gnmic config: %d switch(es), %s", n, cfg.GnmicConfigPath)
+	}
+}
+
+// gnmicLoop re-renders the gnmic config as ports come up or hosts report
+// new LLDP neighbours. WriteGnmicConfig leaves an unchanged file alone, so
+// gnmic is only restarted when its subscriptions actually change.
+func (s *Server) gnmicLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Minute):
+		}
+		s.writeGnmic(ctx)
+	}
 }
 
 func (s *Server) Close() { s.store.Close() }
@@ -125,14 +188,34 @@ func randomToken(n int) string {
 func (s *Server) admin(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
-		if !ok || subtle.ConstantTimeCompare([]byte(user), []byte(s.cfg.AdminUser)) != 1 ||
-			bcrypt.CompareHashAndPassword([]byte(s.cfg.AdminPasswordHash), []byte(pass)) != nil {
+		if !ok || !s.adminLogin(user, pass) {
 			w.Header().Set("WWW-Authenticate", `Basic realm="srnet"`)
 			httpError(w, http.StatusUnauthorized, "admin login required")
 			return
 		}
 		h(w, r)
 	}
+}
+
+// adminLogin checks a Basic auth credential against the configured admin,
+// remembering the last good one so repeated requests skip bcrypt.
+func (s *Server) adminLogin(user, pass string) bool {
+	key := sha256.Sum256([]byte(user + "\x00" + pass))
+	s.mu.Lock()
+	adminUser, hash := s.cfg.AdminUser, s.cfg.AdminPasswordHash
+	cached := s.adminOKHash == hash && hash != "" && subtle.ConstantTimeCompare(s.adminOK[:], key[:]) == 1
+	s.mu.Unlock()
+	if cached {
+		return true
+	}
+	if subtle.ConstantTimeCompare([]byte(user), []byte(adminUser)) != 1 ||
+		bcrypt.CompareHashAndPassword([]byte(hash), []byte(pass)) != nil {
+		return false
+	}
+	s.mu.Lock()
+	s.adminOK, s.adminOKHash = key, hash
+	s.mu.Unlock()
+	return true
 }
 
 type agentKey struct{}
@@ -229,7 +312,7 @@ func (s *Server) refreshPortCache(ctx context.Context) {
 		names[h.ID] = h.Name
 		m := map[string]portMeta{}
 		for _, p := range h.Ports {
-			m[p.RdmaDev+"/"+strconv.Itoa(p.PortNum)] = portMeta{PortID: p.ID, Host: h.Name, RdmaDev: p.RdmaDev, PortNum: p.PortNum, Netdev: p.Netdev, Label: p.Label, Fabric: p.Fabric}
+			m[p.RdmaDev+"/"+strconv.Itoa(p.PortNum)] = portMeta{PortID: p.ID, Host: h.Name, RdmaDev: p.RdmaDev, PortNum: p.PortNum, Netdev: p.Netdev, Label: p.Label, Fabric: p.Fabric, HasIP: len(p.Addrs) > 0}
 		}
 		pc[h.ID] = m
 	}
@@ -289,6 +372,7 @@ func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
+	s.fillLLDP(r.Context(), hosts)
 	out := make([]api.Host, len(hosts))
 	for i, h := range hosts {
 		h.Online = s.hub.online(h.ID)
@@ -313,7 +397,7 @@ func (s *Server) patchHost(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "name cannot be empty")
 		return
 	}
-	if err := s.store.UpdateHost(r.Context(), id, u); err != nil {
+	if err := s.renameHost(r.Context(), id, u); err != nil {
 		storeError(w, err)
 		return
 	}
@@ -354,6 +438,26 @@ func (s *Server) patchPort(w http.ResponseWriter, r *http.Request) {
 	s.store.Audit(r.Context(), "port.update", map[string]any{"id": id, "update": u})
 	s.refreshPortCache(r.Context())
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// renameHost applies a host update and, when the display name changes,
+// carries the host's open alerts over to the new name.
+func (s *Server) renameHost(ctx context.Context, id int64, u api.HostUpdate) error {
+	old := ""
+	if u.Name != nil {
+		s.mu.Lock()
+		old = s.hostName[id]
+		s.mu.Unlock()
+	}
+	if err := s.store.UpdateHost(ctx, id, u); err != nil {
+		return err
+	}
+	if u.Name != nil && old != "" && old != *u.Name {
+		if err := s.store.RenameAlertHost(ctx, old, *u.Name); err != nil {
+			log.Printf("rename alerts of %s: %v", old, err)
+		}
+	}
+	return nil
 }
 
 // importHosts applies a CSV of names, tags and port labels. Columns are found by
@@ -422,7 +526,7 @@ func (s *Server) importHosts(w http.ResponseWriter, r *http.Request) {
 		if v, ok := get(row, "rack"); ok {
 			hu.Rack = &v
 		}
-		if err := s.store.UpdateHost(r.Context(), h.ID, hu); err != nil {
+		if err := s.renameHost(r.Context(), h.ID, hu); err != nil {
 			problems = append(problems, fmt.Sprintf("line %d: %v", line, err))
 			continue
 		}
@@ -605,6 +709,15 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	if err := cfg.SaveBack(); err != nil {
 		log.Printf("admin password: saved in memory only, config not written: %v", err)
+	}
+	// The srnet CLI reads its password from a file next to the config; a
+	// stale copy would lock it out after the change.
+	if pwFile := cfg.CLIPasswordFile(); pwFile != "" {
+		if st, err := os.Stat(pwFile); err == nil && st.Mode().IsRegular() {
+			if err := os.WriteFile(pwFile, []byte(req.New+"\n"), 0o600); err != nil {
+				log.Printf("admin password: could not update %s for the srnet CLI: %v", pwFile, err)
+			}
+		}
 	}
 	if s.store != nil {
 		s.store.Audit(r.Context(), "admin.password", map[string]any{"user": s.cfg.AdminUser})

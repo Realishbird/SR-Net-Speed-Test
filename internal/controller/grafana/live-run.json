@@ -9,7 +9,7 @@
  "version": 1,
  "refresh": "5s",
  "time": {
-  "from": "now-15m",
+  "from": "now-3h",
   "to": "now"
  },
  "editable": true,
@@ -30,7 +30,8 @@
     "refresh": 2,
     "sort": 4,
     "includeAll": false,
-    "current": {}
+    "current": {},
+    "description": "Set the time range to cover the run, or open this dashboard from the run page."
    }
   ]
  },
@@ -306,7 +307,7 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "rate(srnet_nic_rx_prio3_pause{run_id=~\"(^|.*,)$run_id(,.*|$)\"}[30s])",
+     "expr": "rate({__name__=~\"srnet_nic_rx_(prio[0-9]_pause|pause_ctrl_phy|global_pause)\",run_id=~\"(^|.*,)$run_id(,.*|$)\"}[30s])",
      "legendFormat": "{{host}} {{netdev}} {{__name__}}"
     },
     {
@@ -436,20 +437,26 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "srnet_switch_rx_gbps",
-     "legendFormat": "{{switch}} {{port}} {{interface_name}}"
+     "expr": "srnet_switch_rx_gbps > 0.05",
+     "legendFormat": "{{switch}} {{port}} in"
     },
     {
      "refId": "B",
-     "expr": "srnet_switch_tx_gbps",
-     "legendFormat": "{{switch}} {{port}} {{interface_name}}"
+     "expr": "srnet_switch_tx_gbps > 0.05",
+     "legendFormat": "{{switch}} {{port}} out"
     },
     {
      "refId": "C",
-     "expr": "rate(srnet_gnmi_in_octets[30s])*8/1e9",
-     "legendFormat": "{{switch}} {{port}} {{interface_name}}"
+     "expr": "rate({__name__=~\"srnet_gnmi_.*_in_octets\"}[2m])*8/1e9 > 0.05",
+     "legendFormat": "{{source}} {{interface_name}} in"
+    },
+    {
+     "refId": "D",
+     "expr": "rate({__name__=~\"srnet_gnmi_.*_out_octets\"}[2m])*8/1e9 > 0.05",
+     "legendFormat": "{{source}} {{interface_name}} out"
     }
    ]
   }
- ]
+ ],
+ "description": "One run second by second. The Grafana button on a run page opens this dashboard on that run with the time range set to it; when picking a run here, set the time range to cover it or every panel is empty."
 }

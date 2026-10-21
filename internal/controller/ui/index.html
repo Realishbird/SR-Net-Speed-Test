@@ -171,6 +171,7 @@ async function api(method, path, body) {
   const opt = { method, headers: {} };
   if (body !== undefined) { opt.headers['Content-Type'] = typeof body === 'string' ? 'text/csv' : 'application/json'; opt.body = typeof body === 'string' ? body : JSON.stringify(body); }
   const r = await fetch('/api/v1' + path, opt);
+  if (r.status === 401) { location.reload(); throw new Error('login required'); } // the password changed; the browser must ask again
   if (r.status === 204) return null;
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || r.statusText || ('HTTP ' + r.status));
@@ -275,12 +276,14 @@ async function pageOverview(token) {
     <div class="card"><h2>Open alerts</h2><div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th>Kind</th><th>Host</th><th>Port</th><th>Message</th><th>Since</th></tr></thead><tbody id="ov-alerts"></tbody></table></div></div>`)) return;
   const refresh = async () => {
     const [hosts, runs, alerts, st] = await Promise.all([api('GET', '/hosts'), api('GET', '/runs'), api('GET', '/alerts'), api('GET', '/status')]);
-    const online = hosts.filter(h => h.online).length, ports = hosts.flatMap(h => h.ports), up = ports.filter(p => p.state === 'ACTIVE').length;
+    // Ports with an address are the configured ones; a ConnectX-7 on the Sparks also
+    // shows the second PCIe half of each cabled port as an ACTIVE device with no IP.
+    const online = hosts.filter(h => h.online).length, ports = hosts.flatMap(h => h.ports).filter(p => p.addrs?.length), up = ports.filter(p => p.state === 'ACTIVE').length;
     const running = runs.filter(r => r.status === 'running' || r.status === 'queued').length;
     const tx = ports.reduce((a, p) => a + (p.tx_gbps || 0), 0);
     set('ov-tiles', `
       <div class="tile"><div class="k">Hosts online</div><div class="v">${online}<small>of ${hosts.length}</small></div></div>
-      <div class="tile"><div class="k">RDMA ports active</div><div class="v">${up}<small>of ${ports.length}</small></div></div>
+      <div class="tile"><div class="k">Configured ports up</div><div class="v">${up}<small>of ${ports.length}</small></div></div>
       <div class="tile"><div class="k">Fabric traffic now</div><div class="v">${fmt(tx)}<small>Gbps TX</small></div></div>
       <div class="tile"><div class="k">Runs in progress</div><div class="v">${running}</div></div>
       <div class="tile"><div class="k">Open alerts</div><div class="v" style="color:${alerts.length ? 'var(--fail)' : 'inherit'}">${alerts.length}</div></div>
@@ -310,7 +313,9 @@ async function pageHosts(token) {
     const hosts = await api('GET', '/hosts');
     let html = '';
     for (const h of hosts) {
-      const ports = h.ports.length ? h.ports : [null];
+      // Configured ports (with an address) first; the uncabled and twin
+      // PCIe-function rows follow, so the port a test uses is the first row.
+      const ports = h.ports.length ? [...h.ports].sort((a, b) => (b.addrs?.length ? 1 : 0) - (a.addrs?.length ? 1 : 0)) : [null];
       ports.forEach((p, i) => {
         html += '<tr>';
         if (i === 0) {
@@ -339,7 +344,9 @@ async function pageHosts(token) {
   };
   await refresh(); setRefresh(refresh, 5000);
 }
-async function patch(path, u) { try { await api('PATCH', path, u); toast('Saved', 'pass', 1500); refreshFn?.(); } catch (e) { fail(e); } }
+// After a save the table is refreshed only when nothing is being edited:
+// Tab moves focus to the next cell and a rebuild would drop it mid-typing.
+async function patch(path, u) { try { await api('PATCH', path, u); toast('Saved', 'pass', 1500); if (!busy()) refreshFn?.(); } catch (e) { fail(e); } }
 async function installCommand() {
   try {
     const t = await api('POST', '/tokens');
@@ -397,7 +404,7 @@ function drawTopology(t) {
       out.push(`<text class="sm mut" x="${x0 + 10}" y="${y0 + 55}">CPU ${fmt(cpu, 0)}% · load ${fmt(st.load1)} · mem ${fmt(st.mem_pct, 0)}%</text>`);
       out.push(`<rect class="meter" x="${x0 + 10}" y="${y0 + 64}" width="${HW - 20}" height="6" rx="3"/><rect x="${x0 + 10}" y="${y0 + 64}" width="${(HW - 20) * cpu / 100}" height="6" rx="3" fill="${cpu > 85 ? 'var(--fail)' : cpu > 60 ? 'var(--warn)' : 'var(--accent)'}"/>`);
     } else out.push(`<text class="sm mut" x="${x0 + 10}" y="${y0 + 55}">${h.online ? 'no telemetry yet' : 'offline'}</text>`);
-    const ports = h.ports.filter(p => p.ip || p.switch_port || p.state === 'ACTIVE');
+    const ports = h.ports.filter(p => p.ip || p.switch_port); // an ACTIVE port with no IP is a cabled port's second PCIe function, drawn once
     ports.forEach((p, j) => {
       const x = x0 + HW * (j + 0.5) / Math.max(ports.length, 1), y = y0;
       const col = fabricColor(p.fabric, fabrics), rate = Math.max(p.tx_gbps || 0, p.rx_gbps || 0);
@@ -479,7 +486,7 @@ async function pageRun(token, id) {
     <div id="run-error"></div>
     <div class="tiles" id="run-tiles"></div>
     <div class="card"><div class="kv">
-      <b>Test</b><span>${esc(s.test)} · ${s.duration_sec} s · message size ${s.msg_size}${s.sizes?.length ? ' (sweep ' + s.sizes.join(', ') + ')' : ''} · qps ${s.qps}${s.streams > 1 ? ' · ' + s.streams + ' streams' : ''}${s.bidir ? ' · bidirectional (rates add both directions)' : ''}${s.serial ? ' · serial' : ''}${s.mesh ? ' · full mesh' : ''}</span>
+      <b>Test</b><span>${esc(s.test)} · ${s.duration_sec} s · message size ${s.msg_size}${s.sizes?.length ? ' (sweep ' + s.sizes.join(', ') + ')' : ''} · ${s.qps} QP${s.qps === 1 ? '' : 's'}${s.streams > 1 ? ' · ' + s.streams + ' streams' : ''}${s.bidir ? ' · bidirectional (rates add both directions)' : ''}${s.serial ? ' · serial' : ''}${s.mesh ? ' · full mesh' : ''}</span>
       <b>Thresholds</b><span>${s.pass_pct}% of line rate${s.max_lat_p99_us ? ' · p99 ≤ ' + s.max_lat_p99_us + ' µs' : ''}${s.test === 'udp' ? ' · loss ≤ ' + s.max_loss_pct + '%' : ''}</span>
       <b>When</b><span id="run-when"></span></div></div>
     <div class="tbl"><table><thead><tr><th>#</th><th>Client</th><th>Server</th><th>Fabric</th><th class="num">Size</th>${head}${headSw}<th>Error counters</th><th>Verdict</th><th>Note</th></tr></thead><tbody id="legs"></tbody></table></div>`)) return;
@@ -675,8 +682,10 @@ async function pageFleet(token) {
     <div class="tiles" id="fleet-tiles"></div>
     <div class="card"><h2>Mirrored releases</h2><div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th>Version</th><th>Builds</th><th>Mirrored</th><th></th></tr></thead><tbody id="releases"></tbody></table></div></div>
     <div id="jobs"></div>`)) return;
+  let checked = false;
   const refresh = async () => {
-    const [rel, jobs, hosts] = await Promise.all([api('GET', '/releases'), api('GET', '/updates'), api('GET', '/hosts')]);
+    const [rel, jobs, hosts] = await Promise.all([api('GET', '/releases' + (checked ? '' : '?check=1')), api('GET', '/updates'), api('GET', '/hosts')]);
+    checked = true; // one GitHub call per visit; the button asks again
     const versions = {}; hosts.forEach(h => versions[h.agent_version || 'unknown'] = (versions[h.agent_version || 'unknown'] || 0) + 1);
     set('fleet-tiles', `<div class="tile"><div class="k">Controller</div><div class="v" style="font-size:20px">${esc(rel.controller_version)}</div></div>
       <div class="tile"><div class="k">Agents</div><div class="v" style="font-size:20px">${Object.entries(versions).map(([v, n]) => `${esc(v)} <small>× ${n}</small>`).join('<br>') || '<small>none</small>'}</div></div>
@@ -763,7 +772,7 @@ function delSwitch(name) { confirmBox('Remove switch', `Stop collecting from "${
 async function pageAlerts(token) {
   if (!mount(token, `<div class="page-head"><h1>Alerts</h1><span class="spacer"></span><label class="row inline sub"><input type="checkbox" id="all" onchange="refreshFn()"> include resolved</label>
       <button class="danger" id="clear-all" onclick="clearAlerts()">Clear all</button></div>
-    <p class="help">Opened by the controller for agents that stop reporting, ports that leave ACTIVE, error counters that grow while idle, hot transceivers, failed runs and failed updates. They close themselves when the condition clears; "Clear" resolves one by hand (an alert whose cause is still present comes back on the next check).</p>
+    <p class="help">Opened by the controller for agents that stop reporting, ports with an address that leave ACTIVE, error counters that grow while no test runs (counters that grow during a run belong to that run's result), hot transceivers, failed runs and failed updates. They close themselves when the condition clears, idle-error alerts after 15 minutes without further growth; "Clear" resolves one by hand (an alert whose cause is still present comes back on the next check).</p>
     <div class="tbl"><table><thead><tr><th>State</th><th>Kind</th><th>Host</th><th>Port</th><th>Message</th><th>Opened</th><th>Resolved</th><th></th></tr></thead><tbody id="alerts"></tbody></table></div>`)) return;
   const refresh = async () => {
     const all = $('#all')?.checked;

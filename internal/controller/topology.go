@@ -135,6 +135,12 @@ func (s *Server) switchPortStats(ctx context.Context) (map[string]*api.TopoSwitc
 		{`last_over_time(` + gnmiMetric("in_errors") + `[2m])`, func(p *api.TopoSwitchPort, v float64, _ map[string]string) { p.InErrors = v }},
 		{`last_over_time(` + gnmiMetric("out_errors") + `[2m])`, func(p *api.TopoSwitchPort, v float64, _ map[string]string) { p.OutErrors = v }},
 		{`last_over_time(` + gnmiMetric("in_fcs_errors") + `[2m])`, func(p *api.TopoSwitchPort, v float64, _ map[string]string) { p.FCSErrors = v }},
+		{`last_over_time(` + gnmiMetric("port_speed") + `[2m])`, func(p *api.TopoSwitchPort, v float64, l map[string]string) {
+			// strings-as-labels: "openconfig-if-ethernet:SPEED_100GB".
+			if mbps := speedMbps(l["port_speed"]); mbps > 0 {
+				p.SpeedMbps = mbps
+			}
+		}},
 		{`last_over_time(` + gnmiMetric("oper_status") + `[2m])`, func(p *api.TopoSwitchPort, v float64, l map[string]string) {
 			// strings-as-labels: the state is a label and the value is 1.
 			st := strings.ToUpper(l["oper_status"])
@@ -197,6 +203,130 @@ func (s *Server) switchPortStats(ctx context.Context) (map[string]*api.TopoSwitc
 	return ports, source, nil
 }
 
+// speedMbps reads an OpenConfig port speed such as SPEED_100GB or
+// openconfig-if-ethernet:SPEED_2500MB; 0 when it is not one.
+func speedMbps(s string) int {
+	_, s, _ = strings.Cut(s, "SPEED_")
+	n, unit := splitUnit(s)
+	switch unit {
+	case "GB":
+		return n * 1000
+	case "MB":
+		return n
+	}
+	return 0
+}
+
+func splitUnit(s string) (int, string) {
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	n, _ := strconv.Atoi(s[:i])
+	return n, s[i:]
+}
+
+// lldpEntry is one neighbour the switch itself reported: which of its ports
+// a host's netdev is cabled to.
+type lldpEntry struct {
+	Switch, Port string
+}
+
+// switchLLDP reads every configured switch's own LLDP table out of
+// VictoriaMetrics (gnmic subscribes to it) and keys it by the neighbour's
+// system name and port description, lower-cased, which on a Linux host are
+// its hostname and netdev. A host whose agent cannot run lldpctl is still
+// placed, because the switch saw it.
+func (s *Server) switchLLDP(ctx context.Context) map[string]lldpEntry {
+	out := map[string]lldpEntry{}
+	switches := s.switchList()
+	if len(switches) == 0 || s.metrics.vmURL == "" {
+		return out
+	}
+	bySource := map[string]SwitchConfig{}
+	for _, sw := range switches {
+		if sw.GNMIUser != "" {
+			bySource[strings.ToLower(sw.Name)] = sw
+			bySource[strings.ToLower(sw.Address)] = sw
+			bySource[strings.ToLower(fmt.Sprintf("%s:%d", sw.Address, sw.GNMIPort))] = sw
+		}
+	}
+	// Each leaf is its own series; join system-name and port-description on
+	// the interface and neighbour keys.
+	type key struct{ source, iface, id string }
+	names := map[key]string{}
+	descs := map[key]string{}
+	for leaf, dst := range map[string]map[key]string{"system_name": names, "port_description": descs} {
+		rows, err := s.metrics.vmQuery(ctx, `last_over_time(`+gnmiMetric("lldp.*neighbor_state_"+leaf)+`[5m])`)
+		if err != nil {
+			return out
+		}
+		for _, r := range rows {
+			k := key{strings.ToLower(r.Labels["source"]), r.Labels["name"], r.Labels["id"]}
+			if v := r.Labels[leaf]; v != "" && k.iface != "" {
+				dst[k] = v
+			}
+		}
+	}
+	for k, sys := range names {
+		desc := descs[k]
+		if desc == "" {
+			continue
+		}
+		sw, ok := bySource[k.source]
+		if !ok {
+			name, _, _ := strings.Cut(k.source, ":")
+			if sw, ok = bySource[name]; !ok {
+				continue
+			}
+		}
+		out[strings.ToLower(sys)+"|"+strings.ToLower(desc)] = lldpEntry{Switch: sw.Name, Port: k.iface}
+	}
+	return out
+}
+
+// fillLLDP completes each host port's switch neighbour from the switches'
+// own LLDP tables where the host's lldpd gave nothing, so the Hosts page,
+// the Topology and per-leg switch figures work even before every host runs
+// lldpctl. The host's own report wins when it has one.
+func (s *Server) fillLLDP(ctx context.Context, hosts []hostRec) {
+	lldp := s.cachedLLDP(ctx)
+	if len(lldp) == 0 {
+		return
+	}
+	for i := range hosts {
+		h := &hosts[i]
+		for j := range h.Ports {
+			p := &h.Ports[j]
+			if p.LLDPPort != "" {
+				continue
+			}
+			if e, ok := lldp[strings.ToLower(h.Hostname)+"|"+strings.ToLower(p.Netdev)]; ok {
+				p.LLDPSwitch, p.LLDPPort = e.Switch, e.Port
+			}
+		}
+	}
+}
+
+// cachedLLDP keeps the switch LLDP map for a minute: the Hosts page polls
+// every few seconds and the table changes when cables move, not before.
+func (s *Server) cachedLLDP(ctx context.Context) map[string]lldpEntry {
+	s.mu.Lock()
+	fresh := s.lldpAt.Add(time.Minute).After(time.Now())
+	m := s.lldp
+	s.mu.Unlock()
+	if fresh {
+		return m
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	m = s.switchLLDP(ctx)
+	s.mu.Lock()
+	s.lldp, s.lldpAt = m, time.Now()
+	s.mu.Unlock()
+	return m
+}
+
 // buildTopology joins hosts, their LLDP neighbours and the switch port
 // figures into one picture. A host port names its switch by the chassis
 // name lldpd saw, which may differ in case from the configured switch name,
@@ -204,25 +334,7 @@ func (s *Server) switchPortStats(ctx context.Context) (map[string]*api.TopoSwitc
 // an unknown chassis name is taken to be that switch.
 func buildTopology(hosts []hostRec, switches []SwitchConfig, ports map[string]*api.TopoSwitchPort, source map[string]string, live func(portID int64) (tx, rx float64), hostLive func(host string) (api.HostStats, bool), online func(agentID int64) bool) api.Topology {
 	t := api.Topology{At: time.Now(), Switches: []api.TopoSwitch{}, Hosts: []api.TopoHost{}, Runs: []api.TopoRun{}}
-	resolveSwitch := func(chassis string) string {
-		for _, sw := range switches {
-			if strings.EqualFold(sw.Name, chassis) || strings.EqualFold(sw.Address, chassis) {
-				return sw.Name
-			}
-		}
-		// lldpd reports the switch's hostname; SONiC's is often the model or
-		// a site name, so accept a prefix match either way before giving up.
-		for _, sw := range switches {
-			a, b := strings.ToLower(sw.Name), strings.ToLower(chassis)
-			if a != "" && b != "" && (strings.HasPrefix(a, b) || strings.HasPrefix(b, a)) {
-				return sw.Name
-			}
-		}
-		if len(switches) == 1 && chassis != "" {
-			return switches[0].Name
-		}
-		return ""
-	}
+	resolveSwitch := func(chassis string) string { return resolveSwitchName(switches, chassis) }
 	used := map[string]bool{}
 	for _, h := range hosts {
 		th := api.TopoHost{ID: h.ID, Name: h.Name, Hostname: h.Hostname, Tags: h.Tags, Online: online(h.ID), Ports: []api.TopoHostPort{}}
@@ -304,6 +416,7 @@ func (s *Server) topology(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
+	s.fillLLDP(r.Context(), hosts)
 	ports, source, err := s.switchPortStats(r.Context())
 	t := buildTopology(hosts, s.switchList(), ports, source, s.metrics.live, s.metrics.hostLive, s.hub.online)
 	if err != nil {

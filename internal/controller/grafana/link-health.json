@@ -9,7 +9,7 @@
  "version": 1,
  "refresh": "30s",
  "time": {
-  "from": "now-15m",
+  "from": "now-6h",
   "to": "now"
  },
  "editable": true,
@@ -57,7 +57,7 @@
      "unit": "short",
      "custom": {
       "lineWidth": 1,
-      "fillOpacity": 8
+      "fillOpacity": 0
      }
     },
     "overrides": []
@@ -74,22 +74,22 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "increase(srnet_rdma_hw_out_of_sequence{host=~\"$host\"}[5m])",
+     "expr": "sum by (host, rdma_dev, __name__) (increase(srnet_rdma_hw_out_of_sequence{host=~\"$host\"}[5m]) keep_metric_names)",
      "legendFormat": "{{host}} {{rdma_dev}} {{__name__}}"
     },
     {
      "refId": "B",
-     "expr": "increase(srnet_rdma_hw_packet_seq_err{host=~\"$host\"}[5m])",
+     "expr": "sum by (host, rdma_dev, __name__) (increase(srnet_rdma_hw_packet_seq_err{host=~\"$host\"}[5m]) keep_metric_names)",
      "legendFormat": "{{host}} {{rdma_dev}} {{__name__}}"
     },
     {
      "refId": "C",
-     "expr": "increase(srnet_rdma_hw_local_ack_timeout_err{host=~\"$host\"}[5m])",
+     "expr": "sum by (host, rdma_dev, __name__) (increase(srnet_rdma_hw_local_ack_timeout_err{host=~\"$host\"}[5m]) keep_metric_names)",
      "legendFormat": "{{host}} {{rdma_dev}} {{__name__}}"
     },
     {
      "refId": "D",
-     "expr": "increase(srnet_rdma_hw_rnr_nak_retry_err{host=~\"$host\"}[5m])",
+     "expr": "sum by (host, rdma_dev, __name__) (increase(srnet_rdma_hw_rnr_nak_retry_err{host=~\"$host\"}[5m]) keep_metric_names)",
      "legendFormat": "{{host}} {{rdma_dev}} {{__name__}}"
     }
    ]
@@ -112,7 +112,7 @@
      "unit": "short",
      "custom": {
       "lineWidth": 1,
-      "fillOpacity": 8
+      "fillOpacity": 0
      }
     },
     "overrides": []
@@ -129,17 +129,17 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "increase(srnet_nic_rx_symbol_err_phy{host=~\"$host\"}[5m])",
+     "expr": "sum by (host, netdev, __name__) (increase(srnet_nic_rx_symbol_err_phy{host=~\"$host\"}[5m]) keep_metric_names)",
      "legendFormat": "{{host}} {{netdev}} {{__name__}}"
     },
     {
      "refId": "B",
-     "expr": "increase(srnet_nic_rx_corrected_bits_phy{host=~\"$host\"}[5m])",
+     "expr": "sum by (host, netdev, __name__) (increase({__name__=~\"srnet_nic_rx_(corrected_bits_phy|fec_corrected_blocks_phy|fec_corrected_blocks|fec_uncorrectable_blocks|fec_corrected_bits|corrected_bits)\",host=~\"$host\"}[5m]) keep_metric_names)",
      "legendFormat": "{{host}} {{netdev}} {{__name__}}"
     },
     {
      "refId": "C",
-     "expr": "increase(srnet_nic_rx_crc_errors_phy{host=~\"$host\"}[5m])",
+     "expr": "sum by (host, netdev, __name__) (increase(srnet_nic_rx_crc_errors_phy{host=~\"$host\"}[5m]) keep_metric_names)",
      "legendFormat": "{{host}} {{netdev}} {{__name__}}"
     }
    ]
@@ -162,7 +162,7 @@
      "unit": "celsius",
      "custom": {
       "lineWidth": 1,
-      "fillOpacity": 8
+      "fillOpacity": 0
      }
     },
     "overrides": []
@@ -179,7 +179,7 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "srnet_dom_temp_c{host=~\"$host\"}",
+     "expr": "max by (host, netdev) (srnet_dom_temp_c{host=~\"$host\"})",
      "legendFormat": "{{host}} {{netdev}}"
     }
    ]
@@ -202,7 +202,7 @@
      "unit": "mamp",
      "custom": {
       "lineWidth": 1,
-      "fillOpacity": 8
+      "fillOpacity": 0
      }
     },
     "overrides": []
@@ -219,7 +219,7 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "srnet_dom_tx_bias_ma{host=~\"$host\",sub=\"ch1\"}",
+     "expr": "max by (host, netdev) (srnet_dom_tx_bias_ma{host=~\"$host\",sub=\"ch1\"})",
      "legendFormat": "{{host}} {{netdev}}"
     }
    ]
@@ -242,7 +242,7 @@
      "unit": "mwatt",
      "custom": {
       "lineWidth": 1,
-      "fillOpacity": 8
+      "fillOpacity": 0
      }
     },
     "overrides": []
@@ -259,7 +259,7 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "srnet_dom_rx_power_mw{host=~\"$host\"}",
+     "expr": "max by (host, netdev, sub) (srnet_dom_rx_power_mw{host=~\"$host\"})",
      "legendFormat": "{{host}} {{netdev}} {{sub}}"
     }
    ]
@@ -282,7 +282,7 @@
      "unit": "short",
      "custom": {
       "lineWidth": 1,
-      "fillOpacity": 8
+      "fillOpacity": 0
      }
     },
     "overrides": []
@@ -299,7 +299,7 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "srnet_link_carrier_changes{host=~\"$host\"}",
+     "expr": "max by (host, netdev) (srnet_link_carrier_changes{host=~\"$host\"})",
      "legendFormat": "{{host}} {{netdev}}"
     }
    ]
@@ -322,7 +322,7 @@
      "unit": "Gbps",
      "custom": {
       "lineWidth": 1,
-      "fillOpacity": 8
+      "fillOpacity": 0
      }
     },
     "overrides": []
@@ -339,7 +339,7 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "srnet_link_speed_mbps{host=~\"$host\"}/1000",
+     "expr": "max by (host, netdev) (srnet_link_speed_mbps{host=~\"$host\"})/1000",
      "legendFormat": "{{host}} {{netdev}}"
     }
    ]
@@ -362,7 +362,7 @@
      "unit": "pps",
      "custom": {
       "lineWidth": 1,
-      "fillOpacity": 8
+      "fillOpacity": 0
      }
     },
     "overrides": []
@@ -379,12 +379,12 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "rate(srnet_nic_rx_prio3_pause{host=~\"$host\"}[5m])",
+     "expr": "sum by (host, netdev, __name__) (rate({__name__=~\"srnet_nic_rx_(prio[0-9]_pause|pause_ctrl_phy|global_pause)\",host=~\"$host\"}[5m]) keep_metric_names)",
      "legendFormat": "{{host}} {{netdev}} {{__name__}}"
     },
     {
      "refId": "B",
-     "expr": "rate(srnet_nic_tx_prio3_pause{host=~\"$host\"}[5m])",
+     "expr": "sum by (host, netdev, __name__) (rate({__name__=~\"srnet_nic_tx_(prio[0-9]_pause|pause_ctrl_phy|global_pause)\",host=~\"$host\"}[5m]) keep_metric_names)",
      "legendFormat": "{{host}} {{netdev}} {{__name__}}"
     }
    ]

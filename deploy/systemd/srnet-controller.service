@@ -19,6 +19,7 @@ ProtectHome=true
 PrivateTmp=true
 StateDirectory=srnet
 ConfigurationDirectory=srnet
+ConfigurationDirectoryMode=0750
 
 [Install]
 WantedBy=multi-user.target

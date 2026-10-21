@@ -24,7 +24,14 @@ esac
 export DEBIAN_FRONTEND=noninteractive
 log "Installing packages"
 apt-get update -qq
-apt-get install -y -qq curl ca-certificates gnupg apt-transport-https postgresql chrony >/dev/null
+apt-get install -y -qq curl ca-certificates gnupg apt-transport-https postgresql >/dev/null
+# A container takes its clock from the host; chrony cannot adjust it there
+# and only sits in the failed state.
+if systemd-detect-virt --container --quiet 2>/dev/null; then
+  systemctl disable --now chrony >/dev/null 2>&1 || true
+else
+  apt-get install -y -qq chrony >/dev/null
+fi
 
 log "Installing Grafana (apt repo)"
 install -d /etc/apt/keyrings
@@ -162,6 +169,7 @@ ProtectHome=true
 PrivateTmp=true
 StateDirectory=srnet
 ConfigurationDirectory=srnet
+ConfigurationDirectoryMode=0750
 
 [Install]
 WantedBy=multi-user.target

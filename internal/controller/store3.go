@@ -216,6 +216,16 @@ func (s *Store) OpenAlert(ctx context.Context, a api.Alert) (bool, error) {
 	return tag.RowsAffected() == 1, nil
 }
 
+// RenameAlertHost moves a host's open alerts to its new display name, so a
+// rename neither strands them under the old name nor leaves them unresolvable.
+func (s *Store) RenameAlertHost(ctx context.Context, old, new string) error {
+	if old == new || old == "" || new == "" {
+		return nil
+	}
+	_, err := s.db.Exec(ctx, `UPDATE alerts SET host=$2 WHERE host=$1 AND resolved_at IS NULL`, old, new)
+	return err
+}
+
 func (s *Store) ResolveAlert(ctx context.Context, kind, host, port string) (bool, error) {
 	tag, err := s.db.Exec(ctx, `UPDATE alerts SET resolved_at=now() WHERE kind=$1 AND host=$2 AND port=$3 AND resolved_at IS NULL`, kind, host, port)
 	if err != nil {

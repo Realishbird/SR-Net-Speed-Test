@@ -158,7 +158,7 @@ func (s *Store) SaveInventory(ctx context.Context, agentID int64, inv api.Invent
 	if _, err := tx.Exec(ctx, `UPDATE agents SET inventory=$1, hostname=$2, last_seen=now() WHERE id=$3`, invJSON, inv.Hostname, agentID); err != nil {
 		return err
 	}
-	var keep []int64
+	keep := []int64{} // never nil: NOT (id = ANY(NULL)) deletes nothing, keeping stale ports forever
 	for _, p := range inv.Ports {
 		info, _ := json.Marshal(p)
 		var id int64
