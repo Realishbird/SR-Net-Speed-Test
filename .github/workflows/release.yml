@@ -9,6 +9,14 @@ on:
 permissions:
   contents: write
 
+# Runs on main must not overlap: each one computes the next version from the
+# tags it sees at checkout, so three merges in a minute all claimed v0.1.15 and
+# uploaded over each other's assets. Queueing them makes each run see the tag
+# the previous one created. Pull request runs still run side by side.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # Every push to main publishes the next patch release (v0.1.0 -> v0.1.1) so
   # merging a PR is enough to ship. A manual vX.Y.Z tag still releases that
