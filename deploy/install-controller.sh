@@ -7,6 +7,7 @@ set -euo pipefail
 REPO="Realishbird/SR-Net-Speed-Test"
 VERSION="${SRNET_VERSION:-latest}"
 VM_VERSION="v1.104.0"
+GNMIC_VERSION="0.38.2"
 PUBLIC_URL="${SRNET_PUBLIC_URL:-}"
 ADMIN_PASSWORD="${SRNET_ADMIN_PASSWORD:-}"
 
@@ -53,6 +54,32 @@ After=network.target
 User=victoriametrics
 ExecStart=/usr/local/bin/victoria-metrics -storageDataPath=/var/lib/victoriametrics -retentionPeriod=90d -httpListenAddr=127.0.0.1:8428
 Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+log "Installing gnmic $GNMIC_VERSION (gNMI collector for SONiC switches)"
+if [ ! -x /usr/local/bin/gnmic ] || ! /usr/local/bin/gnmic version 2>/dev/null | grep -q "$GNMIC_VERSION"; then
+  TMP=$(mktemp -d)
+  GNMIC_ARCH=x86_64
+  [ "$ARCH" = arm64 ] && GNMIC_ARCH=arm64
+  curl -fsSL -o "$TMP/gnmic.tar.gz" "https://github.com/openconfig/gnmic/releases/download/v$GNMIC_VERSION/gnmic_${GNMIC_VERSION}_linux_$GNMIC_ARCH.tar.gz"
+  tar -xzf "$TMP/gnmic.tar.gz" -C "$TMP" gnmic
+  install -m 0755 "$TMP/gnmic" /usr/local/bin/gnmic
+  rm -rf "$TMP"
+fi
+cat > /etc/systemd/system/gnmic.service <<'EOF'
+[Unit]
+Description=gnmic gNMI collector (SR-Net-Speed-Test switches)
+After=network-online.target victoriametrics.service
+ConditionPathExists=/etc/srnet/gnmic.yaml
+
+[Service]
+User=srnet
+ExecStart=/usr/local/bin/gnmic --config /etc/srnet/gnmic.yaml subscribe
+Restart=always
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
@@ -131,21 +158,40 @@ if [ ! -s /etc/srnet/controller.json ]; then
   umask 022
 fi
 
-log "Grafana data source"
-install -d /etc/grafana/provisioning/datasources
+log "Grafana data source and dashboards"
+install -d /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards
 cat > /etc/grafana/provisioning/datasources/srnet.yaml <<'EOF'
 apiVersion: 1
 datasources:
   - name: VictoriaMetrics
+    uid: srnet-vm
     type: prometheus
     access: proxy
     url: http://127.0.0.1:8428
     isDefault: true
 EOF
+cat > /etc/grafana/provisioning/dashboards/srnet.yaml <<'EOF'
+apiVersion: 1
+providers:
+  - name: srnet
+    folder: SR-Net
+    type: file
+    allowUiUpdates: true
+    options:
+      path: /var/lib/srnet/grafana
+EOF
+install -d -m 0755 -o srnet -g srnet /var/lib/srnet/grafana
+# Re-running init refreshes the bundled dashboards without touching other settings.
+if [ -s /etc/srnet/controller.json ]; then
+  PUB=$(python3 -c 'import json;print(json.load(open("/etc/srnet/controller.json"))["public_url"])' 2>/dev/null || true)
+  [ -n "$PUB" ] && runuser -u srnet -- /usr/local/bin/srnet-controller init --public-url "$PUB" --admin-password-file /etc/srnet/admin-password >/dev/null 2>&1 || true
+fi
 
 systemctl daemon-reload
 systemctl enable --now victoriametrics grafana-server srnet-controller >/dev/null
+systemctl enable gnmic >/dev/null 2>&1 || true
 systemctl restart srnet-controller
+systemctl restart gnmic 2>/dev/null || true
 
 sleep 2
 log "Controller status"
@@ -153,3 +199,5 @@ echo "  srnet-controller: $(systemctl is-active srnet-controller)"
 echo "  victoriametrics:  $(systemctl is-active victoriametrics)"
 echo "  grafana:          $(systemctl is-active grafana-server) (port 3000, login admin/admin on first visit)"
 echo "  postgresql:       $(systemctl is-active postgresql)"
+echo "  gnmic:            $(systemctl is-active gnmic) (idle until a switch with gNMI is added: srnet-controller switch --help)"
+echo "  web UI:           https://<this host>:8443 (admin login)"

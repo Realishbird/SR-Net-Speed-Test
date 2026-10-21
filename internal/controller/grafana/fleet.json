@@ -1,0 +1,356 @@
+{
+ "uid": "srnet-fleet",
+ "title": "SR-Net: Fleet health",
+ "tags": [
+  "srnet"
+ ],
+ "timezone": "browser",
+ "schemaVersion": 39,
+ "version": 1,
+ "refresh": "1m",
+ "time": {
+  "from": "now-15m",
+  "to": "now"
+ },
+ "editable": true,
+ "templating": {
+  "list": []
+ },
+ "panels": [
+  {
+   "type": "stat",
+   "title": "Hosts reporting",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 6,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "count(count by (host) (srnet_cpu_util_pct))",
+     "legendFormat": ""
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "RDMA ports ACTIVE",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 6,
+    "y": 0,
+    "w": 6,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(srnet_rdma_port_active)",
+     "legendFormat": ""
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "RDMA ports DOWN",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 0,
+    "w": 6,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "count(srnet_rdma_port_active == 0) or vector(0)",
+     "legendFormat": ""
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Hottest transceiver",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 18,
+    "y": 0,
+    "w": 6,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "celsius",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max(srnet_dom_temp_c)",
+     "legendFormat": ""
+    }
+   ]
+  },
+  {
+   "type": "table",
+   "title": "Port state by host",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 5,
+    "w": 12,
+    "h": 10
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8
+     }
+    },
+    "overrides": []
+   },
+   "options": {},
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "srnet_rdma_port_active",
+     "format": "table",
+     "instant": true
+    }
+   ],
+   "transformations": [
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true,
+       "__name__": true,
+       "run_id": true
+      }
+     }
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Idle transceiver temperature",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 5,
+    "w": 12,
+    "h": 10
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "celsius",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "srnet_dom_temp_c",
+     "legendFormat": "{{host}} {{netdev}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Error counters growing while idle (per hour)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 15,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "increase(srnet_rdma_hw_out_of_sequence{run_id=\"\"}[1h])",
+     "legendFormat": "{{host}} {{netdev}}{{rdma_dev}} {{__name__}}"
+    },
+    {
+     "refId": "B",
+     "expr": "increase(srnet_rdma_hw_packet_seq_err{run_id=\"\"}[1h])",
+     "legendFormat": "{{host}} {{netdev}}{{rdma_dev}} {{__name__}}"
+    },
+    {
+     "refId": "C",
+     "expr": "increase(srnet_nic_rx_crc_errors_phy{run_id=\"\"}[1h])",
+     "legendFormat": "{{host}} {{netdev}}{{rdma_dev}} {{__name__}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Host load",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 15,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "srnet_load1",
+     "legendFormat": "{{host}}"
+    }
+   ]
+  }
+ ]
+}

@@ -220,6 +220,7 @@ func (s *Store) Hosts(ctx context.Context) ([]hostRec, error) {
 		json.Unmarshal(info, &p)
 		hp.RdmaDev, hp.PortNum, hp.Netdev, hp.Addrs = p.RdmaDev, p.PortNum, p.Netdev, p.Addrs
 		hp.State, hp.SpeedMbps, hp.FWVersion, hp.Transceiver = p.State, p.SpeedMbps, p.FWVersion, p.Transceiver
+		hp.LLDPSwitch, hp.LLDPPort = p.LLDPSwitch, p.LLDPPort
 		if i, ok := byID[agentID]; ok {
 			hosts[i].Ports = append(hosts[i].Ports, hp)
 		}

@@ -35,6 +35,7 @@ func Inventory(ctx context.Context) api.Inventory {
 	inv.CPUModel = cpuModel()
 	inv.MemBytes = memTotal()
 	inv.Ports = DiscoverPorts(ctx)
+	addLLDP(ctx, inv.Ports)
 	inv.Tools = toolVersions(ctx)
 	return inv
 }
@@ -192,7 +193,7 @@ func memTotal() uint64 {
 
 func toolVersions(ctx context.Context) map[string]string {
 	tools := map[string]string{}
-	for _, t := range []string{api.ToolWriteBW, api.ToolReadBW, "iperf3", "ethtool"} {
+	for _, t := range []string{api.ToolWriteBW, api.ToolReadBW, api.ToolSendBW, api.ToolWriteLat, api.ToolIperf3, "ethtool", "lldpctl"} {
 		if _, err := exec.LookPath(t); err == nil {
 			tools[t] = "installed"
 		}
@@ -200,7 +201,7 @@ func toolVersions(ctx context.Context) map[string]string {
 	// Package versions are the useful number for perftest; dpkg is always present on supported OSes.
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "dpkg-query", "-W", "-f", "${Package} ${Version}\n", "perftest", "iperf3", "ethtool", "rdma-core").Output()
+	out, err := exec.CommandContext(ctx, "dpkg-query", "-W", "-f", "${Package} ${Version}\n", "perftest", "iperf3", "ethtool", "rdma-core", "lldpd").Output()
 	if err == nil {
 		for _, line := range strings.Split(string(out), "\n") {
 			if f := strings.Fields(line); len(f) == 2 {
@@ -209,4 +210,55 @@ func toolVersions(ctx context.Context) map[string]string {
 		}
 	}
 	return tools
+}
+
+// addLLDP fills each port's switch neighbour from lldpd, so the controller can
+// match host ports to switch ports without anyone typing cable maps.
+func addLLDP(ctx context.Context, ports []api.Port) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "lldpctl", "-f", "keyvalue").Output()
+	if err != nil {
+		return
+	}
+	neigh := ParseLLDP(string(out))
+	for i := range ports {
+		if n, ok := neigh[ports[i].Netdev]; ok {
+			ports[i].LLDPSwitch, ports[i].LLDPPort = n[0], n[1]
+		}
+	}
+}
+
+// ParseLLDP reads `lldpctl -f keyvalue` into netdev -> {chassis name, port id}.
+func ParseLLDP(out string) map[string][2]string {
+	res := map[string][2]string{}
+	for _, line := range strings.Split(out, "\n") {
+		k, v, ok := strings.Cut(line, "=")
+		if !ok || !strings.HasPrefix(k, "lldp.") {
+			continue
+		}
+		parts := strings.Split(k, ".")
+		if len(parts) < 4 {
+			continue
+		}
+		dev := parts[1]
+		n := res[dev]
+		switch strings.Join(parts[2:], ".") {
+		case "chassis.name":
+			n[0] = v
+		case "port.ifname":
+			n[1] = v
+		case "port.descr":
+			if n[1] == "" {
+				n[1] = v
+			}
+		}
+		res[dev] = n
+	}
+	for dev, n := range res {
+		if n[0] == "" && n[1] == "" {
+			delete(res, dev)
+		}
+	}
+	return res
 }

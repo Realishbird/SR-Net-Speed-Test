@@ -14,7 +14,7 @@ Proxmox LXC: srnet-controller + Postgres + VictoriaMetrics + Grafana   (manageme
         \______ RDMA fabrics: test traffic only ______/
 ```
 
-Phase 1 (this version) covers: enrollment, write and read bandwidth tests, synchronised start across legs, per-leg results from both the perftest output and the RDMA hardware counters, pass/warn/fail verdicts, 1 s telemetry during runs, and a CLI. The web UI, latency and iperf3 profiles, full mesh, switch (SONiC) telemetry and fleet upgrades come in later phases.
+What it does today: enrollment, RDMA write/read/send bandwidth, RDMA latency and iperf3 TCP/UDP tests; fan-out, fan-in, paired, full mesh and explicit legs; serial link matrix and message size sweeps; synchronised start across legs; per-leg results from both the tool output and the hardware counters; pass/warn/fail verdicts; 1 s telemetry during runs; a web UI and a CLI; Grafana dashboards; SONiC switch port counters over gNMI or SNMP with LLDP mapping of host ports to switch ports. Agent updates pushed from the controller, schedules and alerts come in Phase 3.
 
 ## 1. Deploy the controller (Proxmox node shell)
 
@@ -24,7 +24,9 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Realishbird/SR-Net-Speed
 
 Defaults: unprivileged Debian 12 container, 4 cores, 8 GB RAM, 100 GB disk, DHCP on `vmbr0`, no Docker. Every default is a flag (`--ctid`, `--storage`, `--bridge`, `--vlan`, `--ip`, `--cores`, `--memory`, `--disk`, `--password`). The script prints the admin password, the Grafana URL and the CA fingerprint when it finishes. `--upgrade <CTID>` upgrades the stack inside an existing container.
 
-Inside the container the stack is plain systemd services: `srnet-controller` (port 8443), `postgresql`, `victoriametrics` (127.0.0.1:8428, 90 days retention), `grafana-server` (port 3000).
+Inside the container the stack is plain systemd services: `srnet-controller` (port 8443, web UI and API), `postgresql`, `victoriametrics` (127.0.0.1:8428, 90 days retention), `grafana-server` (port 3000, three SR-Net dashboards provisioned), and `gnmic` (idle until a switch with gNMI is configured).
+
+The web UI at `https://<lxc ip>:8443` (admin login) covers hosts and naming, launching runs, live per-leg rates and results. Everything it does is also in the `srnet` CLI below.
 
 ## 2. Install the agent on each host (Ubuntu 22.04/24.04, Debian 12)
 
@@ -63,10 +65,23 @@ srnet run --test write --clients "Dell 770AP" --servers tag:server --duration 60
 srnet run --test read  --clients tag:spark --servers "Dell 770AP"                  # fan-in
 srnet run --legs "Dell 770AP>Dell Spark 1"                                         # single link
 srnet run --clients a,b,c --servers d,e,f --pairs                                  # disjoint pairs
+srnet run --mesh tag:spark                                                         # full mesh, every ordered pair
+srnet run --clients "Dell 770AP" --servers tag:server --serial                     # link matrix, one leg at a time
+srnet run --sizes 4096,65536,1048576 --clients "Dell 770AP" --servers tag:server  # message size sweep
+srnet run --test write_lat --legs "Dell 770AP>Dell Spark 1" --max-p99-us 5        # latency, fail above 5 µs p99
+srnet run --test tcp --streams 8 --clients "Dell 770AP" --servers "Dell Spark 1"  # iperf3 TCP
+srnet run --test udp --max-loss-pct 0.5 --clients "Dell 770AP" --servers "Dell Spark 1"
 srnet runs; srnet show 12; srnet watch 12; srnet cancel 12
 ```
 
-For each leg the controller picks the client and server ports that share a subnet, checks both are `ACTIVE`, starts every server, then starts every client at one shared time so aggregate load is simultaneous. Results show the perftest average, the rate derived from `port_rcv_data` / `port_xmit_data` on the unshared side of the leg, growth in RDMA error counters, and a verdict: `fail` below `--pass-pct` (default 90 %) of the expected line rate, `warn` when error counters such as `out_of_sequence` grew.
+| Test | Tool | Result per leg |
+| --- | --- | --- |
+| `write`, `read`, `send` | `ib_write_bw`, `ib_read_bw`, `ib_send_bw` (`--bidir` for both directions) | Gbps from the tool and from the hardware counters, error counter growth |
+| `write_lat`, `read_lat`, `send_lat` | `ib_*_lat` | min, typical, avg, p99, p99.9, max in µs |
+| `tcp` | `iperf3` (`--streams N`) | Gbps, retransmits |
+| `udp` | `iperf3 -u` | Gbps, loss %, jitter |
+
+For each leg the controller picks the client and server ports that share a subnet, checks both are `ACTIVE`, starts every server, then starts every client at one shared time so aggregate load is simultaneous. Verdicts: `fail` below `--pass-pct` (default 90 %) of the expected line rate, above `--max-p99-us`, or above `--max-loss-pct`; `warn` when error counters such as `out_of_sequence` grew or TCP retransmitted.
 
 The API is the same thing the CLI uses (`/api/v1/...`, basic auth with the admin account); the web UI in Phase 2 will sit on top of it.
 
@@ -79,7 +94,18 @@ Agents sample every second during a run and every 15 s otherwise, and the contro
 - Transceiver DOM from `ethtool -m`: temperature, voltage, per-channel TX bias and optical power; power is reported as `dom_power_w` when the module measures it and `dom_power_rated_max_w` when only a rating is available
 - CPU, memory, load and every `hwmon` temperature
 
-Grafana is provisioned with VictoriaMetrics as its data source; dashboards come in Phase 2.
+Grafana is provisioned with VictoriaMetrics as its data source and three dashboards: **Live run** (pick a run id), **Link health** (error counters, optics and flaps per host over time) and **Fleet health**.
+
+## Switch telemetry (Enterprise SONiC)
+
+```bash
+srnet-controller switch --name z9864f --address 10.0.0.2 --snmp-community public --gnmi-user admin --gnmi-password secret
+systemctl restart srnet-controller gnmic
+```
+
+With gNMI credentials the controller writes `/etc/srnet/gnmic.yaml` and `gnmic` streams OpenConfig interface counters and transceiver state every 5 s as `srnet_gnmi_*` metrics. With only an SNMP community the controller polls IF-MIB every 30 s as `srnet_switch_*` metrics (octets, errors, discards, oper status, derived Gbps). Both can be set; gNMI is preferred. The switch is only ever read.
+
+Hosts run `lldpd`, so each port's switch neighbour and port id show in `srnet hosts` and the UI without a cable map.
 
 ## Development
 

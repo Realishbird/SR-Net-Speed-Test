@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SR-Net-Speed-Test</title>
+<style>
+:root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --line:#ddd; --card:#f6f7f9; --accent:#2563eb; --pass:#15803d; --warn:#b45309; --fail:#b91c1c; }
+@media (prefers-color-scheme: dark) { :root { --bg:#111418; --fg:#e6e6e6; --muted:#9aa; --line:#2a3038; --card:#1a1f26; --accent:#60a5fa; --pass:#4ade80; --warn:#fbbf24; --fail:#f87171; } }
+* { box-sizing: border-box; }
+body { margin:0; font: 14px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+header { display:flex; gap:20px; align-items:center; padding:10px 20px; border-bottom:1px solid var(--line); }
+header b { font-size:16px; }
+header a { color:var(--fg); text-decoration:none; padding:4px 8px; border-radius:6px; }
+header a.on { background:var(--card); color:var(--accent); }
+main { padding:16px 20px; max-width:1500px; }
+h2 { font-size:18px; margin:0 0 12px; }
+table { border-collapse:collapse; width:100%; }
+th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; }
+td.num, th.num { text-align:right; font-variant-numeric: tabular-nums; }
+input, select, button { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:5px 8px; }
+input.cell { width:110px; border-color:transparent; background:transparent; }
+input.cell:focus { border-color:var(--accent); background:var(--bg); }
+button.primary { background:var(--accent); color:#fff; border-color:var(--accent); cursor:pointer; }
+button { cursor:pointer; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-bottom:16px; }
+.row { display:flex; gap:12px; flex-wrap:wrap; align-items:end; }
+.row label { display:flex; flex-direction:column; gap:3px; font-size:12px; color:var(--muted); }
+.v { font-weight:600; padding:2px 8px; border-radius:999px; font-size:12px; }
+.v.pass { color:var(--pass); background:color-mix(in srgb, var(--pass) 15%, transparent); }
+.v.warn { color:var(--warn); background:color-mix(in srgb, var(--warn) 15%, transparent); }
+.v.fail { color:var(--fail); background:color-mix(in srgb, var(--fail) 15%, transparent); }
+.v.running, .v.queued { color:var(--accent); background:color-mix(in srgb, var(--accent) 15%, transparent); }
+.dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--fail); margin-right:6px; }
+.dot.on { background:var(--pass); }
+.big { font-size:28px; font-weight:700; }
+.muted { color:var(--muted); }
+pre { background:var(--card); padding:10px; border-radius:8px; overflow:auto; font-size:12px; }
+#msg { color:var(--fail); min-height:1.4em; }
+a.link { color:var(--accent); cursor:pointer; text-decoration:underline; }
+</style>
+</head>
+<body>
+<header>
+  <b>SR-Net-Speed-Test</b>
+  <a href="#hosts" id="nav-hosts">Hosts</a>
+  <a href="#runs" id="nav-runs">Runs</a>
+  <a href="#new" id="nav-new">New run</a>
+  <a id="grafana" href="#" target="_blank">Grafana</a>
+  <span class="muted" id="ver" style="margin-left:auto"></span>
+</header>
+<main>
+  <div id="msg"></div>
+  <div id="view"></div>
+</main>
+<script>
+const $ = (s, el=document) => el.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmt = (n, d=1) => (n ?? 0).toFixed(d);
+let timer = null;
+
+async function api(method, path, body) {
+  const opt = { method, headers: {} };
+  if (body !== undefined) { opt.headers['Content-Type'] = typeof body === 'string' ? 'text/csv' : 'application/json'; opt.body = typeof body === 'string' ? body : JSON.stringify(body); }
+  const r = await fetch('/api/v1' + path, opt);
+  if (r.status === 204) return null;
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+function say(e) { $('#msg').textContent = e ? (e.message || e) : ''; }
+
+function route() {
+  clearInterval(timer);
+  say('');
+  const h = location.hash || '#hosts';
+  document.querySelectorAll('header a').forEach(a => a.classList.toggle('on', h.startsWith(a.getAttribute('href'))));
+  if (h.startsWith('#run/')) return showRun(+h.slice(5));
+  if (h === '#runs') return showRuns();
+  if (h === '#new') return showNew();
+  return showHosts();
+}
+window.addEventListener('hashchange', route);
+
+/* Hosts */
+async function showHosts() {
+  const hosts = await api('GET', '/hosts').catch(say) || [];
+  let html = `<div class="row" style="margin-bottom:12px"><h2 style="margin:0">Hosts</h2>
+    <button onclick="newToken()">Agent install command</button>
+    <label>Import CSV <input type="file" id="csv" accept=".csv"></label>
+    <span class="muted">host,name,tags,site,rack,ip,label,fabric,expected_gbps</span></div>
+    <pre id="token" style="display:none"></pre>
+    <table><tr><th></th><th>Name</th><th>Hostname</th><th>Tags (comma)</th><th>Site</th><th>Agent</th>
+    <th>Port</th><th>IP</th><th>State</th><th class="num">Speed</th><th>Label</th><th>Fabric</th><th class="num">Expected Gbps</th><th>Switch port</th><th class="num">Live TX / RX</th></tr>`;
+  if (!hosts.length) html += `<tr><td colspan="15" class="muted">No hosts enrolled yet. Click "Agent install command" and run it on a host.</td></tr>`;
+  for (const h of hosts) {
+    const ports = h.ports.length ? h.ports : [null];
+    ports.forEach((p, i) => {
+      html += '<tr>';
+      if (i === 0) {
+        const rs = `rowspan="${ports.length}"`;
+        html += `<td ${rs}><span class="dot ${h.online?'on':''}" title="${h.online?'online':'offline'}"></span></td>
+          <td ${rs}><input class="cell" value="${esc(h.name)}" onchange="patchHost(${h.id},{name:this.value})"></td>
+          <td ${rs} class="muted">${esc(h.hostname)}</td>
+          <td ${rs}><input class="cell" value="${esc(h.tags.join(','))}" onchange="patchHost(${h.id},{tags:this.value.split(',').map(s=>s.trim()).filter(Boolean)})"></td>
+          <td ${rs}><input class="cell" value="${esc(h.site)}" onchange="patchHost(${h.id},{site:this.value})"></td>
+          <td ${rs} class="muted">${esc(h.agent_version)}<br>${esc(h.arch)}</td>`;
+      }
+      if (!p) { html += '<td colspan="9" class="muted">no RDMA ports found</td></tr>'; return; }
+      const sw = p.lldp_switch || p.lldp_port ? `${esc(p.lldp_switch)} / ${esc(p.lldp_port)}` : '<span class="muted">-</span>';
+      html += `<td>${esc(p.rdma_dev)}/${p.port_num} <span class="muted">${esc(p.netdev)}</span></td>
+        <td>${esc(p.addrs.join(', '))}</td>
+        <td><span class="v ${p.state==='ACTIVE'?'pass':'fail'}">${esc(p.state)}</span></td>
+        <td class="num">${p.speed_mbps/1000}G</td>
+        <td><input class="cell" value="${esc(p.label)}" onchange="patchPort(${p.id},{label:this.value})"></td>
+        <td><input class="cell" style="width:70px" value="${esc(p.fabric)}" onchange="patchPort(${p.id},{fabric:this.value})"></td>
+        <td class="num"><input class="cell num" style="width:70px;text-align:right" value="${p.expected_gbps||''}" placeholder="${p.speed_mbps/1000}" onchange="patchPort(${p.id},{expected_gbps:+this.value||0})"></td>
+        <td>${sw}</td>
+        <td class="num">${fmt(p.tx_gbps)} / ${fmt(p.rx_gbps)}</td></tr>`;
+    });
+  }
+  $('#view').innerHTML = html + '</table>';
+  $('#csv').onchange = async e => {
+    const f = e.target.files[0]; if (!f) return;
+    try { const r = await api('POST', '/hosts/import', await f.text()); say(r.problems.length ? r.problems.join('; ') : ''); showHosts(); } catch (x) { say(x); }
+  };
+  timer = setInterval(async () => {
+    if (document.activeElement && document.activeElement.classList.contains('cell')) return;
+    showHosts();
+  }, 5000);
+}
+async function patchHost(id, u) { try { await api('PATCH', '/hosts/' + id, u); say(''); } catch (e) { say(e); } }
+async function patchPort(id, u) { try { await api('PATCH', '/ports/' + id, u); say(''); } catch (e) { say(e); } }
+async function newToken() {
+  try { const t = await api('POST', '/tokens'); const el = $('#token'); el.style.display = 'block'; el.textContent = `# valid until ${new Date(t.expires_at).toLocaleTimeString()}\n${t.install_command}`; } catch (e) { say(e); }
+}
+
+/* Runs */
+async function showRuns() {
+  const runs = await api('GET', '/runs').catch(say) || [];
+  let html = `<h2>Runs</h2><table><tr><th>ID</th><th>Name</th><th>Test</th><th>Status</th><th>Verdict</th><th class="num">Tool Gbps</th><th class="num">Counter Gbps</th><th>Started</th></tr>`;
+  if (!runs.length) html += `<tr><td colspan="8" class="muted">No runs yet.</td></tr>`;
+  for (const r of runs) html += `<tr><td><a class="link" href="#run/${r.id}">${r.id}</a></td><td><a class="link" href="#run/${r.id}">${esc(r.name)}</a></td><td>${esc(r.spec.test)}</td>
+    <td><span class="v ${r.status}">${r.status}</span></td><td>${r.verdict ? `<span class="v ${r.verdict}">${r.verdict}</span>` : ''}</td>
+    <td class="num">${fmt(r.summary.tool_gbps)}</td><td class="num">${fmt(r.summary.counter_gbps)}</td><td class="muted">${r.started_at ? new Date(r.started_at).toLocaleString() : '-'}</td></tr>`;
+  $('#view').innerHTML = html + '</table>';
+  timer = setInterval(showRuns, 5000);
+}
+
+async function showRun(id) {
+  let r; try { r = await api('GET', '/runs/' + id); } catch (e) { return say(e); }
+  const live = r.status === 'running' || r.status === 'queued';
+  const lat = r.spec.test.endsWith('_lat');
+  const s = r.spec;
+  let html = `<div class="row" style="margin-bottom:12px"><h2 style="margin:0">Run ${r.id}: ${esc(r.name)}</h2>
+    <span class="v ${r.status}">${r.status}</span> ${r.verdict ? `<span class="v ${r.verdict}">${r.verdict}</span>` : ''}
+    ${live ? `<button onclick="cancelRun(${r.id})">Cancel</button>` : ''}
+    <a class="link" href="#new" onclick='sessionStorage.setItem("spec", ${JSON.stringify(JSON.stringify(s))})'>Run again</a></div>`;
+  if (r.error) html += `<div class="card" style="color:var(--fail)">${esc(r.error)}</div>`;
+  html += `<div class="card"><div class="row">
+    <div><div class="muted">${live ? 'Live aggregate' : 'Aggregate (tool)'}</div><div class="big">${fmt(live ? r.summary.live_gbps : r.summary.tool_gbps)} <span class="muted" style="font-size:14px">Gbps</span></div></div>
+    ${!live && !lat ? `<div><div class="muted">Aggregate (counters)</div><div class="big">${fmt(r.summary.counter_gbps)}</div></div>` : ''}
+    ${Object.entries(r.summary.by_fabric || {}).map(([f, g]) => `<div><div class="muted">Fabric ${esc(f)}</div><div class="big">${fmt(g)}</div></div>`).join('')}
+    <div class="muted" style="margin-left:auto">${esc(s.test)} · ${s.duration_sec}s · size ${s.msg_size}${s.sizes?.length ? ' sweep ' + s.sizes.join('/') : ''} · qps ${s.qps}${s.streams > 1 ? ' · streams ' + s.streams : ''}${s.bidir ? ' · bidir' : ''}${s.serial ? ' · serial' : ''}${s.mesh ? ' · mesh' : ''}<br>
+    ${r.started_at ? new Date(r.started_at).toLocaleString() : ''} ${r.ended_at ? '→ ' + new Date(r.ended_at).toLocaleTimeString() : ''}</div></div></div>`;
+  html += '<table><tr><th>#</th><th>Client</th><th>Server</th><th>Fabric</th><th class="num">Size</th>';
+  html += lat ? '<th class="num">Min µs</th><th class="num">Typ µs</th><th class="num">Avg µs</th><th class="num">P99 µs</th><th class="num">P99.9 µs</th><th class="num">Max µs</th>'
+              : `<th class="num">Expected</th><th class="num">${live ? 'Live' : 'Tool'} Gbps</th><th class="num">Counter Gbps</th>${s.test === 'tcp' ? '<th class="num">Retrans</th>' : s.test === 'udp' ? '<th class="num">Loss %</th><th class="num">Jitter ms</th>' : ''}`;
+  html += '<th>Errors</th><th>Verdict</th><th>Note</th></tr>';
+  for (const l of r.legs || []) {
+    const errs = Object.entries(l.error_deltas || {}).map(([k, v]) => `${k} +${v}`).join(', ');
+    html += `<tr><td>${l.index + 1}</td><td>${esc(l.client_host)} <span class="muted">${esc(l.client_ip)}</span></td><td>${esc(l.server_host)} <span class="muted">${esc(l.server_ip)}</span></td><td>${esc(l.fabric)}</td><td class="num">${l.msg_size || ''}</td>`;
+    if (lat) { const t = l.latency || {}; html += `<td class="num">${fmt(t.min_us, 2)}</td><td class="num">${fmt(t.typical_us, 2)}</td><td class="num">${fmt(t.avg_us, 2)}</td><td class="num">${fmt(t.p99_us, 2)}</td><td class="num">${fmt(t.p999_us, 2)}</td><td class="num">${fmt(t.max_us, 2)}</td>`; }
+    else {
+      html += `<td class="num">${fmt(l.expected_gbps, 0)}</td><td class="num">${fmt(live && !l.verdict ? l.live_gbps : l.tool_gbps)}</td><td class="num">${fmt(l.counter_gbps)}</td>`;
+      if (s.test === 'tcp') html += `<td class="num">${l.retransmits || 0}</td>`;
+      if (s.test === 'udp') html += `<td class="num">${fmt(l.loss_pct, 2)}</td><td class="num">${fmt(l.jitter_ms, 3)}</td>`;
+    }
+    html += `<td class="muted">${esc(errs)}</td><td>${l.verdict ? `<span class="v ${l.verdict}">${l.verdict}</span>` : ''}</td><td class="muted">${esc(l.note)}</td></tr>`;
+  }
+  $('#view').innerHTML = html + '</table>';
+  if (live) timer = setInterval(() => showRun(id), 2000);
+}
+async function cancelRun(id) { try { await api('POST', `/runs/${id}/cancel`); } catch (e) { say(e); } }
+
+/* New run */
+const tests = { write: 'RDMA write bandwidth', read: 'RDMA read bandwidth', send: 'RDMA send bandwidth', write_lat: 'RDMA write latency', read_lat: 'RDMA read latency', send_lat: 'RDMA send latency', tcp: 'TCP (iperf3)', udp: 'UDP (iperf3)' };
+async function showNew() {
+  const hosts = await api('GET', '/hosts').catch(say) || [];
+  const prev = JSON.parse(sessionStorage.getItem('spec') || 'null'); sessionStorage.removeItem('spec');
+  const names = hosts.map(h => h.name);
+  const tags = [...new Set(hosts.flatMap(h => h.tags))].map(t => 'tag:' + t);
+  const opts = [...names, ...tags].map(n => `<option value="${esc(n)}">`).join('');
+  const topo = prev ? (prev.mesh ? 'mesh' : prev.legs?.length ? 'legs' : prev.pairs ? 'pairs' : 'cs') : 'cs';
+  $('#view').innerHTML = `<h2>New run</h2><datalist id="sel">${opts}</datalist>
+  <form id="f" class="card" onsubmit="return startRun(event)">
+    <div class="row">
+      <label>Name <input name="name" value="${esc(prev?.name || '')}" placeholder="optional"></label>
+      <label>Test <select name="test">${Object.entries(tests).map(([k, v]) => `<option value="${k}" ${prev?.test === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+      <label>Topology <select name="topo" onchange="topoChange(this.value)">
+        <option value="cs" ${topo==='cs'?'selected':''}>Clients to servers (fan-out / fan-in)</option>
+        <option value="pairs" ${topo==='pairs'?'selected':''}>Pairs (client i to server i)</option>
+        <option value="mesh" ${topo==='mesh'?'selected':''}>Full mesh</option>
+        <option value="legs" ${topo==='legs'?'selected':''}>Explicit legs</option></select></label>
+    </div>
+    <div class="row" id="t-cs"><label>Clients <input name="clients" list="sel" size="40" value="${esc((prev?.clients||[]).join(', '))}" placeholder="host, tag:client, 172.27.100.1, port label"></label>
+      <label>Servers <input name="servers" list="sel" size="40" value="${esc((prev?.servers||[]).join(', '))}" placeholder="host, tag:server"></label></div>
+    <div class="row" id="t-mesh" style="display:none"><label>Hosts <input name="hosts" list="sel" size="60" value="${esc((prev?.hosts||[]).join(', '))}" placeholder="every ordered pair among these"></label></div>
+    <div class="row" id="t-legs" style="display:none"><label>Legs <input name="legs" size="60" value="${esc((prev?.legs||[]).map(l=>l.client+'>'+l.server).join(', '))}" placeholder="client>server, client>server"></label></div>
+    <div class="row">
+      <label>Duration s <input name="duration_sec" type="number" min="5" value="${prev?.duration_sec || 60}" style="width:80px"></label>
+      <label>Message size <input name="msg_size" type="number" min="1" value="${prev?.msg_size || ''}" placeholder="per test" style="width:100px"></label>
+      <label>Sweep sizes <input name="sizes" value="${esc((prev?.sizes||[]).join(', '))}" placeholder="4096, 65536, 1048576" style="width:160px"></label>
+      <label>QPs <input name="qps" type="number" min="1" value="${prev?.qps || 1}" style="width:60px"></label>
+      <label>Streams (iperf3) <input name="streams" type="number" min="1" value="${prev?.streams || 1}" style="width:60px"></label>
+      <label>Pass % of line rate <input name="pass_pct" type="number" min="1" max="100" value="${prev?.pass_pct || 90}" style="width:70px"></label>
+      <label>Max p99 µs (latency) <input name="max_lat_p99_us" type="number" step="0.01" value="${prev?.max_lat_p99_us || ''}" placeholder="report only" style="width:100px"></label>
+      <label>Max loss % (udp) <input name="max_loss_pct" type="number" step="0.1" value="${prev?.max_loss_pct || 1}" style="width:70px"></label>
+      <label><span><input name="bidir" type="checkbox" ${prev?.bidir ? 'checked' : ''}> Bidirectional</span></label>
+      <label><span><input name="serial" type="checkbox" ${prev?.serial ? 'checked' : ''}> Serial (one leg at a time, link matrix)</span></label>
+    </div>
+    <div class="row" style="margin-top:12px"><button class="primary" type="submit">Start</button><span class="muted">Servers start first; all clients start together 3 s later.</span></div>
+  </form>`;
+  topoChange(topo);
+}
+function topoChange(t) { $('#t-cs').style.display = (t === 'cs' || t === 'pairs') ? '' : 'none'; $('#t-mesh').style.display = t === 'mesh' ? '' : 'none'; $('#t-legs').style.display = t === 'legs' ? '' : 'none'; }
+function list(s) { return s.split(',').map(x => x.trim()).filter(Boolean); }
+async function startRun(ev) {
+  ev.preventDefault();
+  const f = new FormData(ev.target), g = k => f.get(k);
+  const spec = { name: g('name'), test: g('test'), duration_sec: +g('duration_sec'), msg_size: +g('msg_size') || 0, qps: +g('qps'), streams: +g('streams'),
+    pass_pct: +g('pass_pct'), max_lat_p99_us: +g('max_lat_p99_us') || 0, max_loss_pct: +g('max_loss_pct') || 0, bidir: !!g('bidir'), serial: !!g('serial'),
+    sizes: list(g('sizes')).map(Number).filter(Boolean) };
+  const topo = g('topo');
+  if (topo === 'mesh') { spec.mesh = true; spec.hosts = list(g('hosts')); }
+  else if (topo === 'legs') spec.legs = list(g('legs')).map(l => { const [c, s] = l.split('>'); return { client: (c||'').trim(), server: (s||'').trim() }; });
+  else { spec.clients = list(g('clients')); spec.servers = list(g('servers')); spec.pairs = topo === 'pairs'; }
+  try { const r = await api('POST', '/runs', spec); location.hash = '#run/' + r.id; } catch (e) { say(e); }
+  return false;
+}
+
+api('GET', '/status').then(s => { $('#ver').textContent = s.version; $('#grafana').href = s.grafana_url || (location.protocol + '//' + location.hostname + ':3000'); }).catch(() => {});
+route();
+</script>
+</body>
+</html>

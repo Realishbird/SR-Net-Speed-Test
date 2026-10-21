@@ -1,0 +1,455 @@
+{
+ "uid": "srnet-live-run",
+ "title": "SR-Net: Live run",
+ "tags": [
+  "srnet"
+ ],
+ "timezone": "browser",
+ "schemaVersion": 39,
+ "version": 1,
+ "refresh": "5s",
+ "time": {
+  "from": "now-15m",
+  "to": "now"
+ },
+ "editable": true,
+ "templating": {
+  "list": [
+   {
+    "name": "run_id",
+    "label": "Run",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "srnet-vm"
+    },
+    "query": {
+     "query": "label_values(srnet_rdma_rx_gbps, run_id)",
+     "refId": "v"
+    },
+    "refresh": 2,
+    "sort": 4,
+    "includeAll": false,
+    "current": {}
+   }
+  ]
+ },
+ "panels": [
+  {
+   "type": "stat",
+   "title": "Aggregate RX Gbps (all legs)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 8,
+    "h": 6
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Gbps",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "graphMode": "area"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(srnet_rdma_rx_gbps{run_id=~\"(^|.*,)$run_id(,.*|$)\"})",
+     "legendFormat": "rx"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Aggregate TX Gbps",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 8,
+    "y": 0,
+    "w": 8,
+    "h": 6
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Gbps",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "graphMode": "area"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(srnet_rdma_tx_gbps{run_id=~\"(^|.*,)$run_id(,.*|$)\"})",
+     "legendFormat": "tx"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Error counters grown during run",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 16,
+    "y": 0,
+    "w": 8,
+    "h": 6
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(increase(srnet_rdma_hw_out_of_sequence{run_id=~\"(^|.*,)$run_id(,.*|$)\"}[$__range])) + sum(increase(srnet_rdma_hw_packet_seq_err{run_id=~\"(^|.*,)$run_id(,.*|$)\"}[$__range])) + sum(increase(srnet_rdma_hw_local_ack_timeout_err{run_id=~\"(^|.*,)$run_id(,.*|$)\"}[$__range]))",
+     "legendFormat": "errors"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "RX Gbps per port",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 6,
+    "w": 12,
+    "h": 9
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Gbps",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "srnet_rdma_rx_gbps{run_id=~\"(^|.*,)$run_id(,.*|$)\"}",
+     "legendFormat": "{{host}} {{netdev}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "TX Gbps per port",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 6,
+    "w": 12,
+    "h": 9
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Gbps",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "srnet_rdma_tx_gbps{run_id=~\"(^|.*,)$run_id(,.*|$)\"}",
+     "legendFormat": "{{host}} {{netdev}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Transceiver temperature",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 15,
+    "w": 8,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "celsius",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "srnet_dom_temp_c{run_id=~\"(^|.*,)$run_id(,.*|$)\"}",
+     "legendFormat": "{{host}} {{netdev}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Pause frames / discards (rate)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 8,
+    "y": 15,
+    "w": 8,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "pps",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "rate(srnet_nic_rx_prio3_pause{run_id=~\"(^|.*,)$run_id(,.*|$)\"}[30s])",
+     "legendFormat": "{{host}} {{netdev}} {{__name__}}"
+    },
+    {
+     "refId": "B",
+     "expr": "rate(srnet_nic_rx_discards_phy{run_id=~\"(^|.*,)$run_id(,.*|$)\"}[30s])",
+     "legendFormat": "{{host}} {{netdev}} {{__name__}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "CPU utilisation",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 16,
+    "y": 15,
+    "w": 8,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "srnet_cpu_util_pct{run_id=~\"(^|.*,)$run_id(,.*|$)\"}",
+     "legendFormat": "{{host}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "CNP sent / ECN marked (rate)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 23,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "pps",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "rate(srnet_rdma_hw_np_cnp_sent{run_id=~\"(^|.*,)$run_id(,.*|$)\"}[30s])",
+     "legendFormat": "{{host}} {{rdma_dev}} {{__name__}}"
+    },
+    {
+     "refId": "B",
+     "expr": "rate(srnet_rdma_hw_np_ecn_marked_roce_packets{run_id=~\"(^|.*,)$run_id(,.*|$)\"}[30s])",
+     "legendFormat": "{{host}} {{rdma_dev}} {{__name__}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Switch port Gbps (gNMI or SNMP)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 23,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Gbps",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "srnet_switch_rx_gbps",
+     "legendFormat": "{{switch}} {{port}} {{interface_name}}"
+    },
+    {
+     "refId": "B",
+     "expr": "srnet_switch_tx_gbps",
+     "legendFormat": "{{switch}} {{port}} {{interface_name}}"
+    },
+    {
+     "refId": "C",
+     "expr": "rate(srnet_gnmi_in_octets[30s])*8/1e9",
+     "legendFormat": "{{switch}} {{port}} {{interface_name}}"
+    }
+   ]
+  }
+ ]
+}

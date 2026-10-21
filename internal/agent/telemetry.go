@@ -157,6 +157,13 @@ func (s *Sampler) portValues(ctx context.Context, p api.Port, now time.Time, doD
 		if n, ok := readNum(filepath.Join(netDir, "carrier_changes")); ok {
 			v["link_carrier_changes"] = n
 		}
+		// Netdev byte counters carry TCP/UDP traffic; RDMA bypasses them.
+		if n, ok := readNum(filepath.Join(netDir, "statistics/tx_bytes")); ok {
+			v["nic_tx_bytes"] = n
+		}
+		if n, ok := readNum(filepath.Join(netDir, "statistics/rx_bytes")); ok {
+			v["nic_rx_bytes"] = n
+		}
 		for k, n := range ethtoolStats(ctx, p.Netdev) {
 			v["nic_"+k] = n
 		}

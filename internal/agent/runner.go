@@ -8,6 +8,7 @@ import (
 	"net"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -25,14 +26,6 @@ var errorCounters = []string{
 // BuildCommand turns a task into argv. Every field is validated and formatted here;
 // nothing from the controller reaches a shell.
 func BuildCommand(t api.Task) ([]string, error) {
-	switch t.Tool {
-	case api.ToolWriteBW, api.ToolReadBW:
-	default:
-		return nil, fmt.Errorf("unsupported tool %q", t.Tool)
-	}
-	if !validName(t.RdmaDev) {
-		return nil, fmt.Errorf("invalid rdma device %q", t.RdmaDev)
-	}
 	if t.TCPPort < 1024 || t.TCPPort > 65535 {
 		return nil, fmt.Errorf("invalid tcp port %d", t.TCPPort)
 	}
@@ -42,18 +35,55 @@ func BuildCommand(t api.Task) ([]string, error) {
 	if t.MsgSize < 1 || t.MsgSize > 1<<30 {
 		return nil, fmt.Errorf("invalid message size %d", t.MsgSize)
 	}
-	if t.QPs < 1 || t.QPs > 1024 {
-		return nil, fmt.Errorf("invalid qp count %d", t.QPs)
+	if t.TOS < 0 || t.TOS > 255 {
+		return nil, fmt.Errorf("invalid tos %d", t.TOS)
+	}
+	local := parseIPv4(t.LocalIP)
+	peer := parseIPv4(t.PeerIP)
+	if t.Kind == api.TaskClient && peer == "" {
+		return nil, fmt.Errorf("invalid peer ip %q", t.PeerIP)
+	}
+
+	switch t.Tool {
+	case api.ToolIperf3:
+		if t.Streams < 1 || t.Streams > 128 {
+			return nil, fmt.Errorf("invalid stream count %d", t.Streams)
+		}
+		if local == "" {
+			return nil, fmt.Errorf("invalid local ip %q", t.LocalIP)
+		}
+		args := []string{api.ToolIperf3, "--json", "-p", strconv.Itoa(t.TCPPort), "-B", local}
+		if t.Kind == api.TaskServer {
+			// -1 exits after one client, so the server reports its own result and never lingers.
+			return append(args, "-s", "-1"), nil
+		}
+		args = append(args, "-c", peer, "-t", strconv.Itoa(t.DurationSec), "-P", strconv.Itoa(t.Streams), "-l", strconv.Itoa(t.MsgSize), "-S", strconv.Itoa(t.TOS))
+		switch t.Protocol {
+		case "tcp", "":
+		case "udp":
+			args = append(args, "-u", "-b", "0") // unlimited; loss and jitter are the result
+		default:
+			return nil, fmt.Errorf("invalid protocol %q", t.Protocol)
+		}
+		if t.Bidir {
+			args = append(args, "--bidir")
+		}
+		return args, nil
+
+	case api.ToolWriteBW, api.ToolReadBW, api.ToolSendBW, api.ToolWriteLat, api.ToolReadLat, api.ToolSendLat:
+	default:
+		return nil, fmt.Errorf("unsupported tool %q", t.Tool)
+	}
+
+	if !validName(t.RdmaDev) {
+		return nil, fmt.Errorf("invalid rdma device %q", t.RdmaDev)
 	}
 	switch t.MTU {
 	case 256, 512, 1024, 2048, 4096:
 	default:
 		return nil, fmt.Errorf("invalid rdma mtu %d", t.MTU)
 	}
-	if t.TOS < 0 || t.TOS > 255 {
-		return nil, fmt.Errorf("invalid tos %d", t.TOS)
-	}
-	// Same flags as the PowerShell tool: rdma_cm, TOS 106, MTU 4096, duration mode, Gbit/s output.
+	// Same flags as the PowerShell tool: rdma_cm, TOS 106, MTU 4096, duration mode.
 	args := []string{
 		t.Tool,
 		"-d", t.RdmaDev,
@@ -62,16 +92,20 @@ func BuildCommand(t api.Task) ([]string, error) {
 		"-p", strconv.Itoa(t.TCPPort),
 		"-m", strconv.Itoa(t.MTU),
 		"-s", strconv.Itoa(t.MsgSize),
-		"-q", strconv.Itoa(t.QPs),
 		"-D", strconv.Itoa(t.DurationSec),
-		"-F", "--report_gbits",
+		"-F",
+	}
+	if strings.HasSuffix(t.Tool, "_bw") {
+		if t.QPs < 1 || t.QPs > 1024 {
+			return nil, fmt.Errorf("invalid qp count %d", t.QPs)
+		}
+		args = append(args, "-q", strconv.Itoa(t.QPs), "--report_gbits")
+		if t.Bidir {
+			args = append(args, "-b")
+		}
 	}
 	if t.Kind == api.TaskClient {
-		ip := parseIPv4(t.PeerIP)
-		if ip == "" {
-			return nil, fmt.Errorf("invalid peer ip %q", t.PeerIP)
-		}
-		args = append(args, ip)
+		args = append(args, peer)
 	}
 	return args, nil
 }
@@ -163,7 +197,10 @@ func (r *Runner) run(parent context.Context, t api.Task) {
 		}
 	}
 
-	before := HWCounters(t.RdmaDev, t.PortNum)
+	var before map[string]float64
+	if t.RdmaDev != "" {
+		before = HWCounters(t.RdmaDev, t.PortNum)
+	}
 	var out bytes.Buffer
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Stdout, cmd.Stderr = &out, &out
@@ -196,14 +233,31 @@ func (r *Runner) run(parent context.Context, t api.Task) {
 	if cmd.ProcessState != nil {
 		res.ExitCode = cmd.ProcessState.ExitCode()
 	}
-	pr := ParsePerftest(out.String())
-	res.AvgGbps, res.PeakGbps, res.MsgRateMpps = pr.AvgGbps, pr.PeakGbps, pr.MsgRateMpps
-	after := HWCounters(t.RdmaDev, t.PortNum)
+	parsedOK := true
+	switch {
+	case t.Tool == api.ToolIperf3:
+		ir, ok := ParseIperf3(out.String())
+		res.AvgGbps, res.Retransmits, res.LossPct, res.JitterMs = ir.Gbps, ir.Retransmits, ir.LossPct, ir.JitterMs
+		parsedOK = ok
+	case strings.HasSuffix(t.Tool, "_lat"):
+		lat, ok := ParsePerftestLat(out.String())
+		if ok {
+			res.Latency = &lat
+		}
+		parsedOK = ok
+	default:
+		pr := ParsePerftest(out.String())
+		res.AvgGbps, res.PeakGbps, res.MsgRateMpps = pr.AvgGbps, pr.PeakGbps, pr.MsgRateMpps
+		parsedOK = pr.OK
+	}
 	res.ErrorDeltas = map[string]int64{}
-	for _, k := range errorCounters {
-		if a, ok := after[k]; ok {
-			if d := int64(a - before[k]); d > 0 {
-				res.ErrorDeltas[k] = d
+	if t.RdmaDev != "" {
+		after := HWCounters(t.RdmaDev, t.PortNum)
+		for _, k := range errorCounters {
+			if a, ok := after[k]; ok {
+				if d := int64(a - before[k]); d > 0 {
+					res.ErrorDeltas[k] = d
+				}
 			}
 		}
 	}
@@ -211,8 +265,8 @@ func (r *Runner) run(parent context.Context, t api.Task) {
 		res.Error = "timed out or canceled"
 	} else if err != nil {
 		res.Error = err.Error()
-	} else if !pr.OK {
-		res.Error = "no result row in perftest output"
+	} else if !parsedOK && (t.Kind == api.TaskClient || t.Tool == api.ToolIperf3) {
+		res.Error = "no result in tool output"
 	}
 	if res.Error != "" {
 		r.Report(api.Event{TaskID: t.ID, RunID: t.RunID, LegID: t.LegID, Type: api.EventFailed, Message: res.Error})
