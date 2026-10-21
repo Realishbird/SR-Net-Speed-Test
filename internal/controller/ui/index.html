@@ -258,12 +258,14 @@ async function pageOverview(token) {
     <div class="card"><h2>Open alerts</h2><div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th>Kind</th><th>Host</th><th>Port</th><th>Message</th><th>Since</th></tr></thead><tbody id="ov-alerts"></tbody></table></div></div>`)) return;
   const refresh = async () => {
     const [hosts, runs, alerts, st] = await Promise.all([api('GET', '/hosts'), api('GET', '/runs'), api('GET', '/alerts'), api('GET', '/status')]);
-    const online = hosts.filter(h => h.online).length, ports = hosts.flatMap(h => h.ports), up = ports.filter(p => p.state === 'ACTIVE').length;
+    // Ports with an address are the configured ones; a ConnectX-7 on the Sparks also
+    // shows the second PCIe half of each cabled port as an ACTIVE device with no IP.
+    const online = hosts.filter(h => h.online).length, ports = hosts.flatMap(h => h.ports).filter(p => p.addrs?.length), up = ports.filter(p => p.state === 'ACTIVE').length;
     const running = runs.filter(r => r.status === 'running' || r.status === 'queued').length;
     const tx = ports.reduce((a, p) => a + (p.tx_gbps || 0), 0);
     set('ov-tiles', `
       <div class="tile"><div class="k">Hosts online</div><div class="v">${online}<small>of ${hosts.length}</small></div></div>
-      <div class="tile"><div class="k">RDMA ports active</div><div class="v">${up}<small>of ${ports.length}</small></div></div>
+      <div class="tile"><div class="k">Configured ports up</div><div class="v">${up}<small>of ${ports.length}</small></div></div>
       <div class="tile"><div class="k">Fabric traffic now</div><div class="v">${fmt(tx)}<small>Gbps TX</small></div></div>
       <div class="tile"><div class="k">Runs in progress</div><div class="v">${running}</div></div>
       <div class="tile"><div class="k">Open alerts</div><div class="v" style="color:${alerts.length ? 'var(--fail)' : 'inherit'}">${alerts.length}</div></div>
@@ -382,7 +384,7 @@ function drawTopology(t) {
       out.push(`<text class="sm mut" x="${x0 + 10}" y="${y0 + 55}">CPU ${fmt(cpu, 0)}% · load ${fmt(st.load1)} · mem ${fmt(st.mem_pct, 0)}%</text>`);
       out.push(`<rect class="meter" x="${x0 + 10}" y="${y0 + 64}" width="${HW - 20}" height="6" rx="3"/><rect x="${x0 + 10}" y="${y0 + 64}" width="${(HW - 20) * cpu / 100}" height="6" rx="3" fill="${cpu > 85 ? 'var(--fail)' : cpu > 60 ? 'var(--warn)' : 'var(--accent)'}"/>`);
     } else out.push(`<text class="sm mut" x="${x0 + 10}" y="${y0 + 55}">${h.online ? 'no telemetry yet' : 'offline'}</text>`);
-    const ports = h.ports.filter(p => p.ip || p.switch_port || p.state === 'ACTIVE');
+    const ports = h.ports.filter(p => p.ip || p.switch_port); // an ACTIVE port with no IP is a cabled port's second PCIe function, drawn once
     ports.forEach((p, j) => {
       const x = x0 + HW * (j + 0.5) / Math.max(ports.length, 1), y = y0;
       const col = fabricColor(p.fabric, fabrics), rate = Math.max(p.tx_gbps || 0, p.rx_gbps || 0);
@@ -660,8 +662,10 @@ async function pageFleet(token) {
     <div class="tiles" id="fleet-tiles"></div>
     <div class="card"><h2>Mirrored releases</h2><div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th>Version</th><th>Builds</th><th>Mirrored</th><th></th></tr></thead><tbody id="releases"></tbody></table></div></div>
     <div id="jobs"></div>`)) return;
+  let checked = false;
   const refresh = async () => {
-    const [rel, jobs, hosts] = await Promise.all([api('GET', '/releases'), api('GET', '/updates'), api('GET', '/hosts')]);
+    const [rel, jobs, hosts] = await Promise.all([api('GET', '/releases' + (checked ? '' : '?check=1')), api('GET', '/updates'), api('GET', '/hosts')]);
+    checked = true; // one GitHub call per visit; the button asks again
     const versions = {}; hosts.forEach(h => versions[h.agent_version || 'unknown'] = (versions[h.agent_version || 'unknown'] || 0) + 1);
     set('fleet-tiles', `<div class="tile"><div class="k">Controller</div><div class="v" style="font-size:20px">${esc(rel.controller_version)}</div></div>
       <div class="tile"><div class="k">Agents</div><div class="v" style="font-size:20px">${Object.entries(versions).map(([v, n]) => `${esc(v)} <small>× ${n}</small>`).join('<br>') || '<small>none</small>'}</div></div>

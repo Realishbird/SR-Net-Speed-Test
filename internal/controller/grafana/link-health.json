@@ -134,7 +134,7 @@
     },
     {
      "refId": "B",
-     "expr": "increase(srnet_nic_rx_corrected_bits_phy{host=~\"$host\"}[5m])",
+     "expr": "increase({__name__=~\"srnet_nic_rx_(corrected_bits_phy|fec_corrected_blocks_phy|fec_corrected_bits|corrected_bits)\",host=~\"$host\"}[5m])",
      "legendFormat": "{{host}} {{netdev}} {{__name__}}"
     },
     {
@@ -379,12 +379,12 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "rate(srnet_nic_rx_prio3_pause{host=~\"$host\"}[5m])",
+     "expr": "rate({__name__=~\"srnet_nic_rx_(prio[0-9]_pause|pause_ctrl_phy|global_pause)\",host=~\"$host\"}[5m])",
      "legendFormat": "{{host}} {{netdev}} {{__name__}}"
     },
     {
      "refId": "B",
-     "expr": "rate(srnet_nic_tx_prio3_pause{host=~\"$host\"}[5m])",
+     "expr": "rate({__name__=~\"srnet_nic_tx_(prio[0-9]_pause|pause_ctrl_phy|global_pause)\",host=~\"$host\"}[5m])",
      "legendFormat": "{{host}} {{netdev}} {{__name__}}"
     }
    ]

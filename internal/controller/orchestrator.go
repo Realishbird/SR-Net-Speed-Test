@@ -726,7 +726,7 @@ func (o *Orchestrator) score(ar *activeRun) (api.RunSummary, string) {
 		if l.ToolGbps == 0 && p.serverRes != nil {
 			l.ToolGbps = p.serverRes.AvgGbps
 		}
-		if !lat && !p.startAt.IsZero() {
+		if !lat && !p.startAt.IsZero() && p.clientRes != nil && p.clientRes.Error == "" {
 			from := p.startAt.Add(2 * time.Second)
 			to := p.startAt.Add(time.Duration(ar.spec.DurationSec-1) * time.Second)
 			if id, dir, nic, ok := counterSide(ar, p); ok {

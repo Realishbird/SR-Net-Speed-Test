@@ -112,7 +112,7 @@ func (a *alerter) onSamples(ctx context.Context, host string, ports map[string]p
 			}
 		}
 		if t, ok := s.Values["dom_temp_c"]; ok {
-			if t >= a.hotC {
+			if t > a.hotC { // over the limit; a reading at the limit is still within it, and resolve sits 5 C lower so it cannot flap
 				a.open(ctx, api.Alert{Kind: "transceiver_hot", Host: host, Port: port, Message: fmt.Sprintf("%s %s transceiver at %.1f C (limit %.0f C)", host, port, t, a.hotC)})
 			} else if t < a.hotC-5 {
 				a.resolve(ctx, "transceiver_hot", host, port)

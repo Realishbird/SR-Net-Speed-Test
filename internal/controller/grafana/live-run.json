@@ -306,7 +306,7 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "rate(srnet_nic_rx_prio3_pause{run_id=~\"(^|.*,)$run_id(,.*|$)\"}[30s])",
+     "expr": "rate({__name__=~\"srnet_nic_rx_(prio[0-9]_pause|pause_ctrl_phy|global_pause)\",run_id=~\"(^|.*,)$run_id(,.*|$)\"}[30s])",
      "legendFormat": "{{host}} {{netdev}} {{__name__}}"
     },
     {
