@@ -84,8 +84,37 @@ func (r *releases) Mirrored() []api.Release {
 			out = append(out, rel)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Version > out[j].Version })
+	sort.Slice(out, func(i, j int) bool { return versionLess(out[j].Version, out[i].Version) })
 	return out
+}
+
+// versionLess orders release tags numerically, so v0.1.9 sorts before
+// v0.1.18 (as text it would not). A pre-release suffix sorts before the
+// plain version; unparseable tags fall back to text order.
+func versionLess(a, b string) bool {
+	pa, sa := versionParts(a)
+	pb, sb := versionParts(b)
+	for i := range pa {
+		if pa[i] != pb[i] {
+			return pa[i] < pb[i]
+		}
+	}
+	if (sa == "") != (sb == "") {
+		return sa != ""
+	}
+	return a < b
+}
+
+func versionParts(v string) ([3]int, string) {
+	var n [3]int
+	v = strings.TrimPrefix(v, "v")
+	v, suffix, _ := strings.Cut(v, "-")
+	for i, p := range strings.SplitN(v, ".", 3) {
+		if i < 3 {
+			fmt.Sscanf(p, "%d", &n[i])
+		}
+	}
+	return n, suffix
 }
 
 func readSum(sumsPath, name string) string {

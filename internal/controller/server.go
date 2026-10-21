@@ -339,7 +339,7 @@ func (s *Server) patchHost(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "name cannot be empty")
 		return
 	}
-	if err := s.store.UpdateHost(r.Context(), id, u); err != nil {
+	if err := s.renameHost(r.Context(), id, u); err != nil {
 		storeError(w, err)
 		return
 	}
@@ -380,6 +380,26 @@ func (s *Server) patchPort(w http.ResponseWriter, r *http.Request) {
 	s.store.Audit(r.Context(), "port.update", map[string]any{"id": id, "update": u})
 	s.refreshPortCache(r.Context())
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// renameHost applies a host update and, when the display name changes,
+// carries the host's open alerts over to the new name.
+func (s *Server) renameHost(ctx context.Context, id int64, u api.HostUpdate) error {
+	old := ""
+	if u.Name != nil {
+		s.mu.Lock()
+		old = s.hostName[id]
+		s.mu.Unlock()
+	}
+	if err := s.store.UpdateHost(ctx, id, u); err != nil {
+		return err
+	}
+	if u.Name != nil && old != "" && old != *u.Name {
+		if err := s.store.RenameAlertHost(ctx, old, *u.Name); err != nil {
+			log.Printf("rename alerts of %s: %v", old, err)
+		}
+	}
+	return nil
 }
 
 // importHosts applies a CSV of names, tags and port labels. Columns are found by
@@ -448,7 +468,7 @@ func (s *Server) importHosts(w http.ResponseWriter, r *http.Request) {
 		if v, ok := get(row, "rack"); ok {
 			hu.Rack = &v
 		}
-		if err := s.store.UpdateHost(r.Context(), h.ID, hu); err != nil {
+		if err := s.renameHost(r.Context(), h.ID, hu); err != nil {
 			problems = append(problems, fmt.Sprintf("line %d: %v", line, err))
 			continue
 		}

@@ -107,8 +107,8 @@ func (a *alerter) onSamples(ctx context.Context, host string, ports map[string]p
 			// a second NIC port left empty is normal, not a fault.
 			if active == 0 && meta.HasIP {
 				a.open(ctx, api.Alert{Kind: "link_down", Host: host, Port: port, Message: fmt.Sprintf("%s %s is not ACTIVE", host, port)})
-			} else if active != 0 {
-				a.resolve(ctx, "link_down", host, port)
+			} else {
+				a.resolve(ctx, "link_down", host, port) // up, or unconfigured and so not a fault
 			}
 		}
 		if t, ok := s.Values["dom_temp_c"]; ok {

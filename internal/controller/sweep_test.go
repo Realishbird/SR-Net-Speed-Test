@@ -76,3 +76,12 @@ func TestAdminLoginCachesOneCredential(t *testing.T) {
 		t.Fatal("new password rejected or not cached")
 	}
 }
+
+func TestVersionLessIsNumeric(t *testing.T) {
+	ordered := []string{"v0.1.9", "v0.1.18", "v0.1.19-rc1", "v0.1.19", "v0.2.0", "v1.0.0"}
+	for i := 0; i+1 < len(ordered); i++ {
+		if !versionLess(ordered[i], ordered[i+1]) || versionLess(ordered[i+1], ordered[i]) {
+			t.Errorf("%s should sort before %s", ordered[i], ordered[i+1])
+		}
+	}
+}
