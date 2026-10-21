@@ -150,3 +150,35 @@ func TestSwitchLLDPFillsHostPorts(t *testing.T) {
 		t.Errorf("speed: %d", got)
 	}
 }
+
+func TestSwitchVLANsFromSonicTable(t *testing.T) {
+	raw := []byte(`[{"source":"z9864f","timestamp":1,"time":"2026-10-21T20:19:47Z","updates":[{"Path":"sonic-vlan:sonic-vlan/VLAN_MEMBER","values":{"sonic-vlan:sonic-vlan/VLAN_MEMBER":{"sonic-vlan:VLAN_MEMBER":{"VLAN_MEMBER_LIST":[
+		{"ifname":"Ethernet0","name":"Vlan100","tagging_mode":"untagged"},
+		{"ifname":"Ethernet4","name":"Vlan101","tagging_mode":"untagged"},
+		{"ifname":"Ethernet120","name":"Vlan100","tagging_mode":"untagged"},
+		{"ifname":"Ethernet128","name":"Vlan200","tagging_mode":"tagged"},
+		{"ifname":"Ethernet128","name":"Vlan100","tagging_mode":"untagged"}]}}}}]}]`)
+	got := parseVLANMembers(raw)["z9864f"]
+	want := map[string]string{"Ethernet0": "100", "Ethernet4": "101", "Ethernet120": "100", "Ethernet128": "100"}
+	if len(got) != len(want) {
+		t.Fatalf("members: %v", got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s: got %q want %q", k, got[k], v)
+		}
+	}
+	topo := api.Topology{
+		Switches: []api.TopoSwitch{{Name: "Z9864F", Ports: []api.TopoSwitchPort{{Name: "Ethernet0"}, {Name: "Ethernet9"}}}},
+		Hosts: []api.TopoHost{{Name: "Dell Spark 1", Ports: []api.TopoHostPort{
+			{Netdev: "a", Switch: "Z9864F", SwitchPort: "Ethernet0"},
+			{Netdev: "b", Switch: "Z9864F", SwitchPort: "Ethernet4", Fabric: "100"}}}},
+	}
+	applyVLANs(&topo, map[string]string{"z9864f|ethernet0": "100", "z9864f|ethernet4": "101"})
+	if p := topo.Switches[0].Ports; p[0].VLAN != "100" || p[1].VLAN != "" {
+		t.Errorf("switch port vlans: %+v", p)
+	}
+	if p := topo.Hosts[0].Ports; p[0].Fabric != "100" || p[1].Fabric != "100" {
+		t.Errorf("host port fabrics: %+v (unset takes the VLAN, a set one is kept for the mismatch)", p)
+	}
+}

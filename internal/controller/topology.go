@@ -250,6 +250,33 @@ func (s *Server) switchLLDP(ctx context.Context) (map[string]lldpEntry, error) {
 	s.mu.Lock()
 	cfg := s.cfg
 	s.mu.Unlock()
+	bySource := gnmiSources(cfg)
+	if len(bySource) == 0 {
+		return out, nil
+	}
+	raw, err := gnmicGet(ctx, cfg, "/openconfig-lldp:lldp/interfaces")
+	if err != nil {
+		return out, err
+	}
+	for source, neighbours := range parseLLDPGet(raw) {
+		sw, ok := gnmiSource(bySource, source)
+		if !ok {
+			continue
+		}
+		for _, n := range neighbours {
+			if n.SystemName == "" || n.PortDesc == "" {
+				continue
+			}
+			out[strings.ToLower(n.SystemName)+"|"+strings.ToLower(n.PortDesc)] = lldpEntry{Switch: sw.Name, Port: n.Iface}
+		}
+	}
+	return out, nil
+}
+
+// gnmiSources indexes the switches with gNMI settings by every spelling
+// gnmic may use as a response source: the target name, the address and
+// address:port, lower-cased.
+func gnmiSources(cfg Config) map[string]SwitchConfig {
 	bySource := map[string]SwitchConfig{}
 	for _, sw := range cfg.Switches {
 		if sw.GNMIUser == "" || sw.Address == "" {
@@ -264,43 +291,123 @@ func (s *Server) switchLLDP(ctx context.Context) (map[string]lldpEntry, error) {
 		bySource[strings.ToLower(host)] = sw
 		bySource[strings.ToLower(fmt.Sprintf("%s:%d", host, port))] = sw
 	}
-	if len(bySource) == 0 {
-		return out, nil
+	return bySource
+}
+
+func gnmiSource(bySource map[string]SwitchConfig, source string) (SwitchConfig, bool) {
+	src := strings.ToLower(source)
+	if sw, ok := bySource[src]; ok {
+		return sw, true
 	}
+	name, _, _ := strings.Cut(src, ":")
+	sw, ok := bySource[name]
+	return sw, ok
+}
+
+// gnmicGet runs one gNMI Get against every switch in the gnmic config and
+// returns gnmic's JSON rendering of the answers. The config file is the
+// one gnmic's own subscriptions use, so the credentials live in one place.
+func gnmicGet(ctx context.Context, cfg Config, path string) ([]byte, error) {
 	if _, err := os.Stat(cfg.GnmicConfigPath); err != nil {
-		return out, err
+		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, cfg.GnmicPath, "--config", cfg.GnmicConfigPath, "--encoding", "json_ietf", "--format", "json",
-		"get", "--path", "/openconfig-lldp:lldp/interfaces")
+	cmd := exec.CommandContext(ctx, cfg.GnmicPath, "--config", cfg.GnmicConfigPath, "--log=false", "--encoding", "json_ietf", "--format", "json",
+		"get", "--path", path)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	raw, err := cmd.Output()
-	if err != nil && len(raw) == 0 {
+	if err != nil && len(bytes.TrimSpace(raw)) == 0 {
 		msg := strings.TrimSpace(stderr.String())
 		if len(msg) > 300 {
 			msg = msg[:300]
 		}
-		return out, fmt.Errorf("gnmic get lldp: %v: %s", err, msg)
+		return nil, fmt.Errorf("gnmic get %s: %v: %s", path, err, msg)
 	}
-	for source, neighbours := range parseLLDPGet(raw) {
-		src := strings.ToLower(source)
-		sw, ok := bySource[src]
+	return raw, nil
+}
+
+// switchVLANs reads each switch's VLAN membership (SONiC's VLAN_MEMBER
+// table, one Get for the whole switch; the OpenConfig vlans tree is not
+// served by Enterprise SONiC) and keys it switch|port, lower-cased, with
+// the VLAN number as the value: "Vlan100" on Ethernet0 is fabric 100, the
+// fabric as the switch sees it.
+func (s *Server) switchVLANs(ctx context.Context) (map[string]string, error) {
+	out := map[string]string{}
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+	bySource := gnmiSources(cfg)
+	if len(bySource) == 0 {
+		return out, nil
+	}
+	raw, err := gnmicGet(ctx, cfg, "/sonic-vlan:sonic-vlan/VLAN_MEMBER")
+	if err != nil {
+		return out, err
+	}
+	for source, members := range parseVLANMembers(raw) {
+		sw, ok := gnmiSource(bySource, source)
 		if !ok {
-			name, _, _ := strings.Cut(src, ":")
-			if sw, ok = bySource[name]; !ok {
-				continue
-			}
+			continue
 		}
-		for _, n := range neighbours {
-			if n.SystemName == "" || n.PortDesc == "" {
-				continue
-			}
-			out[strings.ToLower(n.SystemName)+"|"+strings.ToLower(n.PortDesc)] = lldpEntry{Switch: sw.Name, Port: n.Iface}
+		for port, vlan := range members {
+			out[strings.ToLower(sw.Name+"|"+port)] = vlan
 		}
 	}
 	return out, nil
+}
+
+// parseVLANMembers reads gnmic's rendering of a Get on SONiC's VLAN_MEMBER
+// table ({"ifname":"Ethernet0","name":"Vlan100","tagging_mode":"untagged"}
+// rows under VLAN_MEMBER_LIST) and returns, per source, port -> VLAN
+// number. A port in several VLANs (a trunk) keeps the lowest-numbered
+// untagged one, else the first seen.
+func parseVLANMembers(raw []byte) map[string]map[string]string {
+	var resp []struct {
+		Source  string `json:"source"`
+		Updates []struct {
+			Values map[string]any `json:"values"`
+		} `json:"updates"`
+	}
+	res := map[string]map[string]string{}
+	if i := bytes.Index(raw, []byte("\n[")); i >= 0 && !bytes.HasPrefix(bytes.TrimSpace(raw), []byte("[")) {
+		raw = raw[i+1:]
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return res
+	}
+	for _, r := range resp {
+		var walk func(v any)
+		walk = func(v any) {
+			switch t := v.(type) {
+			case map[string]any:
+				ifname, _ := t["ifname"].(string)
+				name, _ := t["name"].(string)
+				mode, _ := t["tagging_mode"].(string)
+				if ifname != "" && strings.HasPrefix(name, "Vlan") {
+					id := strings.TrimPrefix(name, "Vlan")
+					if res[r.Source] == nil {
+						res[r.Source] = map[string]string{}
+					}
+					if cur, seen := res[r.Source][ifname]; !seen || mode == "untagged" && cur != id {
+						res[r.Source][ifname] = id
+					}
+				}
+				for _, x := range t {
+					walk(x)
+				}
+			case []any:
+				for _, x := range t {
+					walk(x)
+				}
+			}
+		}
+		for _, u := range r.Updates {
+			walk(u.Values)
+		}
+	}
+	return res
 }
 
 // lldpNeighbour is one row of a switch's LLDP table.
@@ -413,32 +520,72 @@ func (s *Server) fillLLDP(ctx context.Context, hosts []hostRec) {
 	}
 }
 
-// lldpLoop refreshes the switch LLDP table once a minute, off the request
-// path: a Get takes a second or two and the table changes when cables
-// move, not between Hosts page polls. A failed poll keeps the last table
-// and logs once per change of error text.
-func (s *Server) lldpLoop(ctx context.Context) {
-	lastErr := ""
-	for {
-		m, err := s.switchLLDP(ctx)
+// switchPollLoop refreshes the switch LLDP and VLAN tables once a minute,
+// off the request path: a Get takes a second or two and both tables change
+// when cables move or VLANs are reassigned, not between Hosts page polls.
+// A failed poll keeps the last table and logs once per change of error text.
+func (s *Server) switchPollLoop(ctx context.Context) {
+	lastErr := map[string]string{}
+	report := func(what string, err error, n int) {
 		if err != nil {
-			if msg := err.Error(); msg != lastErr {
-				log.Printf("switch lldp: %v", err)
-				lastErr = msg
+			if msg := err.Error(); msg != lastErr[what] {
+				log.Printf("switch %s: %v", what, err)
+				lastErr[what] = msg
 			}
-		} else {
-			if lastErr != "" {
-				log.Printf("switch lldp: %d neighbours", len(m))
-			}
-			lastErr = ""
+			return
+		}
+		if lastErr[what] != "" {
+			log.Printf("switch %s: %d entries", what, n)
+		}
+		lastErr[what] = ""
+	}
+	for {
+		if m, err := s.switchLLDP(ctx); err == nil {
 			s.mu.Lock()
 			s.lldp, s.lldpAt = m, time.Now()
 			s.mu.Unlock()
+			report("lldp", nil, len(m))
+		} else {
+			report("lldp", err, 0)
+		}
+		if m, err := s.switchVLANs(ctx); err == nil {
+			s.mu.Lock()
+			s.vlans = m
+			s.mu.Unlock()
+			report("vlans", nil, len(m))
+		} else {
+			report("vlans", err, 0)
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(time.Minute):
+		}
+	}
+}
+
+// applyVLANs stamps each switch port with the VLAN the switch has it in,
+// and gives a host port with no fabric of its own the VLAN of the switch
+// port it is cabled to: the switch's view of the fabric. A host port whose
+// hand-set fabric differs from that VLAN keeps its own value so the
+// Topology can show the mismatch.
+func applyVLANs(t *api.Topology, vlans map[string]string) {
+	if len(vlans) == 0 {
+		return
+	}
+	for i := range t.Switches {
+		sw := &t.Switches[i]
+		for j := range sw.Ports {
+			p := &sw.Ports[j]
+			p.VLAN = vlans[strings.ToLower(sw.Name+"|"+p.Name)]
+		}
+	}
+	for i := range t.Hosts {
+		for j := range t.Hosts[i].Ports {
+			p := &t.Hosts[i].Ports[j]
+			if p.Fabric == "" && p.SwitchPort != "" {
+				p.Fabric = vlans[strings.ToLower(p.Switch+"|"+p.SwitchPort)]
+			}
 		}
 	}
 }
@@ -535,6 +682,10 @@ func (s *Server) topology(w http.ResponseWriter, r *http.Request) {
 	s.fillLLDP(r.Context(), hosts)
 	ports, source, err := s.switchPortStats(r.Context())
 	t := buildTopology(hosts, s.switchList(), ports, source, s.metrics.live, s.metrics.hostLive, s.hub.online)
+	s.mu.Lock()
+	vlans := s.vlans
+	s.mu.Unlock()
+	applyVLANs(&t, vlans)
 	if err != nil {
 		t.Warning = "switch counters unavailable: " + err.Error()
 	}

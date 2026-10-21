@@ -474,7 +474,8 @@ type TopoSwitchPort struct {
 	InErrors    float64  `json:"in_errors"`
 	OutErrors   float64  `json:"out_errors"`
 	FCSErrors   float64  `json:"fcs_errors"`
-	Hosts       []string `json:"hosts"` // host names whose LLDP points here
+	VLAN        string   `json:"vlan,omitempty"` // the switch's own VLAN for this port ("100"), the fabric as the switch sees it
+	Hosts       []string `json:"hosts"`          // host names whose LLDP points here
 }
 
 type TopoHost struct {
