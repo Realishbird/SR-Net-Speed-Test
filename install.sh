@@ -52,7 +52,7 @@ die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 if [ "$UNINSTALL" -eq 1 ]; then
   log "Removing srnet-agent"
   systemctl disable --now srnet-agent 2>/dev/null || true
-  rm -f /etc/systemd/system/srnet-agent.service /usr/local/bin/srnet-agent /etc/sudoers.d/srnet-ethtool
+  rm -f /etc/systemd/system/srnet-agent.service /usr/local/bin/srnet-agent /usr/local/bin/srnet-agent-launch /etc/sudoers.d/srnet-ethtool /etc/sudoers.d/srnet-lldp
   rm -rf /etc/srnet /var/lib/srnet
   userdel srnet 2>/dev/null || true
   systemctl daemon-reload
@@ -140,6 +140,14 @@ srnet ALL=(root) NOPASSWD: /usr/sbin/ethtool -m *
 EOF
 chmod 0440 /etc/sudoers.d/srnet-ethtool
 visudo -cf /etc/sudoers.d/srnet-ethtool >/dev/null || die "generated sudoers rule failed validation"
+
+# lldpcli is setuid _lldpd and only group adm may run it, so the agent could
+# never read its switch neighbours. Allow exactly the read-only query.
+cat > /etc/sudoers.d/srnet-lldp <<'EOF'
+srnet ALL=(root) NOPASSWD: /usr/sbin/lldpctl -f keyvalue
+EOF
+chmod 0440 /etc/sudoers.d/srnet-lldp
+visudo -cf /etc/sudoers.d/srnet-lldp >/dev/null || die "generated sudoers rule failed validation"
 
 cat > /etc/systemd/system/srnet-agent.service <<'EOF'
 [Unit]
