@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,17 +23,25 @@ func WriteRunCSV(w io.Writer, r api.Run) error {
 		return err
 	}
 	for _, l := range r.Legs {
-		lat := l.Latency
-		if lat == nil {
-			lat = &api.Latency{}
+		// Columns that do not apply to this test stay empty rather than 0.
+		latCols := make([]string, 6)
+		if lat := l.Latency; lat != nil {
+			latCols = []string{f(lat.MinUs, 3), f(lat.TypicalUs, 3), f(lat.AvgUs, 3), f(lat.P99Us, 3), f(lat.P999Us, 3), f(lat.MaxUs, 3)}
+		}
+		var retrans, loss, jitter string
+		switch r.Spec.Test {
+		case "tcp":
+			retrans = strconv.FormatInt(l.Retransmits, 10)
+		case "udp":
+			loss, jitter = f(l.LossPct, 3), f(l.JitterMs, 3)
 		}
 		row := []string{
 			strconv.FormatInt(r.ID, 10), r.Name, r.Spec.Test, r.Status, r.Verdict,
 			strconv.Itoa(l.Index + 1), strconv.Itoa(l.Stage + 1), l.ClientHost, l.ClientIP, l.ServerHost, l.ServerIP, l.Fabric, strconv.Itoa(l.MsgSize),
-			f(l.ExpectedGbps), f(l.ToolGbps), f(l.CounterGbps),
-			f(lat.MinUs), f(lat.TypicalUs), f(lat.AvgUs), f(lat.P99Us), f(lat.P999Us), f(lat.MaxUs),
-			strconv.FormatInt(l.Retransmits, 10), f(l.LossPct), f(l.JitterMs), errorDeltas(l.ErrorDeltas), l.Verdict, l.Note,
+			f(l.ExpectedGbps, 2), f(l.ToolGbps, 2), f(l.CounterGbps, 2),
 		}
+		row = append(row, latCols...)
+		row = append(row, retrans, loss, jitter, errorDeltas(l.ErrorDeltas), l.Verdict, l.Note)
 		if err := cw.Write(row); err != nil {
 			return err
 		}
@@ -41,7 +50,10 @@ func WriteRunCSV(w io.Writer, r api.Run) error {
 	return cw.Error()
 }
 
-func f(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
+// f rounds to prec decimals and drops trailing zeros: 99.25583 -> 99.26, 100 -> 100.
+func f(v float64, prec int) string {
+	return strconv.FormatFloat(math.Round(v*math.Pow10(prec))/math.Pow10(prec), 'f', -1, 64)
+}
 
 func errorDeltas(m map[string]int64) string {
 	keys := make([]string, 0, len(m))
