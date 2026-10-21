@@ -136,6 +136,11 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	// The background loops run until this context ends. A staged update has
+	// to end it explicitly: the parent context only ends on SIGTERM, and the
+	// agent must exit on its own for the launcher to swap the binary in.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	sampler := NewSampler()
 	spool := newSpool(c)
 	runner := NewRunner(sampler,
@@ -197,6 +202,7 @@ func Run(ctx context.Context, cfg Config) error {
 			log.Printf("task %s: %s %s run=%d leg=%d", t.ID, t.Kind, t.Tool, t.RunID, t.LegID)
 			if t.Kind == api.TaskUpdate {
 				if restart := handleUpdate(ctx, c, runner, spool, t); restart {
+					cancel()
 					wg.Wait()
 					return errRestart
 				}
