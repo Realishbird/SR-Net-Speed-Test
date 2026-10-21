@@ -160,6 +160,9 @@ Wants=network-online.target
 Type=simple
 User=srnet
 Group=srnet
+# lldpcli is executable by group adm only; sudo cannot be used from here
+# because the capability bounding set below leaves it unable to change group.
+SupplementaryGroups=adm
 ExecStart=/usr/local/bin/srnet-agent-launch
 Restart=always
 RestartSec=5

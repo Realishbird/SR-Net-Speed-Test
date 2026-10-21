@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"context"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Realishbird/SR-Net-Speed-Test/internal/api"
@@ -217,14 +219,21 @@ func toolVersions(ctx context.Context) map[string]string {
 func addLLDP(ctx context.Context, ports []api.Port) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	// lldpcli is setuid and group-restricted on Debian and Ubuntu, so the
-	// unprivileged agent goes through the narrow sudo rule install.sh adds.
-	out, err := exec.CommandContext(ctx, "sudo", "-n", "/usr/sbin/lldpctl", "-f", "keyvalue").Output()
+	// lldpcli is setuid _lldpd and executable by group adm only, so install.sh
+	// puts the service in that group. Older installs relied on a sudo rule,
+	// which the unit's capability bounding set silently broke (sudo cannot
+	// change its group without CAP_SETGID); keep it as a second try.
+	out, err := exec.CommandContext(ctx, "lldpctl", "-f", "keyvalue").Output()
 	if err != nil {
-		if out, err = exec.CommandContext(ctx, "lldpctl", "-f", "keyvalue").Output(); err != nil {
+		var err2 error
+		if out, err2 = exec.CommandContext(ctx, "sudo", "-n", "/usr/sbin/lldpctl", "-f", "keyvalue").Output(); err2 != nil {
+			lldpWarn.Do(func() {
+				log.Printf("lldp: cannot run lldpctl (%v; sudo: %v); re-run install.sh to put the agent in group adm", err, err2)
+			})
 			return
 		}
 	}
+	lldpOK.Do(func() { log.Printf("lldp: neighbours read from lldpctl") })
 	neigh := ParseLLDP(string(out))
 	for i := range ports {
 		if n, ok := neigh[ports[i].Netdev]; ok {
@@ -232,6 +241,8 @@ func addLLDP(ctx context.Context, ports []api.Port) {
 		}
 	}
 }
+
+var lldpWarn, lldpOK sync.Once
 
 // ParseLLDP reads `lldpctl -f keyvalue` into netdev -> {chassis name, port id}.
 func ParseLLDP(out string) map[string][2]string {

@@ -68,6 +68,7 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 		alerts: al, suites: newSuiteRunner(store, orch, al), snmp: snmp,
 		agentCache: map[string]int64{}, portCache: map[int64]map[string]portMeta{}, hostName: map[int64]string{},
 	}
+	orch.switches = s.switchList
 	s.refreshPortCache(ctx)
 	go al.loop(ctx)
 	go s.suites.scheduler(ctx)

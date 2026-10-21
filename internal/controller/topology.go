@@ -21,6 +21,18 @@ type vmSeries struct {
 	Value  float64
 }
 
+// gnmiMetric selects the gnmic series for one interface counter leaf. gnmic
+// names metrics after the whole gNMI path with the configured prefix, e.g.
+// srnet_gnmi_interfaces_interface_state_counters_in_octets, and the exact
+// middle depends on how the switch answers, so match on the leaf.
+func gnmiMetric(leaf string, labels ...string) string {
+	sel := `__name__=~"srnet_gnmi_.*` + leaf + `"`
+	for _, l := range labels {
+		sel += "," + l
+	}
+	return "{" + sel + "}"
+}
+
 // vmQuery runs a PromQL instant query against VictoriaMetrics.
 func (m *metrics) vmQuery(ctx context.Context, q string) ([]vmSeries, error) {
 	if m.vmURL == "" {
@@ -116,14 +128,14 @@ func (s *Server) switchPortStats(ctx context.Context) (map[string]*api.TopoSwitc
 		set  func(p *api.TopoSwitchPort, v float64, l map[string]string)
 	}
 	gnmiQueries := []q{
-		{`rate(srnet_gnmi_in_octets[2m])*8/1e9`, func(p *api.TopoSwitchPort, v float64, _ map[string]string) { p.RxGbps = v }},
-		{`rate(srnet_gnmi_out_octets[2m])*8/1e9`, func(p *api.TopoSwitchPort, v float64, _ map[string]string) { p.TxGbps = v }},
-		{`last_over_time(srnet_gnmi_in_discards[2m])`, func(p *api.TopoSwitchPort, v float64, _ map[string]string) { p.InDiscards = v }},
-		{`last_over_time(srnet_gnmi_out_discards[2m])`, func(p *api.TopoSwitchPort, v float64, _ map[string]string) { p.OutDiscards = v }},
-		{`last_over_time(srnet_gnmi_in_errors[2m])`, func(p *api.TopoSwitchPort, v float64, _ map[string]string) { p.InErrors = v }},
-		{`last_over_time(srnet_gnmi_out_errors[2m])`, func(p *api.TopoSwitchPort, v float64, _ map[string]string) { p.OutErrors = v }},
-		{`last_over_time(srnet_gnmi_in_fcs_errors[2m])`, func(p *api.TopoSwitchPort, v float64, _ map[string]string) { p.FCSErrors = v }},
-		{`last_over_time(srnet_gnmi_oper_status[2m])`, func(p *api.TopoSwitchPort, v float64, l map[string]string) {
+		{`rate(` + gnmiMetric("in_octets") + `[2m])*8/1e9`, func(p *api.TopoSwitchPort, v float64, _ map[string]string) { p.RxGbps = v }},
+		{`rate(` + gnmiMetric("out_octets") + `[2m])*8/1e9`, func(p *api.TopoSwitchPort, v float64, _ map[string]string) { p.TxGbps = v }},
+		{`last_over_time(` + gnmiMetric("in_discards") + `[2m])`, func(p *api.TopoSwitchPort, v float64, _ map[string]string) { p.InDiscards = v }},
+		{`last_over_time(` + gnmiMetric("out_discards") + `[2m])`, func(p *api.TopoSwitchPort, v float64, _ map[string]string) { p.OutDiscards = v }},
+		{`last_over_time(` + gnmiMetric("in_errors") + `[2m])`, func(p *api.TopoSwitchPort, v float64, _ map[string]string) { p.InErrors = v }},
+		{`last_over_time(` + gnmiMetric("out_errors") + `[2m])`, func(p *api.TopoSwitchPort, v float64, _ map[string]string) { p.OutErrors = v }},
+		{`last_over_time(` + gnmiMetric("in_fcs_errors") + `[2m])`, func(p *api.TopoSwitchPort, v float64, _ map[string]string) { p.FCSErrors = v }},
+		{`last_over_time(` + gnmiMetric("oper_status") + `[2m])`, func(p *api.TopoSwitchPort, v float64, l map[string]string) {
 			// strings-as-labels: the state is a label and the value is 1.
 			st := strings.ToUpper(l["oper_status"])
 			if st == "" {

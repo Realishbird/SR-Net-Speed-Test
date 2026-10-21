@@ -18,7 +18,8 @@ import (
 func WriteRunCSV(w io.Writer, r api.Run) error {
 	cw := csv.NewWriter(w)
 	head := []string{"run_id", "run_name", "test", "status", "verdict", "leg", "stage", "client", "client_ip", "server", "server_ip", "fabric", "msg_size", "expected_gbps", "tool_gbps", "counter_gbps",
-		"lat_min_us", "lat_typical_us", "lat_avg_us", "lat_p99_us", "lat_p999_us", "lat_max_us", "retransmits", "loss_pct", "jitter_ms", "error_deltas", "leg_verdict", "note"}
+		"lat_min_us", "lat_typical_us", "lat_avg_us", "lat_p99_us", "lat_p999_us", "lat_max_us", "retransmits", "loss_pct", "jitter_ms", "error_deltas", "leg_verdict", "note",
+		"switch_client_port", "switch_server_port", "switch_gbps", "switch_deltas", "cpu_client_avg_pct", "cpu_client_peak_pct", "cpu_server_avg_pct", "cpu_server_peak_pct"}
 	if err := cw.Write(head); err != nil {
 		return err
 	}
@@ -42,6 +43,15 @@ func WriteRunCSV(w io.Writer, r api.Run) error {
 		}
 		row = append(row, latCols...)
 		row = append(row, retrans, loss, jitter, errorDeltas(l.ErrorDeltas), l.Verdict, l.Note)
+		swCols, cpuCols := make([]string, 4), make([]string, 4)
+		if sw := l.Switch; sw != nil {
+			swCols = []string{sw.ClientPort, sw.ServerPort, f(sw.Gbps, 2), switchDeltas(sw.Deltas)}
+		}
+		if c := l.CPU; c != nil {
+			cpuCols = []string{f(c.ClientAvg, 1), f(c.ClientPeak, 1), f(c.ServerAvg, 1), f(c.ServerPeak, 1)}
+		}
+		row = append(row, swCols...)
+		row = append(row, cpuCols...)
 		if err := cw.Write(row); err != nil {
 			return err
 		}
@@ -104,7 +114,11 @@ th,td{border:1px solid #ccc;padding:5px 8px;text-align:left}th{background:#f2f2f
 			fmt.Fprint(w, `<th class="n">Loss %</th><th class="n">Jitter ms</th>`)
 		}
 	}
-	fmt.Fprint(w, `<th>Error counters</th><th>Verdict</th><th>Note</th></tr>`)
+	fmt.Fprint(w, `<th>Switch path</th>`)
+	if !lat {
+		fmt.Fprint(w, `<th class="n">Switch Gbps</th>`)
+	}
+	fmt.Fprint(w, `<th class="n">CPU % client / server</th><th>Error counters</th><th>Verdict</th><th>Note</th></tr>`)
 	for _, l := range r.Legs {
 		fmt.Fprintf(w, `<tr><td>%d</td><td>%s <span class="muted">%s</span></td><td>%s <span class="muted">%s</span></td><td>%s</td><td class="n">%d</td>`,
 			l.Index+1, e(l.ClientHost), e(l.ClientIP), e(l.ServerHost), e(l.ServerIP), e(l.Fabric), l.MsgSize)
@@ -122,7 +136,33 @@ th,td{border:1px solid #ccc;padding:5px 8px;text-align:left}th{background:#f2f2f
 				fmt.Fprintf(w, `<td class="n">%.2f</td><td class="n">%.3f</td>`, l.LossPct, l.JitterMs)
 			}
 		}
-		fmt.Fprintf(w, `<td class="muted">%s</td><td class="%s">%s</td><td class="muted">%s</td></tr>`, e(strings.ReplaceAll(errorDeltas(l.ErrorDeltas), ";", ", ")), e(l.Verdict), e(l.Verdict), e(l.Note))
+		fmt.Fprintf(w, `<td class="muted">%s</td>`, e(switchPath(l.Switch)))
+		if !lat {
+			sw := ""
+			if l.Switch != nil && l.Switch.Gbps > 0 {
+				sw = fmt.Sprintf("%.1f", l.Switch.Gbps)
+			}
+			fmt.Fprintf(w, `<td class="n">%s</td>`, sw)
+		}
+		cpu := ""
+		if c := l.CPU; c != nil {
+			cpu = fmt.Sprintf("%.0f (peak %.0f) / %.0f (peak %.0f)", c.ClientAvg, c.ClientPeak, c.ServerAvg, c.ServerPeak)
+		}
+		errs := strings.ReplaceAll(errorDeltas(l.ErrorDeltas), ";", ", ")
+		if l.Switch != nil && len(l.Switch.Deltas) > 0 {
+			if errs != "" {
+				errs += ", "
+			}
+			errs += "switch " + strings.ReplaceAll(switchDeltas(l.Switch.Deltas), ";", ", ")
+		}
+		note := l.Note
+		if l.Switch != nil && l.Switch.Note != "" {
+			if note != "" {
+				note += "; "
+			}
+			note += l.Switch.Note
+		}
+		fmt.Fprintf(w, `<td class="n muted">%s</td><td class="muted">%s</td><td class="%s">%s</td><td class="muted">%s</td></tr>`, e(cpu), e(errs), e(l.Verdict), e(l.Verdict), e(note))
 	}
 	fmt.Fprint(w, `</table></body></html>`)
 }
