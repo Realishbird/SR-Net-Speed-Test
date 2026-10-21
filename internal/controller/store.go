@@ -199,6 +199,9 @@ func (s *Store) Hosts(ctx context.Context) ([]hostRec, error) {
 		}
 		json.Unmarshal(inv, &h.inv)
 		h.Arch, h.OS, h.AgentVersion = h.inv.Arch, h.inv.OS, h.inv.AgentVersion
+		if h.Tags == nil {
+			h.Tags = []string{} // the UI and API clients expect a list, never null
+		}
 		h.Ports = []api.HostPort{}
 		byID[h.ID] = len(hosts)
 		hosts = append(hosts, h)
@@ -221,6 +224,9 @@ func (s *Store) Hosts(ctx context.Context) ([]hostRec, error) {
 		hp.RdmaDev, hp.PortNum, hp.Netdev, hp.Addrs = p.RdmaDev, p.PortNum, p.Netdev, p.Addrs
 		hp.State, hp.SpeedMbps, hp.FWVersion, hp.Transceiver = p.State, p.SpeedMbps, p.FWVersion, p.Transceiver
 		hp.LLDPSwitch, hp.LLDPPort = p.LLDPSwitch, p.LLDPPort
+		if hp.Addrs == nil {
+			hp.Addrs = []string{} // a port with no IP configured yet
+		}
 		if i, ok := byID[agentID]; ok {
 			hosts[i].Ports = append(hosts[i].Ports, hp)
 		}
