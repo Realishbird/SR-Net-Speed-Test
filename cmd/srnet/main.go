@@ -109,7 +109,7 @@ func usage() {
   host <id> [--name N] [--tags a,b] [--site S] [--rack R]
   port <id> [--label L] [--fabric F] [--expected-gbps G]
   import <file.csv>             bulk-apply names, tags and port labels
-  token                         print a one-time agent install command
+  token                         print an agent install command (good for 10 hosts for an hour)
   run [flags]                   start a test (see run --help): fan-out, fan-in, --pairs, --mesh, --legs,
                                 --serial (link matrix), --sizes (sweep); tests: write read send
                                 write_lat read_lat send_lat tcp udp
@@ -289,7 +289,7 @@ func (c *cli) token(ctx context.Context) error {
 	if err := c.call(ctx, "POST", "/api/v1/tokens", nil, &t); err != nil {
 		return err
 	}
-	fmt.Printf("Run this on the host (token expires %s):\n\n%s\n", t.ExpiresAt.Local().Format(time.Kitchen), t.InstallCommand)
+	fmt.Printf("Run this on up to %d hosts (token expires %s):\n\n%s\n", t.Hosts, t.ExpiresAt.Local().Format(time.Kitchen), t.InstallCommand)
 	return nil
 }
 
