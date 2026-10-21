@@ -306,7 +306,7 @@ async function patch(path, u) { try { await api('PATCH', path, u); toast('Saved'
 async function installCommand() {
   try {
     const t = await api('POST', '/tokens');
-    modal({ title: 'Install an agent', body: `<p class="help">Run this as root on each Ubuntu or Debian test host. The token is single-use and expires at ${new Date(t.expires_at).toLocaleTimeString()}; open this dialog again for another host.</p>
+    modal({ title: 'Install an agent', body: `<p class="help">Run this as root on each Ubuntu or Debian test host. The same command works on up to ${t.hosts} hosts until ${new Date(t.expires_at).toLocaleTimeString()}; after that, open this dialog again for a fresh one.</p>
       <pre id="cmd">${esc(t.install_command)}</pre>`, actions: [{ label: 'Copy command', cls: 'primary', close: false, run: function () { copyText(t.install_command, $('#modal footer button.primary')); } }, { label: 'Done' }] });
   } catch (e) { fail(e); }
 }

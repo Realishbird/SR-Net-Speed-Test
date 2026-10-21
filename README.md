@@ -30,7 +30,7 @@ The web UI at `https://<lxc ip>:8443` (admin login) covers hosts and naming, lau
 
 ## 2. Install the agent on each host (Ubuntu 22.04/24.04, Debian 12)
 
-Get a one-time install command from the controller:
+Get an install command from the controller (Hosts page > "Agent install command", or the CLI). The token in it works on up to 10 hosts for one hour, so one command covers a batch of machines:
 
 ```bash
 pct exec <CTID> -- /usr/local/bin/srnet token

@@ -42,8 +42,10 @@ CREATE TABLE IF NOT EXISTS ports (
 CREATE TABLE IF NOT EXISTS enroll_tokens (
 	token_hash TEXT PRIMARY KEY,
 	expires_at TIMESTAMPTZ NOT NULL,
-	used_at    TIMESTAMPTZ
+	used_at    TIMESTAMPTZ,
+	uses_left  INT NOT NULL DEFAULT 1
 );
+ALTER TABLE enroll_tokens ADD COLUMN IF NOT EXISTS uses_left INT NOT NULL DEFAULT 1;
 CREATE TABLE IF NOT EXISTS runs (
 	id         BIGSERIAL PRIMARY KEY,
 	name       TEXT NOT NULL DEFAULT '',
@@ -101,14 +103,16 @@ func (s *Store) Audit(ctx context.Context, action string, detail any) {
 
 // Enrollment tokens.
 
-func (s *Store) CreateToken(ctx context.Context, hash string, exp time.Time) error {
-	_, err := s.db.Exec(ctx, `INSERT INTO enroll_tokens (token_hash, expires_at) VALUES ($1, $2)`, hash, exp)
+// CreateToken stores an install token good for `uses` enrollments until exp.
+func (s *Store) CreateToken(ctx context.Context, hash string, exp time.Time, uses int) error {
+	_, err := s.db.Exec(ctx, `INSERT INTO enroll_tokens (token_hash, expires_at, uses_left) VALUES ($1, $2, $3)`, hash, exp, uses)
 	return err
 }
 
+// ConsumeToken spends one use of a token; used_at records the latest enrollment.
 func (s *Store) ConsumeToken(ctx context.Context, hash string) error {
-	tag, err := s.db.Exec(ctx, `UPDATE enroll_tokens SET used_at=now()
-		WHERE token_hash=$1 AND used_at IS NULL AND expires_at > now()`, hash)
+	tag, err := s.db.Exec(ctx, `UPDATE enroll_tokens SET used_at=now(), uses_left=uses_left-1
+		WHERE token_hash=$1 AND uses_left > 0 AND expires_at > now()`, hash)
 	if err != nil {
 		return err
 	}

@@ -463,10 +463,13 @@ func (s *Server) importHosts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"applied": applied, "problems": problems})
 }
 
+// createToken mints an install token. It enrolls up to `hosts` machines
+// (default 10, at most 100) within the hour, so one command covers a batch.
 func (s *Server) createToken(w http.ResponseWriter, r *http.Request) {
+	hosts := tokenHosts(r.URL.Query().Get("hosts"))
 	tok := randomToken(24)
 	exp := time.Now().Add(time.Hour)
-	if err := s.store.CreateToken(r.Context(), hashSecret(tok), exp); err != nil {
+	if err := s.store.CreateToken(r.Context(), hashSecret(tok), exp, hosts); err != nil {
 		serverError(w, err)
 		return
 	}
@@ -477,8 +480,16 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request) {
 	}
 	cmd := fmt.Sprintf("curl -fsSL %s | sudo bash -s -- --controller %s --token %s --ca-sha256 %s",
 		s.cfg.InstallScriptURL, s.cfg.PublicURL, tok, fp)
-	s.store.Audit(r.Context(), "token.create", map[string]any{"expires_at": exp})
-	writeJSON(w, api.TokenResponse{Token: tok, ExpiresAt: exp, InstallCommand: cmd})
+	s.store.Audit(r.Context(), "token.create", map[string]any{"expires_at": exp, "hosts": hosts})
+	writeJSON(w, api.TokenResponse{Token: tok, ExpiresAt: exp, Hosts: hosts, InstallCommand: cmd})
+}
+
+func tokenHosts(q string) int {
+	n, err := strconv.Atoi(q)
+	if err != nil || n < 1 {
+		return 10
+	}
+	return min(n, 100)
 }
 
 func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {

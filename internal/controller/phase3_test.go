@@ -123,3 +123,11 @@ func TestRunReports(t *testing.T) {
 		t.Error("html did not escape a note")
 	}
 }
+
+func TestTokenHostsDefaultsAndClamps(t *testing.T) {
+	for q, want := range map[string]int{"": 10, "x": 10, "0": 10, "-3": 10, "1": 1, "8": 8, "500": 100} {
+		if got := tokenHosts(q); got != want {
+			t.Errorf("tokenHosts(%q) = %d, want %d", q, got, want)
+		}
+	}
+}

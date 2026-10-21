@@ -231,6 +231,7 @@ type PortUpdate struct {
 type TokenResponse struct {
 	Token          string    `json:"token"`
 	ExpiresAt      time.Time `json:"expires_at"`
+	Hosts          int       `json:"hosts"` // enrollments the token is good for
 	InstallCommand string    `json:"install_command"`
 }
 
