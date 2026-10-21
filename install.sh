@@ -60,10 +60,14 @@ if [ "$UNINSTALL" -eq 1 ]; then
   exit 0
 fi
 
-. /etc/os-release
-case "${ID:-}:${VERSION_ID:-}" in
+# Read os-release in a subshell: sourcing it directly would overwrite $VERSION
+# (the agent release to install) with the OS version string.
+OS_ID=$(. /etc/os-release && echo "${ID:-}")
+OS_VERSION_ID=$(. /etc/os-release && echo "${VERSION_ID:-}")
+OS_PRETTY=$(. /etc/os-release && echo "${PRETTY_NAME:-unknown}")
+case "$OS_ID:$OS_VERSION_ID" in
   ubuntu:22.04|ubuntu:24.04|debian:12) ;;
-  *) die "unsupported OS: ${PRETTY_NAME:-unknown}. Supported: Ubuntu 22.04, Ubuntu 24.04, Debian 12" ;;
+  *) die "unsupported OS: $OS_PRETTY. Supported: Ubuntu 22.04, Ubuntu 24.04, Debian 12" ;;
 esac
 
 case "$(uname -m)" in
