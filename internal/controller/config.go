@@ -26,6 +26,7 @@ type Config struct {
 	InstallScriptURL   string  `json:"install_script_url"`
 	GrafanaURL         string  `json:"grafana_url,omitempty"` // shown in the UI; defaults to port 3000 on the same host
 	GnmicConfigPath    string  `json:"gnmic_config_path"`
+	GnmicPath          string  `json:"gnmic_path"` // gnmic binary, used for gNMI Get requests (LLDP table)
 	GrafanaDashDir     string  `json:"grafana_dashboard_dir"`
 	AlertWebhookURL    string  `json:"alert_webhook_url,omitempty"` // POSTed a JSON body when an alert opens or resolves
 	TransceiverMaxC    float64 `json:"transceiver_max_c,omitempty"` // alert when a module reports this temperature or more (default 70)
@@ -60,6 +61,7 @@ func DefaultConfig() Config {
 		AdminUser:          "admin",
 		InstallScriptURL:   "https://raw.githubusercontent.com/Realishbird/SR-Net-Speed-Test/main/install.sh",
 		GnmicConfigPath:    "/etc/srnet/gnmic.yaml",
+		GnmicPath:          "/usr/local/bin/gnmic",              // where install-controller.sh puts it
 		GrafanaDashDir:     "/var/lib/grafana/dashboards/srnet", // where install-controller.sh points Grafana's file provisioner
 	}
 }

@@ -51,7 +51,8 @@ type Server struct {
 	// nothing; a changed password hash invalidates the entry by itself.
 	adminOK     [32]byte
 	adminOKHash string
-	lldp        map[string]lldpEntry // switch-side LLDP table, see cachedLLDP
+	lldp        map[string]lldpEntry // switch-side LLDP table, polled by switchPollLoop
+	vlans       map[string]string    // switch|port (lower-cased) -> VLAN id, from the same poll
 	lldpAt      time.Time
 }
 
@@ -80,6 +81,7 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	go al.loop(ctx)
 	go s.suites.scheduler(ctx)
 	go s.gnmicLoop(ctx)
+	go s.switchPollLoop(ctx)
 	return s, nil
 }
 

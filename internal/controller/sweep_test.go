@@ -2,9 +2,6 @@ package controller
 
 import (
 	"context"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -94,35 +91,50 @@ func TestVersionLessIsNumeric(t *testing.T) {
 }
 
 func TestSwitchLLDPFillsHostPorts(t *testing.T) {
-	// VictoriaMetrics answers the two LLDP leaf queries with one neighbour
-	// on Ethernet0 and the 770AP on Ethernet120; the Spark's lldpd said nothing.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query().Get("query")
-		row := func(leaf, iface, id, val string) string {
-			return fmt.Sprintf(`{"metric":{"__name__":"srnet_gnmi_openconfig_lldp_lldp_interfaces_interface_neighbors_neighbor_state_%s","source":"z9864f","name":"%s","id":"%s","%s":"%s"},"value":[1,"1"]}`, leaf, iface, id, leaf, val)
-		}
-		var rows []string
-		switch {
-		case strings.Contains(q, "system_name"):
-			rows = []string{row("system_name", "Ethernet0", "1", "spark-424f"), row("system_name", "Ethernet120", "7", "dell770ap")}
-		case strings.Contains(q, "port_description"):
-			rows = []string{row("port_description", "Ethernet0", "1", "enp1s0f0np0"), row("port_description", "Ethernet120", "7", "eno16695np0")}
-		}
-		fmt.Fprintf(w, `{"status":"success","data":{"result":[%s]}}`, strings.Join(rows, ","))
-	}))
-	defer srv.Close()
+	// gnmic's rendering of a Get on /openconfig-lldp:lldp/interfaces from
+	// the lab's Z9864F: the Spark's cabled port is seen twice (both PCIe
+	// functions advertise), the 770AP once; the interface's own state
+	// object carries counters, not a neighbour.
+	raw := []byte(`version=0.38.2
+[{"source":"z9864f","timestamp":1,"time":"2026-10-21T20:16:12Z","updates":[{"Path":"openconfig-lldp:lldp/interfaces","values":{"openconfig-lldp:lldp/interfaces":{"openconfig-lldp:interfaces":{"interface":[
+	{"config":{"name":"Ethernet0"},"name":"Ethernet0","neighbors":{"neighbor":[
+		{"id":"fc:4c:ea:f9:42:4f","state":{"chassis-id":"fc:4c:ea:f9:42:4f","id":"135","management-address":"176.16.252.133","port-description":"enp1s0f0np0","port-id":"fc:4c:ea:f9:42:4f","system-name":"spark-424f","ttl":120}},
+		{"id":"fc:4c:ea:f9:42:53","state":{"chassis-id":"fc:4c:ea:f9:42:4f","id":"136","port-description":"enP2p1s0f0np0","port-id":"fc:4c:ea:f9:42:53","system-name":"spark-424f"}}]},
+	 "state":{"counters":{"frame-in":"240118"},"name":"Ethernet0"}},
+	{"config":{"name":"Ethernet120"},"name":"Ethernet120","neighbors":{"neighbor":[
+		{"id":"7","state":{"port-description":"eno16695np0","port-id":"aa:bb","system-name":"dell770ap"}}]},"state":{"name":"Ethernet120"}},
+	{"config":{"name":"Ethernet8"},"name":"Ethernet8","state":{"name":"Ethernet8"}}
+]}}}}]}]`)
+	got := parseLLDPGet(raw)
+	nb := got["z9864f"]
+	if len(nb) != 3 {
+		t.Fatalf("neighbours: %+v", nb)
+	}
+	if nb[0] != (lldpNeighbour{Iface: "Ethernet0", SystemName: "spark-424f", PortDesc: "enp1s0f0np0", PortID: "fc:4c:ea:f9:42:4f"}) {
+		t.Errorf("first neighbour: %+v", nb[0])
+	}
+	if nb[2].Iface != "Ethernet120" || nb[2].SystemName != "dell770ap" {
+		t.Errorf("770AP: %+v", nb[2])
+	}
+
 	cfg := DefaultConfig()
 	cfg.Switches = []SwitchConfig{{Name: "Z9864F", Address: "176.16.9.22", GNMIUser: "admin", GNMIPort: 8080}}
-	s := &Server{cfg: cfg, metrics: newMetrics(srv.URL)}
+	s := &Server{cfg: cfg, lldp: map[string]lldpEntry{}}
+	for _, n := range nb {
+		s.lldp[strings.ToLower(n.SystemName)+"|"+strings.ToLower(n.PortDesc)] = lldpEntry{Switch: "Z9864F", Port: n.Iface}
+	}
 	hosts := []hostRec{
-		{Host: api.Host{Name: "Dell Spark 1", Hostname: "spark-424f", Ports: []api.HostPort{{Netdev: "enp1s0f0np0"}, {Netdev: "enp1s0f1np1"}}}},
+		{Host: api.Host{Name: "Dell Spark 1", Hostname: "spark-424f", Ports: []api.HostPort{{Netdev: "enp1s0f0np0"}, {Netdev: "enP2p1s0f0np0"}, {Netdev: "enp1s0f1np1"}}}},
 		{Host: api.Host{Name: "Dell 770AP", Hostname: "DELL770AP", Ports: []api.HostPort{{Netdev: "eno16695np0", LLDPSwitch: "other", LLDPPort: "Ethernet9"}}}},
 	}
 	s.fillLLDP(context.Background(), hosts)
 	if p := hosts[0].Ports[0]; p.LLDPSwitch != "Z9864F" || p.LLDPPort != "Ethernet0" {
 		t.Errorf("spark port 0: %+v", p)
 	}
-	if p := hosts[0].Ports[1]; p.LLDPPort != "" {
+	if p := hosts[0].Ports[1]; p.LLDPPort != "Ethernet0" {
+		t.Errorf("spark twin function: %+v", p)
+	}
+	if p := hosts[0].Ports[2]; p.LLDPPort != "" {
 		t.Errorf("uncabled port got a neighbour: %+v", p)
 	}
 	if p := hosts[1].Ports[0]; p.LLDPPort != "Ethernet9" {
@@ -151,5 +163,37 @@ func TestSendTestExpectsRNRAndFlushCounters(t *testing.T) {
 		if got := counterIsError(c.test, c.key); got != c.isError {
 			t.Errorf("%s %s: isError %v, want %v", c.test, c.key, got, c.isError)
 		}
+	}
+}
+
+func TestSwitchVLANsFromSonicTable(t *testing.T) {
+	raw := []byte(`[{"source":"z9864f","timestamp":1,"time":"2026-10-21T20:19:47Z","updates":[{"Path":"sonic-vlan:sonic-vlan/VLAN_MEMBER","values":{"sonic-vlan:sonic-vlan/VLAN_MEMBER":{"sonic-vlan:VLAN_MEMBER":{"VLAN_MEMBER_LIST":[
+		{"ifname":"Ethernet0","name":"Vlan100","tagging_mode":"untagged"},
+		{"ifname":"Ethernet4","name":"Vlan101","tagging_mode":"untagged"},
+		{"ifname":"Ethernet120","name":"Vlan100","tagging_mode":"untagged"},
+		{"ifname":"Ethernet128","name":"Vlan200","tagging_mode":"tagged"},
+		{"ifname":"Ethernet128","name":"Vlan100","tagging_mode":"untagged"}]}}}}]}]`)
+	got := parseVLANMembers(raw)["z9864f"]
+	want := map[string]string{"Ethernet0": "100", "Ethernet4": "101", "Ethernet120": "100", "Ethernet128": "100"}
+	if len(got) != len(want) {
+		t.Fatalf("members: %v", got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s: got %q want %q", k, got[k], v)
+		}
+	}
+	topo := api.Topology{
+		Switches: []api.TopoSwitch{{Name: "Z9864F", Ports: []api.TopoSwitchPort{{Name: "Ethernet0"}, {Name: "Ethernet9"}}}},
+		Hosts: []api.TopoHost{{Name: "Dell Spark 1", Ports: []api.TopoHostPort{
+			{Netdev: "a", Switch: "Z9864F", SwitchPort: "Ethernet0"},
+			{Netdev: "b", Switch: "Z9864F", SwitchPort: "Ethernet4", Fabric: "100"}}}},
+	}
+	applyVLANs(&topo, map[string]string{"z9864f|ethernet0": "100", "z9864f|ethernet4": "101"})
+	if p := topo.Switches[0].Ports; p[0].VLAN != "100" || p[1].VLAN != "" {
+		t.Errorf("switch port vlans: %+v", p)
+	}
+	if p := topo.Hosts[0].Ports; p[0].Fabric != "100" || p[1].Fabric != "100" {
+		t.Errorf("host port fabrics: %+v (unset takes the VLAN, a set one is kept for the mismatch)", p)
 	}
 }
