@@ -166,28 +166,24 @@ log "Grafana systemd override for unprivileged containers"
 install -d /etc/systemd/system/grafana-server.service.d
 cat > /etc/systemd/system/grafana-server.service.d/lxc.conf <<'EOF'
 [Service]
-ProtectSystem=
-ProtectHome=
-PrivateTmp=
-PrivateDevices=
-ProtectProc=
-ProcSubset=
-ProtectKernelTunables=
-ProtectKernelModules=
-ProtectKernelLogs=
-ProtectControlGroups=
-ProtectClock=
-ProtectHostname=
-RestrictNamespaces=
-LockPersonality=
-MemoryDenyWriteExecute=
-RestrictRealtime=
-RestrictSUIDSGID=
-SystemCallFilter=
-SystemCallArchitectures=
-CapabilityBoundingSet=
-NoNewPrivileges=
-UMask=0027
+ProtectSystem=false
+ProtectHome=false
+PrivateTmp=false
+PrivateDevices=false
+ProtectProc=default
+ProcSubset=all
+ProtectKernelTunables=false
+ProtectKernelModules=false
+ProtectKernelLogs=false
+ProtectControlGroups=false
+ProtectClock=false
+ProtectHostname=false
+RestrictNamespaces=false
+LockPersonality=false
+RestrictRealtime=false
+RestrictSUIDSGID=false
+RemoveIPC=false
+NoNewPrivileges=false
 EOF
 systemctl daemon-reload
 systemctl reset-failed grafana-server 2>/dev/null || true
