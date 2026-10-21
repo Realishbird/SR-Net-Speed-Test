@@ -154,4 +154,4 @@ go run ./cmd/srnet-agent inventory      # on an RDMA host: what the agent would 
 go run ./cmd/srnet-agent sample
 ```
 
-Tagging `vX.Y.Z` builds amd64 and arm64 binaries for all three commands, writes `SHA256SUMS`, and publishes a GitHub Release that the install scripts download.
+Every merge to `main` publishes the next patch release automatically (`v0.1.0` becomes `v0.1.1`): amd64 and arm64 binaries for all three commands plus `SHA256SUMS`, which the install scripts and the controller's update mirror download. Push a `vX.Y.0` tag by hand for a minor or major bump. After a release, `create-lxc.sh --upgrade <CTID>` updates the controller, and `srnet fetch-release` then `srnet update` roll the agents.
