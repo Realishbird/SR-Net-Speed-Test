@@ -310,6 +310,8 @@ type Leg struct {
 	LossPct      float64          `json:"loss_pct,omitempty"`
 	JitterMs     float64          `json:"jitter_ms,omitempty"`
 	ErrorDeltas  map[string]int64 `json:"error_deltas,omitempty"`
+	Switch       *LegSwitch       `json:"switch,omitempty"` // switch ports and counters, when LLDP and switch telemetry exist
+	CPU          *LegCPU          `json:"cpu,omitempty"`    // host CPU during the test, when the agents reported it
 	Verdict      string           `json:"verdict"`
 	Note         string           `json:"note,omitempty"`
 }
@@ -515,4 +517,21 @@ type TopoLeg struct {
 	ClientHost   string  `json:"client_host"`
 	ServerHost   string  `json:"server_host"`
 	LiveGbps     float64 `json:"live_gbps"`
+}
+
+// LegSwitch is what the switch saw on a leg's two ports during the test.
+type LegSwitch struct {
+	ClientPort string             `json:"client_port,omitempty"` // "<switch> <port>"
+	ServerPort string             `json:"server_port,omitempty"`
+	Gbps       float64            `json:"gbps"`             // average rate along the data flow, from the switch's octet counters
+	Deltas     map[string]float64 `json:"deltas,omitempty"` // "<port> <counter>": growth during the test, only when > 0
+	Note       string             `json:"note,omitempty"`
+}
+
+// LegCPU is the CPU use of both hosts during the leg, in percent.
+type LegCPU struct {
+	ClientAvg  float64 `json:"client_avg"`
+	ClientPeak float64 `json:"client_peak"`
+	ServerAvg  float64 `json:"server_avg"`
+	ServerPeak float64 `json:"server_peak"`
 }

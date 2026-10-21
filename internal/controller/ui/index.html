@@ -456,6 +456,7 @@ async function pageRun(token, id) {
   const s = r.spec, lat = s.test.endsWith('_lat');
   const head = lat ? '<th class="num">Min µs</th><th class="num">Typical µs</th><th class="num">Avg µs</th><th class="num">P99 µs</th><th class="num">P99.9 µs</th><th class="num">Max µs</th>'
     : `<th class="num">Expected</th><th class="num" id="th-gbps">Gbps</th><th class="num">Counter Gbps</th>${s.test === 'tcp' ? '<th class="num">Retransmits</th>' : s.test === 'udp' ? '<th class="num">Loss %</th><th class="num">Jitter ms</th>' : ''}`;
+  const headSw = `<th title="Switch ports the leg crossed, from LLDP">Switch path</th>${lat ? '' : '<th class="num" title="Rate the switch counted on the server-side port during the test">Switch Gbps</th>'}<th class="num" title="Average (peak) CPU use on the client / server during the test">CPU %</th>`;
   if (!mount(token, `<div class="page-head"><h1>Run ${r.id}: ${esc(r.name)}</h1><span id="run-badges"></span><span class="spacer"></span><span id="run-actions"></span></div>
     <div id="run-error"></div>
     <div class="tiles" id="run-tiles"></div>
@@ -463,14 +464,15 @@ async function pageRun(token, id) {
       <b>Test</b><span>${esc(s.test)} · ${s.duration_sec} s · message size ${s.msg_size}${s.sizes?.length ? ' (sweep ' + s.sizes.join(', ') + ')' : ''} · qps ${s.qps}${s.streams > 1 ? ' · ' + s.streams + ' streams' : ''}${s.bidir ? ' · bidirectional (rates add both directions)' : ''}${s.serial ? ' · serial' : ''}${s.mesh ? ' · full mesh' : ''}</span>
       <b>Thresholds</b><span>${s.pass_pct}% of line rate${s.max_lat_p99_us ? ' · p99 ≤ ' + s.max_lat_p99_us + ' µs' : ''}${s.test === 'udp' ? ' · loss ≤ ' + s.max_loss_pct + '%' : ''}</span>
       <b>When</b><span id="run-when"></span></div></div>
-    <div class="tbl"><table><thead><tr><th>#</th><th>Client</th><th>Server</th><th>Fabric</th><th class="num">Size</th>${head}<th>Error counters</th><th>Verdict</th><th>Note</th></tr></thead><tbody id="legs"></tbody></table></div>`)) return;
+    <div class="tbl"><table><thead><tr><th>#</th><th>Client</th><th>Server</th><th>Fabric</th><th class="num">Size</th>${head}${headSw}<th>Error counters</th><th>Verdict</th><th>Note</th></tr></thead><tbody id="legs"></tbody></table></div>`)) return;
   const paint = r => {
     const live = r.status === 'running' || r.status === 'queued';
     set('run-badges', `${badge(r.status)} ${badge(r.verdict)} ${live ? '<span class="live">live</span>' : ''}`);
     set('run-actions', `${live ? `<button class="danger" onclick="cancelRun(${r.id})">Cancel run</button> ` : ''}
       <button onclick='sessionStorage.setItem("spec", ${JSON.stringify(JSON.stringify(s))}); location.hash="#new"'>Run again</button>
       <button onclick='sessionStorage.setItem("suitespec", ${JSON.stringify(JSON.stringify(s))}); location.hash="#suites"'>Add to a suite</button>
-      ${!live ? `<a href="/api/v1/runs/${r.id}/report.csv"><button>CSV</button></a> <a href="/api/v1/runs/${r.id}/report.html" target="_blank"><button>Report</button></a>` : ''}`);
+      ${!live ? `<a href="/api/v1/runs/${r.id}/report.csv"><button>CSV</button></a> <a href="/api/v1/runs/${r.id}/report.html" target="_blank"><button>Report</button></a>` : ''}
+      ${r.started_at ? `<a href="${grafanaRunURL(r)}" target="_blank" title="Open the Live run dashboard for this run's time range"><button>Grafana</button></a>` : ''}`);
     set('run-error', r.error ? `<div class="card" style="border-color:var(--fail);color:var(--fail)">${esc(r.error)}</div>` : '');
     const fab = Object.entries(r.summary.by_fabric || {}).map(([f, g]) => `<div class="tile"><div class="k">Fabric ${esc(f)}</div><div class="v">${fmt(g)}<small>Gbps</small></div></div>`).join('');
     set('run-tiles', lat ? `<div class="tile"><div class="k">Legs</div><div class="v">${(r.legs || []).length}</div></div>${fab}`
@@ -480,7 +482,11 @@ async function pageRun(token, id) {
     set('run-when', `${when(r.started_at) || 'queued'}${r.ended_at ? ' to ' + new Date(r.ended_at).toLocaleTimeString() : ''}`);
     const th = $('#th-gbps'); if (th) th.textContent = live ? 'Live Gbps' : 'Tool Gbps';
     set('legs', (r.legs || []).map(l => {
-      const errs = Object.entries(l.error_deltas || {}).map(([k, v]) => `${k} +${v}`).join(', ');
+      const errs = Object.entries(l.error_deltas || {}).map(([k, v]) => `${k} +${v}`).concat(Object.entries(l.switch?.deltas || {}).map(([k, v]) => `switch ${k} +${v}`)).join(', ');
+      const sw = l.switch, cpu = l.cpu;
+      const swPath = sw ? `<span class="mono">${esc(sw.client_port || '?')}</span> <span class="muted">&gt;</span> <span class="mono">${esc(sw.server_port || '?')}</span>` : '<span class="muted">-</span>';
+      const swCell = `<td class="wrap">${swPath}</td>${lat ? '' : `<td class="num">${sw && sw.gbps ? fmt(sw.gbps) : '<span class="muted">-</span>'}</td>`}<td class="num" title="${cpu ? `client avg ${fmt(cpu.client_avg, 0)}% peak ${fmt(cpu.client_peak, 0)}% · server avg ${fmt(cpu.server_avg, 0)}% peak ${fmt(cpu.server_peak, 0)}%` : ''}">${cpu ? `${fmt(cpu.client_avg, 0)} <span class="muted">(${fmt(cpu.client_peak, 0)})</span> / ${fmt(cpu.server_avg, 0)} <span class="muted">(${fmt(cpu.server_peak, 0)})</span>` : '<span class="muted">-</span>'}</td>`;
+      const note = [l.note, sw?.note].filter(Boolean).join('; ');
       let row = `<tr><td>${l.index + 1}</td><td>${esc(l.client_host)} <span class="muted mono">${esc(l.client_ip)}</span></td><td>${esc(l.server_host)} <span class="muted mono">${esc(l.server_ip)}</span></td><td>${esc(l.fabric)}</td><td class="num">${l.msg_size || ''}</td>`;
       if (lat) { const t = l.latency || {}; row += `<td class="num">${fmt(t.min_us, 2)}</td><td class="num">${fmt(t.typical_us, 2)}</td><td class="num">${fmt(t.avg_us, 2)}</td><td class="num">${fmt(t.p99_us, 2)}</td><td class="num">${fmt(t.p999_us, 2)}</td><td class="num">${fmt(t.max_us, 2)}</td>`; }
       else {
@@ -489,11 +495,18 @@ async function pageRun(token, id) {
         if (s.test === 'tcp') row += `<td class="num">${l.retransmits || 0}</td>`;
         if (s.test === 'udp') row += `<td class="num">${fmt(l.loss_pct, 2)}</td><td class="num">${fmt(l.jitter_ms, 3)}</td>`;
       }
-      return row + `<td class="muted">${esc(errs)}</td><td>${badge(l.verdict)}</td><td class="muted wrap">${esc(l.note)}</td></tr>`;
-    }).join('') || `<tr><td colspan="14" class="empty">No legs.</td></tr>`);
+      return row + swCell + `<td class="muted">${esc(errs)}</td><td>${badge(l.verdict)}</td><td class="muted wrap">${esc(note)}</td></tr>`;
+    }).join('') || `<tr><td colspan="17" class="empty">No legs.</td></tr>`);
     return live;
   };
   if (paint(r)) setRefresh(async () => { const r = await api('GET', '/runs/' + id); if (!paint(r)) setRefresh(null); }, 2000);
+}
+// grafanaRunURL opens the Live run dashboard on this run, from 30 s before it
+// started to 30 s after it ended (or now, while it runs).
+function grafanaRunURL(r) {
+  const base = ($('#grafana').getAttribute('href') || ('http://' + location.hostname + ':3000')).replace(/\/+$/, '');
+  const from = new Date(r.started_at).getTime() - 30000, to = r.ended_at ? new Date(r.ended_at).getTime() + 30000 : 'now';
+  return `${base}/d/srnet-live-run?var-run_id=${r.id}&from=${from}&to=${to}`;
 }
 function cancelRun(id) { confirmBox('Cancel run', `Stop run ${id} on every host now?`, 'Cancel run', async () => { await api('POST', `/runs/${id}/cancel`); toast('Cancel sent', 'warn'); }); }
 
