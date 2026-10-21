@@ -105,7 +105,7 @@ srnet-controller switch --name z9864f --address 10.0.0.2 --snmp-community public
 systemctl restart srnet-controller
 ```
 
-With gNMI credentials the controller writes `/etc/srnet/gnmic.yaml` (a path unit restarts `gnmic` when it changes) and `gnmic` streams OpenConfig interface counters and transceiver state every 5 s as `srnet_gnmi_*` metrics. With only an SNMP community the controller polls IF-MIB every 30 s as `srnet_switch_*` metrics (octets, errors, discards, oper status, derived Gbps). Both can be set; gNMI is preferred. The switch is only ever read.
+With gNMI credentials the controller writes `/etc/srnet/gnmic.yaml` (a path unit restarts `gnmic` when it changes) and `gnmic` streams OpenConfig interface counters every 30 s and transceiver state every 60 s as `srnet_gnmi_*` metrics (the fastest rates Enterprise SONiC 4.5 accepts; the switch logs `Invalid Sample Interval` for anything shorter). With only an SNMP community the controller polls IF-MIB every 30 s as `srnet_switch_*` metrics (octets, errors, discards, oper status, derived Gbps). Both can be set; gNMI is preferred. The switch is only ever read.
 
 On Enterprise SONiC the telemetry server is on by default (port 8080, TLS with a self-signed certificate, password authentication with the switch's user accounts, mgmt VRF); `show ip telemetry` on the switch confirms it. For SNMP, create a read-only community, for example `snmp-server community srnetro group ro` in `configure terminal`. To test gNMI from the controller: `gnmic -a <switch>:8080 -u admin -p '<password>' --skip-verify capabilities`.
 

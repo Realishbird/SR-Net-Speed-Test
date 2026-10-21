@@ -512,7 +512,7 @@ function startUpdate(version) {
 /* ---------- switches ---------- */
 async function pageSwitches(token) {
   if (!mount(token, `<div class="page-head"><h1>Switches</h1><span class="spacer"></span><button class="primary" onclick="editSwitch()">Add switch</button></div>
-    <p class="help">Enterprise SONiC switches the controller reads port counters from. gNMI streams every 5 s through gnmic (preferred); SNMP v2c is polled every 30 s and works with just a read-only community. The switch is only ever read. Hosts' LLDP matches their ports to switch ports automatically.</p>
+    <p class="help">Enterprise SONiC switches the controller reads port counters from. gNMI streams every 30 s through gnmic (preferred, the fastest rate Enterprise SONiC accepts); SNMP v2c is polled every 30 s and works with just a read-only community. The switch is only ever read. Hosts' LLDP matches their ports to switch ports automatically.</p>
     <div class="tbl"><table><thead><tr><th>Name</th><th>Address</th><th>SNMP</th><th>gNMI</th><th></th></tr></thead><tbody id="switches"></tbody></table></div>`)) return;
   const refresh = async () => {
     const list = await api('GET', '/switches');
@@ -536,7 +536,7 @@ function editSwitch(name) {
     <div class="row"><label class="inline"><input type="checkbox" id="sw-snmp" ${sw.has_snmp ? 'checked' : ''}> Enabled</label>
       <label>Version <select id="sw-snmpver"><option value="2c" ${sw.snmp_version !== '1' ? 'selected' : ''}>2c</option><option value="1" ${sw.snmp_version === '1' ? 'selected' : ''}>1</option></select></label>
       <label>Read-only community <input id="sw-comm" type="password" placeholder="${sw.has_snmp && editing ? 'unchanged' : 'srnetro'}" style="width:180px"></label></div>
-    <h2 style="font-size:13px;margin:18px 0 6px;color:var(--muted);text-transform:uppercase">gNMI (preferred, 5 s streaming)</h2>
+    <h2 style="font-size:13px;margin:18px 0 6px;color:var(--muted);text-transform:uppercase">gNMI (preferred, 30 s streaming)</h2>
     <div class="row"><label class="inline"><input type="checkbox" id="sw-gnmi" ${sw.gnmi_user ? 'checked' : ''}> Enabled</label>
       <label>Username <input id="sw-user" value="${esc(sw.gnmi_user || '')}" placeholder="admin" style="width:140px"></label>
       <label>Password <input id="sw-pass" type="password" placeholder="${sw.has_gnmi_password ? 'unchanged' : ''}" style="width:160px"></label>
