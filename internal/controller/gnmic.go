@@ -44,6 +44,9 @@ func WriteGnmicConfig(cfg Config, path string) (int, error) {
 	// log: gnmic discards its log output unless asked, which hides subscribe
 	// errors from the journal. encoding: Enterprise SONiC only offers
 	// JSON_IETF and PROTO; gnmic's default "json" is rejected by the switch.
+	// sample-interval: Enterprise SONiC 4.5 rejects anything under 30 s for
+	// interface counters and under 60 s for transceivers ("Invalid Sample
+	// Interval ... minimum interval is 30s" in the switch syslog).
 	b.WriteString(`log: true
 encoding: json_ietf
 subscriptions:
@@ -54,7 +57,7 @@ subscriptions:
       - /openconfig-interfaces:interfaces/interface/ethernet/state/negotiated-port-speed
     mode: stream
     stream-mode: sample
-    sample-interval: 5s
+    sample-interval: 30s
     encoding: json_ietf
   transceivers:
     paths:
@@ -62,7 +65,7 @@ subscriptions:
       - /openconfig-platform:components/component/state/temperature
     mode: stream
     stream-mode: sample
-    sample-interval: 30s
+    sample-interval: 60s
     encoding: json_ietf
 outputs:
   victoriametrics:
