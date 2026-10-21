@@ -158,6 +158,36 @@ if [ ! -s /etc/srnet/controller.json ]; then
   umask 022
 fi
 
+# Grafana's unit enables systemd sandboxing (ProtectSystem, PrivateTmp,
+# ProtectProc ...) which needs a private mount namespace. An unprivileged LXC
+# cannot create one, so the service dies with status=226/NAMESPACE. Clear
+# those options; the container itself is the sandbox.
+log "Grafana systemd override for unprivileged containers"
+install -d /etc/systemd/system/grafana-server.service.d
+cat > /etc/systemd/system/grafana-server.service.d/lxc.conf <<'EOF'
+[Service]
+ProtectSystem=false
+ProtectHome=false
+PrivateTmp=false
+PrivateDevices=false
+ProtectProc=default
+ProcSubset=all
+ProtectKernelTunables=false
+ProtectKernelModules=false
+ProtectKernelLogs=false
+ProtectControlGroups=false
+ProtectClock=false
+ProtectHostname=false
+RestrictNamespaces=false
+LockPersonality=false
+RestrictRealtime=false
+RestrictSUIDSGID=false
+RemoveIPC=false
+NoNewPrivileges=false
+EOF
+systemctl daemon-reload
+systemctl reset-failed grafana-server 2>/dev/null || true
+
 log "Grafana data source and dashboards"
 install -d /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards
 cat > /etc/grafana/provisioning/datasources/srnet.yaml <<'EOF'
@@ -201,3 +231,11 @@ echo "  grafana:          $(systemctl is-active grafana-server) (port 3000, logi
 echo "  postgresql:       $(systemctl is-active postgresql)"
 echo "  gnmic:            $(systemctl is-active gnmic) (idle until a switch with gNMI is added: srnet-controller switch --help)"
 echo "  web UI:           https://<this host>:8443 (admin login)"
+for svc in srnet-controller victoriametrics grafana-server postgresql; do
+  if [ "$(systemctl is-active "$svc")" != "active" ]; then
+    echo
+    echo "==> $svc is not running; last log lines:"
+    journalctl -u "$svc" -n 25 --no-pager 2>/dev/null | sed 's/^/    /'
+    echo "    (fix the cause, then: systemctl restart $svc)"
+  fi
+done
