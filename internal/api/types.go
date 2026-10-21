@@ -432,3 +432,87 @@ type SwitchRequest struct {
 	GNMIPassword  string `json:"gnmi_password,omitempty"`
 	GNMITLS       bool   `json:"gnmi_tls"`
 }
+
+// HostStats is the latest host-level telemetry an agent reported.
+type HostStats struct {
+	At      time.Time `json:"at"`
+	CPUPct  float64   `json:"cpu_pct"`
+	Load1   float64   `json:"load1"`
+	MemPct  float64   `json:"mem_pct"`
+	MemUsed float64   `json:"mem_used_bytes"`
+}
+
+// Topology is the live picture the Topology page draws: switches with the
+// ports that matter, hosts with their ports and LLDP neighbours, and the
+// legs of runs in progress.
+type Topology struct {
+	At       time.Time    `json:"at"`
+	Warning  string       `json:"warning,omitempty"`
+	Switches []TopoSwitch `json:"switches"`
+	Hosts    []TopoHost   `json:"hosts"`
+	Runs     []TopoRun    `json:"runs"`
+}
+
+type TopoSwitch struct {
+	Name    string           `json:"name"`
+	Address string           `json:"address"`
+	Source  string           `json:"source,omitempty"` // gnmi | snmp | "" (no data)
+	Ports   []TopoSwitchPort `json:"ports"`
+}
+
+type TopoSwitchPort struct {
+	Switch      string   `json:"switch"`
+	Name        string   `json:"name"`
+	Up          *bool    `json:"up,omitempty"`
+	SpeedMbps   int      `json:"speed_mbps,omitempty"`
+	RxGbps      float64  `json:"rx_gbps"`
+	TxGbps      float64  `json:"tx_gbps"`
+	InDiscards  float64  `json:"in_discards"`
+	OutDiscards float64  `json:"out_discards"`
+	InErrors    float64  `json:"in_errors"`
+	OutErrors   float64  `json:"out_errors"`
+	FCSErrors   float64  `json:"fcs_errors"`
+	Hosts       []string `json:"hosts"` // host names whose LLDP points here
+}
+
+type TopoHost struct {
+	ID       int64          `json:"id"`
+	Name     string         `json:"name"`
+	Hostname string         `json:"hostname"`
+	Tags     []string       `json:"tags"`
+	Online   bool           `json:"online"`
+	Stats    *HostStats     `json:"stats,omitempty"`
+	Ports    []TopoHostPort `json:"ports"`
+}
+
+type TopoHostPort struct {
+	ID         int64   `json:"id"`
+	RdmaDev    string  `json:"rdma_dev"`
+	PortNum    int     `json:"port_num"`
+	Netdev     string  `json:"netdev"`
+	IP         string  `json:"ip,omitempty"`
+	Label      string  `json:"label"`
+	Fabric     string  `json:"fabric"`
+	State      string  `json:"state"`
+	SpeedMbps  int     `json:"speed_mbps"`
+	TxGbps     float64 `json:"tx_gbps"`
+	RxGbps     float64 `json:"rx_gbps"`
+	LLDPSwitch string  `json:"lldp_switch,omitempty"`
+	LLDPPort   string  `json:"lldp_port,omitempty"`
+	Switch     string  `json:"switch,omitempty"`      // configured switch the LLDP neighbour resolved to
+	SwitchPort string  `json:"switch_port,omitempty"` // its port
+}
+
+type TopoRun struct {
+	ID   int64     `json:"id"`
+	Name string    `json:"name"`
+	Legs []TopoLeg `json:"legs"`
+}
+
+type TopoLeg struct {
+	ClientPortID int64   `json:"client_port_id"`
+	ServerPortID int64   `json:"server_port_id"`
+	ClientHost   string  `json:"client_host"`
+	ServerHost   string  `json:"server_host"`
+	LiveGbps     float64 `json:"live_gbps"`
+}

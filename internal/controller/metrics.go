@@ -47,12 +47,19 @@ type metrics struct {
 	mu     sync.Mutex
 	ring   map[int64][]bytesPoint
 	latest map[int64]liveRate
+	hosts  map[string][]hostPoint // host-level samples (CPU, load, memory) by host name
+}
+
+type hostPoint struct {
+	t                  time.Time
+	cpu, load1, memPct float64
+	memUsed            float64
 }
 
 const ringAge = 2 * time.Hour
 
 func newMetrics(vmURL string) *metrics {
-	return &metrics{vmURL: strings.TrimRight(vmURL, "/"), out: make(chan []byte, 256), ring: map[int64][]bytesPoint{}, latest: map[int64]liveRate{}}
+	return &metrics{vmURL: strings.TrimRight(vmURL, "/"), out: make(chan []byte, 256), ring: map[int64][]bytesPoint{}, latest: map[int64]liveRate{}, hosts: map[string][]hostPoint{}}
 }
 
 // ingest records a batch from one agent. ports maps "dev/port" to its metadata;
@@ -97,6 +104,8 @@ func (m *metrics) ingest(host string, ports map[string]portMeta, batch []api.Sam
 		}
 		if isPort {
 			m.track(meta.PortID, s)
+		} else if s.RdmaDev == "" && host != "" {
+			m.trackHost(host, s)
 		}
 	}
 	if m.vmURL == "" || buf.Len() == 0 {
@@ -135,6 +144,62 @@ func (m *metrics) track(portID int64, s api.Sample) {
 }
 
 // live returns the most recent RDMA rate on a port, or 0 if it is stale.
+// trackHost keeps a host's CPU, load and memory samples for live views and
+// per-run averages.
+func (m *metrics) trackHost(host string, s api.Sample) {
+	cpu, ok := s.Values["cpu_util_pct"]
+	if !ok {
+		return
+	}
+	p := hostPoint{t: s.Time, cpu: cpu, load1: s.Values["load1"], memUsed: s.Values["mem_used_bytes"]}
+	if total := s.Values["mem_total_bytes"]; total > 0 {
+		p.memPct = 100 * p.memUsed / total
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r := append(m.hosts[host], p)
+	cut := 0
+	for cut < len(r) && time.Since(r[cut].t) > ringAge {
+		cut++
+	}
+	m.hosts[host] = r[cut:]
+}
+
+// hostLive is a host's latest stats, if an agent reported within 20 s
+// (agents sample every 15 s when idle and every second during a run).
+func (m *metrics) hostLive(host string) (api.HostStats, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r := m.hosts[host]
+	if len(r) == 0 {
+		return api.HostStats{}, false
+	}
+	p := r[len(r)-1]
+	if time.Since(p.t) > 20*time.Second {
+		return api.HostStats{}, false
+	}
+	return api.HostStats{At: p.t, CPUPct: p.cpu, Load1: p.load1, MemPct: p.memPct, MemUsed: p.memUsed}, true
+}
+
+// hostCPU is the average and peak CPU use of a host between from and to.
+func (m *metrics) hostCPU(host string, from, to time.Time) (avg, peak float64, ok bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, p := range m.hosts[host] {
+		if p.t.Before(from) || p.t.After(to) {
+			continue
+		}
+		avg += p.cpu
+		peak = max(peak, p.cpu)
+		n++
+	}
+	if n == 0 {
+		return 0, 0, false
+	}
+	return avg / float64(n), peak, true
+}
+
 func (m *metrics) live(portID int64) (tx, rx float64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

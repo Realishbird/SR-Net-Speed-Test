@@ -92,6 +92,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/v1/status", s.admin(s.status))
 	mux.HandleFunc("GET /api/v1/hosts", s.admin(s.listHosts))
+	mux.HandleFunc("GET /api/v1/topology", s.admin(s.topology))
 	mux.HandleFunc("PATCH /api/v1/hosts/{id}", s.admin(s.patchHost))
 	mux.HandleFunc("DELETE /api/v1/hosts/{id}", s.admin(s.deleteHost))
 	mux.HandleFunc("PATCH /api/v1/ports/{id}", s.admin(s.patchPort))

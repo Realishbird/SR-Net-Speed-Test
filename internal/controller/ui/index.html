@@ -73,6 +73,23 @@ button:disabled { opacity:.5; cursor:default; }
 .row { display:flex; gap:12px; flex-wrap:wrap; align-items:end; }
 .row label, .row .field { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); }
 .row label.inline { flex-direction:row; align-items:center; color:var(--fg); }
+.topo svg { width:100%; height:auto; display:block; font:14px system-ui, sans-serif; }
+.topo .box { fill:var(--surface); stroke:var(--line); }
+.topo .box.off { stroke-dasharray:4 3; }
+.topo .sw { fill:color-mix(in srgb, var(--accent) 8%, var(--surface)); stroke:var(--accent); }
+.topo .stub { fill:var(--bg); stroke:var(--line); }
+.topo .stub.up { stroke:var(--pass); }
+.topo .stub.down { stroke:var(--fail); }
+.topo .stub.busy { fill:color-mix(in srgb, var(--accent) 25%, var(--surface)); }
+.topo text { fill:var(--fg); }
+.topo .mut { fill:var(--muted); font-size:12.5px; }
+.topo .sm { font-size:12px; }
+.topo .link { fill:none; stroke-linecap:round; }
+.topo .link.idle { opacity:.35; }
+.topo .link.leg { filter:drop-shadow(0 0 3px var(--accent)); }
+.topo .rate { font-weight:600; paint-order:stroke; stroke:var(--surface); stroke-width:4px; stroke-linejoin:round; }
+.topo .meter { fill:var(--line); }
+.topo .meter i { fill:var(--accent); }
 .badge { display:inline-block; font-weight:600; padding:2px 9px; border-radius:999px; font-size:11.5px; line-height:1.6; text-transform:lowercase; }
 .badge.pass, .badge.done, .badge.active { color:var(--pass); background:color-mix(in srgb, var(--pass) 14%, transparent); }
 .badge.warn, .badge.skipped, .badge.canceled { color:var(--warn); background:color-mix(in srgb, var(--warn) 14%, transparent); }
@@ -127,6 +144,7 @@ button.chip:hover { border-color:var(--accent); }
   <div class="brand">SR-Net-Speed-Test<small id="ver">controller</small></div>
   <a href="#overview" data-page="overview"><svg viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span class="t">Overview</span></a>
   <a href="#hosts" data-page="hosts"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><path d="M7 7h.01M7 17h.01"/></svg><span class="t">Hosts</span></a>
+  <a href="#topology" data-page="topology"><svg viewBox="0 0 24 24"><rect x="8" y="3" width="8" height="5" rx="1"/><rect x="2" y="16" width="6" height="5" rx="1"/><rect x="9" y="16" width="6" height="5" rx="1"/><rect x="16" y="16" width="6" height="5" rx="1"/><path d="M12 8v4M5 16v-4h14v4M12 12v4"/></svg><span class="t">Topology</span></a>
   <a href="#runs" data-page="runs"><svg viewBox="0 0 24 24"><path d="M4 19V5M4 15l5-5 4 4 7-8"/></svg><span class="t">Runs</span></a>
   <a href="#new" data-page="new"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg><span class="t">New run</span></a>
   <a href="#suites" data-page="suites"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/></svg><span class="t">Suites</span></a>
@@ -217,6 +235,7 @@ function route() {
   const go = p => p(token).catch(fail);
   if (h.startsWith('#run/')) return go(t => pageRun(t, +h.slice(5)));
   if (h === '#hosts') return go(pageHosts);
+  if (h === '#topology') return go(pageTopology);
   if (h === '#runs') return go(pageRuns);
   if (h === '#new') return go(pageNew);
   if (h === '#suites') return go(pageSuites);
@@ -309,6 +328,113 @@ async function installCommand() {
     modal({ title: 'Install an agent', body: `<p class="help">Run this as root on each Ubuntu or Debian test host. The same command works on up to ${t.hosts} hosts until ${new Date(t.expires_at).toLocaleTimeString()}; after that, open this dialog again for a fresh one.</p>
       <pre id="cmd">${esc(t.install_command)}</pre>`, actions: [{ label: 'Copy command', cls: 'primary', close: false, run: function () { copyText(t.install_command, $('#modal footer button.primary')); } }, { label: 'Done' }] });
   } catch (e) { fail(e); }
+}
+
+/* ---------- topology ---------- */
+const fabricPalette = ['#2f6fed', '#d97706', '#0f9d58', '#9333ea', '#dc2626', '#0891b2', '#65a30d', '#db2777'];
+function fabricColor(f, fabrics) { const i = fabrics.indexOf(f); return i < 0 ? 'var(--muted)' : fabricPalette[i % fabricPalette.length]; }
+const shortPort = n => String(n || '').replace(/^Ethernet/, 'E').replace(/^PortChannel/, 'Po');
+function drawTopology(t) {
+  const sw = t.switches || [];
+  const fabrics = [...new Set((t.hosts || []).flatMap(h => h.ports.map(p => p.fabric)).filter(Boolean))].sort();
+  const legs = (t.runs || []).flatMap(r => r.legs);
+  const legPorts = new Set(legs.flatMap(l => [l.client_port_id, l.server_port_id]));
+  const n0 = (t.hosts || []).length, cols = Math.max(1, Math.min(n0, 10));
+  const HW = 184, HH = 84, GAP = 16, W = Math.max(960, cols * (HW + GAP) + 40);
+  const rows = Math.ceil(n0 / cols);
+  const SWY = 24, SWH = 46;
+  const hostY = r => SWY + SWH + 170 + r * (HH + 110);
+  const H = hostY(Math.max(rows, 1) - 1) + HH + 24;
+  const out = [], links = [], labels = [];
+  // Switches across the top, their ports as stubs along the bottom edge.
+  const swPos = {};
+  const swTotal = sw.reduce((a, s) => a + Math.max(s.ports.length, 1), 0) || 1;
+  const swAvail = W - 40 - (sw.length - 1) * 30;
+  let sx = 20;
+  for (const s of sw) {
+    const n = Math.max(s.ports.length, 1), wdt = Math.max(160, swAvail * n / swTotal);
+    out.push(`<rect class="box sw" x="${sx}" y="${SWY}" width="${wdt}" height="${SWH}" rx="8"/>`);
+    out.push(`<text x="${sx + 10}" y="${SWY + 18}" font-weight="600">${esc(s.name)}</text><text class="mut" x="${sx + 10}" y="${SWY + 34}">${esc(s.address)}${s.source ? ' · ' + esc(s.source) : ' · no counters yet'}</text>`);
+    s.ports.forEach((p, i) => {
+      const x = sx + wdt * (i + 0.5) / n, y = SWY + SWH;
+      swPos[(s.name + '/' + p.name).toLowerCase()] = { x, y };
+      const cls = p.up == null ? '' : p.up ? 'up' : 'down', busy = (p.rx_gbps || 0) + (p.tx_gbps || 0) >= 0.1;
+      out.push(`<g><title>${esc(s.name)} ${esc(p.name)}: in ${fmt(p.rx_gbps)} / out ${fmt(p.tx_gbps)} Gbps${p.hosts?.length ? ' · ' + esc(p.hosts.join(', ')) : ''}</title><rect class="stub ${cls} ${busy ? 'busy' : ''}" x="${x - 9}" y="${y - 7}" width="18" height="14" rx="3"/><text class="sm" x="${x}" y="${y + 20}" text-anchor="middle">${esc(shortPort(p.name))}</text></g>`);
+    });
+    sx += wdt + 30;
+  }
+  if (!sw.length) out.push(`<text class="mut" x="${W / 2}" y="${SWY + 28}" text-anchor="middle">No switch configured. Add one on the Switches page to see its ports here.</text>`);
+  // Hosts in the order of their switch ports, so lines cross as little as
+  // possible; hosts with no mapping yet go last.
+  const anchor = h => { const xs = h.ports.map(p => swPos[(p.switch + '/' + p.switch_port).toLowerCase()]).filter(Boolean).map(q => q.x); return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : Infinity; };
+  const hosts = [...(t.hosts || [])].sort((a, b) => anchor(a) - anchor(b) || a.name.localeCompare(b.name, undefined, { numeric: true }));
+  hosts.forEach((h, i) => {
+    const r = Math.floor(i / cols), c = i % cols, inRow = Math.min(cols, hosts.length - r * cols);
+    const rowW = inRow * (HW + GAP) - GAP, x0 = (W - rowW) / 2 + c * (HW + GAP), y0 = hostY(r);
+    const st = h.stats;
+    out.push(`<rect class="box ${h.online ? '' : 'off'}" x="${x0}" y="${y0}" width="${HW}" height="${HH}" rx="8"/>`);
+    out.push(`<text x="${x0 + 10}" y="${y0 + 38}" font-weight="600">${esc(h.name)}</text>`);
+    if (st) {
+      const cpu = Math.min(100, Math.max(0, st.cpu_pct || 0));
+      out.push(`<text class="sm mut" x="${x0 + 10}" y="${y0 + 55}">CPU ${fmt(cpu, 0)}% · load ${fmt(st.load1)} · mem ${fmt(st.mem_pct, 0)}%</text>`);
+      out.push(`<rect class="meter" x="${x0 + 10}" y="${y0 + 64}" width="${HW - 20}" height="6" rx="3"/><rect x="${x0 + 10}" y="${y0 + 64}" width="${(HW - 20) * cpu / 100}" height="6" rx="3" fill="${cpu > 85 ? 'var(--fail)' : cpu > 60 ? 'var(--warn)' : 'var(--accent)'}"/>`);
+    } else out.push(`<text class="sm mut" x="${x0 + 10}" y="${y0 + 55}">${h.online ? 'no telemetry yet' : 'offline'}</text>`);
+    const ports = h.ports.filter(p => p.ip || p.switch_port || p.state === 'ACTIVE');
+    ports.forEach((p, j) => {
+      const x = x0 + HW * (j + 0.5) / Math.max(ports.length, 1), y = y0;
+      const col = fabricColor(p.fabric, fabrics), rate = Math.max(p.tx_gbps || 0, p.rx_gbps || 0);
+      out.push(`<g><title>${esc(h.name)} ${esc(p.rdma_dev)}/${p.port_num} ${esc(p.netdev)}${p.ip ? ' ' + esc(p.ip) : ''}${p.label ? ' · ' + esc(p.label) : ''}: tx ${fmt(p.tx_gbps)} / rx ${fmt(p.rx_gbps)} Gbps</title><rect class="stub ${p.state === 'ACTIVE' ? 'up' : 'down'}" x="${x - 9}" y="${y - 7}" width="18" height="14" rx="3" style="stroke:${col}"/></g>`);
+      out.push(`<text class="sm mut" x="${x}" y="${y + 20}" text-anchor="middle">${esc(p.label || p.netdev)}</text>`);
+      const target = p.switch && p.switch_port ? swPos[(p.switch + '/' + p.switch_port).toLowerCase()] : null;
+      if (target) {
+        const w = 1.5 + Math.min(6, rate / 20), my = (y + target.y) / 2, leg = legPorts.has(p.id);
+        links.push(`<path class="link ${rate < 0.1 ? 'idle' : ''} ${leg ? 'leg' : ''}" d="M${x} ${y - 7} C ${x} ${my}, ${target.x} ${my}, ${target.x} ${target.y + 7}" stroke="${col}" stroke-width="${w}"><title>${esc(h.name)} ${esc(p.netdev)} to ${esc(p.switch)} ${esc(p.switch_port)} · ${fmt(rate)} Gbps</title></path>`);
+        if (rate >= 0.1) labels.push(`<text class="rate sm" x="${(x + target.x) / 2}" y="${my + (i % 2 ? 14 : -8)}" text-anchor="middle" fill="${col}">${fmt(rate)}</text>`);
+      } else if (p.lldp_port) {
+        links.push(`<path class="link idle" d="M${x} ${y - 7} v-16" stroke="${col}" stroke-width="1.5" stroke-dasharray="3 3"/><text class="sm mut" x="${x}" y="${y - 28}" text-anchor="middle">${esc(p.lldp_switch)} ${esc(p.lldp_port)}?</text>`);
+      } else {
+        links.push(`<path class="link idle" d="M${x} ${y - 7} v-16" stroke="${col}" stroke-width="1.5" stroke-dasharray="3 3"/><text class="sm mut" x="${x}" y="${y - 28}" text-anchor="middle">no LLDP</text>`);
+      }
+    });
+  });
+  if (!hosts.length) out.push(`<text class="mut" x="${W / 2}" y="${H / 2}" text-anchor="middle">No hosts enrolled yet.</text>`);
+  const legend = fabrics.map((f, i) => `<g transform="translate(${W - 20 - (fabrics.length - i) * 90}, ${H - 8})"><rect width="12" height="4" y="-6" rx="2" fill="${fabricColor(f, fabrics)}"/><text class="sm mut" x="16">fabric ${esc(f)}</text></g>`).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMin meet">${links.join('')}${out.join('')}${labels.join('')}${legend}</svg>`;
+}
+async function pageTopology(token) {
+  if (!mount(token, `<div class="page-head"><h1>Topology</h1><span class="spacer"></span><span class="sub" id="tp-legs"></span><span class="sub" id="tp-upd"></span></div>
+    <p class="help">Drawn from each host's LLDP neighbour and the switch's own port counters. Line width follows the live rate; the legs of a run in progress glow. A host port with "no LLDP" has not reported a neighbour yet: re-run install.sh on that host once so the agent may query lldpctl.</p>
+    <div class="card topo" style="padding:10px 10px 4px" id="tp-svg"></div><div id="tp-warn"></div>
+    <div class="card"><h2>Switch ports in use</h2><div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th>Switch</th><th>Port</th><th>Link</th><th>Host port</th><th>Fabric</th><th class="num">In Gbps</th><th class="num">Out Gbps</th><th class="num">Discards in / out</th><th class="num">Errors in / out</th><th class="num">FCS</th></tr></thead><tbody id="tp-ports"></tbody></table></div></div>
+    <div class="card"><h2>Hosts under test</h2><div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th></th><th>Host</th><th class="num">CPU</th><th class="num">Load</th><th class="num">Memory</th><th>Ports</th><th>Switch ports</th><th class="num">TX / RX Gbps</th></tr></thead><tbody id="tp-hosts"></tbody></table></div></div>`)) return;
+  const refresh = async () => {
+    const t = await api('GET', '/topology');
+    set('tp-svg', drawTopology(t));
+    set('tp-warn', t.warning ? `<div class="card" style="border-color:var(--warn);color:var(--warn)">${esc(t.warning)}</div>` : '');
+    const byPort = {};
+    for (const h of t.hosts) for (const p of h.ports) if (p.switch && p.switch_port) byPort[(p.switch + '/' + p.switch_port).toLowerCase()] = { h, p };
+    const rows = t.switches.flatMap(s => s.ports.map(p => {
+      const m = byPort[(s.name + '/' + p.name).toLowerCase()];
+      const bad = (p.in_discards || 0) + (p.out_discards || 0) + (p.in_errors || 0) + (p.out_errors || 0) + (p.fcs_errors || 0) > 0;
+      return `<tr><td>${esc(s.name)}</td><td class="mono">${esc(p.name)}</td><td>${p.up == null ? '<span class="muted">?</span>' : badge(p.up ? 'up' : 'down', p.up ? 'pass' : 'fail')}${p.speed_mbps ? ` <span class="muted">${p.speed_mbps / 1000}G</span>` : ''}</td>
+        <td>${m ? `<b>${esc(m.h.name)}</b> <span class="muted">${esc(m.p.label || m.p.netdev)}${m.p.ip ? ' ' + m.p.ip : ''}</span>` : '<span class="muted">-</span>'}</td><td>${esc(m?.p.fabric || '')}</td>
+        <td class="num">${fmt(p.rx_gbps)}</td><td class="num">${fmt(p.tx_gbps)}</td><td class="num" style="color:${bad ? 'var(--warn)' : 'inherit'}">${fmt(p.in_discards, 0)} / ${fmt(p.out_discards, 0)}</td><td class="num" style="color:${bad ? 'var(--warn)' : 'inherit'}">${fmt(p.in_errors, 0)} / ${fmt(p.out_errors, 0)}</td><td class="num">${fmt(p.fcs_errors, 0)}</td></tr>`;
+    }));
+    set('tp-ports', rows.join('') || `<tr><td colspan="10" class="empty">${t.switches.length ? 'No switch port is mapped to a host yet and none carries traffic. The mapping appears once hosts report LLDP neighbours.' : 'No switch configured.'}</td></tr>`);
+    set('tp-hosts', t.hosts.map(h => {
+      const st = h.stats, tx = h.ports.reduce((a, p) => a + (p.tx_gbps || 0), 0), rx = h.ports.reduce((a, p) => a + (p.rx_gbps || 0), 0);
+      const cpu = st ? st.cpu_pct : null;
+      return `<tr><td><span class="dot ${h.online ? 'on' : ''}"></span></td><td><b>${esc(h.name)}</b> <span class="muted">${esc(h.hostname)}</span></td>
+        <td class="num" style="color:${cpu > 85 ? 'var(--fail)' : cpu > 60 ? 'var(--warn)' : 'inherit'}">${st ? fmt(cpu, 0) + '%' : '<span class="muted">-</span>'}</td><td class="num">${st ? fmt(st.load1, 2) : ''}</td><td class="num">${st ? fmt(st.mem_pct, 0) + '%' : ''}</td>
+        <td>${h.ports.filter(p => p.ip).map(p => `<span class="chip">${esc(p.label || p.netdev)} <span class="muted">${esc(p.ip)}</span></span>`).join(' ')}</td>
+        <td>${h.ports.filter(p => p.switch_port || p.lldp_port).map(p => `<span class="mono">${esc(p.switch || p.lldp_switch)} ${esc(p.switch_port || p.lldp_port)}</span>`).join(', ') || '<span class="muted">no LLDP yet</span>'}</td>
+        <td class="num">${fmt(tx)} / ${fmt(rx)}</td></tr>`;
+    }).join('') || `<tr><td colspan="8" class="empty">No hosts enrolled yet.</td></tr>`);
+    const legs = (t.runs || []).reduce((a, r) => a + r.legs.length, 0);
+    set('tp-legs', legs ? `<span class="live">live</span> ${legs} leg${legs === 1 ? '' : 's'} running` : '');
+    set('tp-upd', 'updated ' + new Date().toLocaleTimeString());
+  };
+  await refresh(); setRefresh(refresh, 3000);
 }
 
 /* ---------- runs ---------- */

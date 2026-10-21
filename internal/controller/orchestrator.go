@@ -821,6 +821,41 @@ func (o *Orchestrator) Live(r *api.Run) {
 	}
 }
 
+// ActiveLegs lists the legs of every run in progress with their live rate,
+// for the Topology page.
+func (o *Orchestrator) ActiveLegs() []api.TopoRun {
+	o.mu.Lock()
+	ids := make([]int64, 0, len(o.active))
+	for id := range o.active {
+		ids = append(ids, id)
+	}
+	o.mu.Unlock()
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	out := []api.TopoRun{}
+	for _, id := range ids {
+		run := api.Run{ID: id, Legs: nil}
+		o.mu.Lock()
+		ar, ok := o.active[id]
+		o.mu.Unlock()
+		if !ok {
+			continue
+		}
+		tr := api.TopoRun{ID: id, Name: ar.spec.Name, Legs: []api.TopoLeg{}}
+		for _, p := range ar.plans {
+			run.Legs = append(run.Legs, p.leg)
+		}
+		o.Live(&run)
+		for i, p := range ar.plans {
+			if p.startAt.IsZero() || (p.clientRes != nil && p.serverRes != nil) {
+				continue
+			}
+			tr.Legs = append(tr.Legs, api.TopoLeg{ClientPortID: p.client.PortID, ServerPortID: p.server.PortID, ClientHost: p.client.Host, ServerHost: p.server.Host, LiveGbps: run.Legs[i].LiveGbps})
+		}
+		out = append(out, tr)
+	}
+	return out
+}
+
 func newID() string {
 	b := make([]byte, 12)
 	rand.Read(b)
