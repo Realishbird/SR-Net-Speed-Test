@@ -161,6 +161,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/v1/ports/{id}", s.admin(s.patchPort))
 	mux.HandleFunc("POST /api/v1/hosts/import", s.admin(s.importHosts))
 	mux.HandleFunc("POST /api/v1/tokens", s.admin(s.createToken))
+	mux.HandleFunc("POST /api/v1/admin/password", s.admin(s.changePassword))
 	mux.HandleFunc("GET /api/v1/runs", s.admin(s.listRuns))
 	mux.HandleFunc("POST /api/v1/runs", s.admin(s.createRun))
 	mux.HandleFunc("GET /api/v1/runs/{id}", s.admin(s.getRun))
@@ -670,6 +671,48 @@ func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 		return false
 	}
 	return true
+}
+
+// changePassword sets a new admin password from the UI. The current password
+// is asked for again even though Basic auth just checked it, so a page left
+// open cannot be used to lock the operator out.
+func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
+	var req api.PasswordChange
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
+		return
+	}
+	s.mu.Lock()
+	hash := s.cfg.AdminPasswordHash
+	s.mu.Unlock()
+	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Current)) != nil {
+		httpError(w, http.StatusForbidden, "current password is wrong")
+		return
+	}
+	if len(req.New) < 8 {
+		httpError(w, http.StatusBadRequest, "new password must be at least 8 characters")
+		return
+	}
+	if len(req.New) > 256 {
+		httpError(w, http.StatusBadRequest, "new password is too long")
+		return
+	}
+	h, err := bcrypt.GenerateFromPassword([]byte(req.New), bcrypt.DefaultCost)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.mu.Lock()
+	s.cfg.AdminPasswordHash = string(h)
+	cfg := s.cfg
+	s.mu.Unlock()
+	if err := cfg.SaveBack(); err != nil {
+		log.Printf("admin password: saved in memory only, config not written: %v", err)
+	}
+	if s.store != nil {
+		s.store.Audit(r.Context(), "admin.password", map[string]any{"user": s.cfg.AdminUser})
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

@@ -152,7 +152,7 @@ button.chip:hover { border-color:var(--accent); }
   <a href="#switches" data-page="switches"><svg viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="10" rx="2"/><path d="M6 11h.01M9 11h.01M12 11h.01M15 11h.01M18 11h.01M6 14h12"/></svg><span class="t">Switches</span></a>
   <a href="#alerts" data-page="alerts"><svg viewBox="0 0 24 24"><path d="M12 3l9.5 17h-19z"/><path d="M12 10v4M12 17h.01"/></svg><span class="t">Alerts</span><span class="badge fail" id="alert-count" style="display:none"></span></a>
   <a id="grafana" href="#" target="_blank"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 15l3-4 3 2 4-6"/></svg><span class="t">Grafana</span></a>
-  <div class="foot"><span id="clock"></span><button class="sm" onclick="toggleTheme()">Toggle theme</button></div>
+  <div class="foot"><span id="clock"></span><button class="sm" onclick="changePassword()" title="Change the admin login password">Password</button><button class="sm" onclick="toggleTheme()">Toggle theme</button></div>
 </nav>
 <main id="view"></main>
 </div>
@@ -196,6 +196,24 @@ function modal({ title, body, actions = [], onClose }) {
   ov.onclose = onClose;
   document.body.appendChild(ov);
   return ov;
+}
+// changePassword asks for the current and a new admin password. Basic auth
+// means the browser keeps the old one cached, so after a change the next
+// request fails once and the browser asks for the new login.
+function changePassword() {
+  modal({ title: 'Change admin password', body: `<form id="pw-form" onsubmit="return false"><div class="row" style="flex-direction:column;align-items:stretch">
+      <label>Current password<input type="password" id="pw-cur" autocomplete="current-password" required></label>
+      <label>New password (8+ characters)<input type="password" id="pw-new" autocomplete="new-password" minlength="8" required></label>
+      <label>Repeat new password<input type="password" id="pw-rep" autocomplete="new-password" minlength="8" required></label></div>
+      <p class="muted" style="margin:10px 0 0">Your browser will ask you to log in again with the new password.</p></form>`,
+    actions: [{ label: 'Cancel' }, { label: 'Change password', cls: 'primary', close: false, run: async () => {
+      const cur = $('#pw-cur').value, nw = $('#pw-new').value, rep = $('#pw-rep').value;
+      if (nw.length < 8) return toast('New password must be at least 8 characters', 'warn');
+      if (nw !== rep) return toast('The new passwords do not match', 'warn');
+      try { await api('POST', '/admin/password', { current: cur, new: nw }); } catch (e) { return fail(e); }
+      closeModal(); toast('Password changed. Log in again with the new one when the browser asks.', 'pass', 10000);
+    } }] });
+  setTimeout(() => $('#pw-cur')?.focus(), 50);
 }
 function closeModal() { const m = $('#modal'); if (m) { m.onclose?.(); m.remove(); } }
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });

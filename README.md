@@ -22,7 +22,7 @@ What it does today: enrollment, RDMA write/read/send bandwidth, RDMA latency and
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Realishbird/SR-Net-Speed-Test/main/proxmox/create-lxc.sh)"
 ```
 
-Defaults: unprivileged Debian 12 container, 4 cores, 8 GB RAM, 100 GB disk, DHCP on `vmbr0`, no Docker. Every default is a flag (`--ctid`, `--storage`, `--bridge`, `--vlan`, `--ip`, `--cores`, `--memory`, `--disk`, `--password`). The script prints the admin password, the Grafana URL and the CA fingerprint when it finishes. `--upgrade <CTID>` upgrades the stack inside an existing container.
+Defaults: unprivileged Debian 12 container, 4 cores, 8 GB RAM, 100 GB disk, DHCP on `vmbr0`, no Docker. Every default is a flag (`--ctid`, `--storage`, `--bridge`, `--vlan`, `--ip`, `--cores`, `--memory`, `--disk`, `--password`). The script prints the admin password, the Grafana URL and the CA fingerprint when it finishes. Change the password later with the Password button at the bottom of the UI's sidebar, or from inside the container with `srnet-controller passwd --admin-password-file <file>` followed by a restart of `srnet-controller`. `--upgrade <CTID>` upgrades the stack inside an existing container.
 
 Inside the container the stack is plain systemd services: `srnet-controller` (port 8443, web UI and API), `postgresql`, `victoriametrics` (127.0.0.1:8428, 90 days retention), `grafana-server` (port 3000, three SR-Net dashboards provisioned), and `gnmic` (idle until a switch with gNMI is configured).
 

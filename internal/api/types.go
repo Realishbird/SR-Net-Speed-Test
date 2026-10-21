@@ -519,6 +519,12 @@ type TopoLeg struct {
 	LiveGbps     float64 `json:"live_gbps"`
 }
 
+// PasswordChange is the body of POST /api/v1/admin/password.
+type PasswordChange struct {
+	Current string `json:"current"`
+	New     string `json:"new"`
+}
+
 // LegSwitch is what the switch saw on a leg's two ports during the test.
 type LegSwitch struct {
 	ClientPort string             `json:"client_port,omitempty"` // "<switch> <port>"
