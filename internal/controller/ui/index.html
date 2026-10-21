@@ -569,16 +569,27 @@ function delSwitch(name) { confirmBox('Remove switch', `Stop collecting from "${
 
 /* ---------- alerts ---------- */
 async function pageAlerts(token) {
-  if (!mount(token, `<div class="page-head"><h1>Alerts</h1><span class="spacer"></span><label class="row inline sub"><input type="checkbox" id="all" onchange="refreshFn()"> include resolved</label></div>
-    <p class="help">Opened by the controller for agents that stop reporting, ports that leave ACTIVE, error counters that grow while idle, hot transceivers, failed runs and failed updates. They close themselves when the condition clears.</p>
-    <div class="tbl"><table><thead><tr><th>State</th><th>Kind</th><th>Host</th><th>Port</th><th>Message</th><th>Opened</th><th>Resolved</th></tr></thead><tbody id="alerts"></tbody></table></div>`)) return;
+  if (!mount(token, `<div class="page-head"><h1>Alerts</h1><span class="spacer"></span><label class="row inline sub"><input type="checkbox" id="all" onchange="refreshFn()"> include resolved</label>
+      <button class="danger" id="clear-all" onclick="clearAlerts()">Clear all</button></div>
+    <p class="help">Opened by the controller for agents that stop reporting, ports that leave ACTIVE, error counters that grow while idle, hot transceivers, failed runs and failed updates. They close themselves when the condition clears; "Clear" resolves one by hand (an alert whose cause is still present comes back on the next check).</p>
+    <div class="tbl"><table><thead><tr><th>State</th><th>Kind</th><th>Host</th><th>Port</th><th>Message</th><th>Opened</th><th>Resolved</th><th></th></tr></thead><tbody id="alerts"></tbody></table></div>`)) return;
   const refresh = async () => {
     const all = $('#all')?.checked;
     const alerts = await api('GET', '/alerts' + (all ? '?all=1' : ''));
-    set('alerts', alerts.length ? alerts.map(a => `<tr><td>${badge(a.resolved_at ? 'resolved' : 'open', a.resolved_at ? 'pass' : 'fail')}</td><td>${esc(a.kind)}</td><td>${esc(a.host)}</td><td>${esc(a.port)}</td><td class="wrap">${esc(a.message)}</td><td class="muted">${when(a.opened_at)}</td><td class="muted">${when(a.resolved_at)}</td></tr>`).join('')
-      : `<tr><td colspan="7" class="empty">No ${all ? '' : 'open '}alerts.</td></tr>`);
+    const open = alerts.filter(a => !a.resolved_at).length;
+    const b = $('#clear-all'); if (b) b.style.display = open ? '' : 'none';
+    set('alerts', alerts.length ? alerts.map(a => `<tr><td>${badge(a.resolved_at ? 'resolved' : 'open', a.resolved_at ? 'pass' : 'fail')}</td><td>${esc(a.kind)}</td><td>${esc(a.host)}</td><td>${esc(a.port)}</td><td class="wrap">${esc(a.message)}</td><td class="muted">${when(a.opened_at)}</td><td class="muted">${when(a.resolved_at)}</td><td class="num">${a.resolved_at ? '' : `<button onclick="clearAlert(${a.id})">Clear</button>`}</td></tr>`).join('')
+      : `<tr><td colspan="8" class="empty">No ${all ? '' : 'open '}alerts.</td></tr>`);
   };
   await refresh(); setRefresh(refresh, 10000);
+}
+async function clearAlert(id) {
+  try { await api('POST', `/alerts/${id}/clear`); toast('Alert cleared'); refreshFn(); alertBadge(); } catch (e) { fail(e); }
+}
+function clearAlerts() {
+  confirmBox('Clear all alerts', 'Resolve every open alert? Any whose cause is still present will open again on the next check.', 'Clear all', async () => {
+    try { const r = await api('POST', '/alerts/clear'); toast(`Cleared ${r.cleared} alert${r.cleared === 1 ? '' : 's'}`); refreshFn(); alertBadge(); } catch (e) { fail(e); }
+  });
 }
 
 /* ---------- global ---------- */

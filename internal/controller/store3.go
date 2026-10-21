@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -221,6 +222,41 @@ func (s *Store) ResolveAlert(ctx context.Context, kind, host, port string) (bool
 		return false, err
 	}
 	return tag.RowsAffected() > 0, nil
+}
+
+// ClearAlert resolves one open alert by id (an operator action) and returns
+// it; ok is false when no open alert has that id.
+func (s *Store) ClearAlert(ctx context.Context, id int64) (api.Alert, bool, error) {
+	var a api.Alert
+	err := s.db.QueryRow(ctx, `UPDATE alerts SET resolved_at=now() WHERE id=$1 AND resolved_at IS NULL
+		RETURNING id, kind, host, port, message, opened_at, resolved_at`, id).
+		Scan(&a.ID, &a.Kind, &a.Host, &a.Port, &a.Message, &a.OpenedAt, &a.ResolvedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return a, false, nil
+		}
+		return a, false, err
+	}
+	return a, true, nil
+}
+
+// ClearAlerts resolves every open alert and returns them.
+func (s *Store) ClearAlerts(ctx context.Context) ([]api.Alert, error) {
+	rows, err := s.db.Query(ctx, `UPDATE alerts SET resolved_at=now() WHERE resolved_at IS NULL
+		RETURNING id, kind, host, port, message, opened_at, resolved_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []api.Alert{}
+	for rows.Next() {
+		var a api.Alert
+		if err := rows.Scan(&a.ID, &a.Kind, &a.Host, &a.Port, &a.Message, &a.OpenedAt, &a.ResolvedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) Alerts(ctx context.Context, openOnly bool, limit int) ([]api.Alert, error) {

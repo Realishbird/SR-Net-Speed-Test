@@ -355,7 +355,27 @@ func (c *cli) schedule(ctx context.Context, args []string) error {
 func (c *cli) alerts(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("alerts", flag.ExitOnError)
 	all := fs.Bool("all", false, "include resolved alerts")
+	clear := fs.Int64("clear", 0, "clear (resolve) the open alert with this id")
+	clearAll := fs.Bool("clear-all", false, "clear every open alert")
 	fs.Parse(args)
+	if *clear != 0 {
+		var a api.Alert
+		if err := c.call(ctx, "POST", fmt.Sprintf("/api/v1/alerts/%d/clear", *clear), nil, &a); err != nil {
+			return err
+		}
+		fmt.Printf("cleared alert %d (%s %s %s)\n", a.ID, a.Kind, a.Host, a.Port)
+		return nil
+	}
+	if *clearAll {
+		var out struct {
+			Cleared int `json:"cleared"`
+		}
+		if err := c.call(ctx, "POST", "/api/v1/alerts/clear", nil, &out); err != nil {
+			return err
+		}
+		fmt.Printf("cleared %d alert(s)\n", out.Cleared)
+		return nil
+	}
 	q := ""
 	if *all {
 		q = "?all=1"
@@ -372,7 +392,7 @@ func (c *cli) alerts(ctx context.Context, args []string) error {
 		if a.ResolvedAt != nil {
 			state = "resolved"
 		}
-		fmt.Printf("%s %-16s %s  %s\n", state, a.Kind, a.OpenedAt.Local().Format("01-02 15:04"), a.Message)
+		fmt.Printf("%s %4d %-16s %s  %s\n", state, a.ID, a.Kind, a.OpenedAt.Local().Format("01-02 15:04"), a.Message)
 	}
 	return nil
 }

@@ -146,7 +146,7 @@ In the UI, open any finished run and click "Add to a suite" to copy its spec int
 
 ## Alerts and reports
 
-The controller opens an alert when an agent stops reporting for 2 minutes, a port leaves ACTIVE, error counters grow while no test runs on that port, a transceiver reports 70 C or more (`transceiver_max_c` in `controller.json`), a run or suite fails, or an update fails. Alerts close themselves when the condition clears. `srnet alerts` and the Alerts page list them; set `alert_webhook_url` in `/etc/srnet/controller.json` to POST a JSON body (`state`, `kind`, `host`, `port`, `message`, `text`) to Slack, Teams, Alertmanager or a script on every open and resolve.
+The controller opens an alert when an agent stops reporting for 2 minutes, a port leaves ACTIVE, error counters grow while no test runs on that port, a transceiver reports 70 C or more (`transceiver_max_c` in `controller.json`), a run or suite fails, or an update fails. Alerts close themselves when the condition clears; the Alerts page has "Clear" per alert and "Clear all" for the ones that do not (a failed update, a failed run), and `srnet alerts --clear ID` / `--clear-all` do the same. `srnet alerts` and the Alerts page list them; set `alert_webhook_url` in `/etc/srnet/controller.json` to POST a JSON body (`state`, `kind`, `host`, `port`, `message`, `text`) to Slack, Teams, Alertmanager or a script on every open and resolve.
 
 Every run has a CSV and an HTML report (print to PDF from the browser): `srnet report 42 --format csv -o run42.csv`, `srnet report 42 --format html -o run42.html`, or the links on the run page.
 

@@ -129,7 +129,7 @@ func usage() {
   suite-runs                    suite run history
   schedule list|add|enable|disable|delete
                                 run a suite on a cron expression
-  alerts [--all]                open alerts (agent offline, link down, hot optics, idle errors, failed runs)
+  alerts [--all|--clear ID|--clear-all]  open alerts (agent offline, link down, hot optics, idle errors, failed runs, failed updates); clear by hand
 
 Environment: SRNET_URL, SRNET_USER, SRNET_PASSWORD or SRNET_PASSWORD_FILE, SRNET_CA`)
 	os.Exit(2)
