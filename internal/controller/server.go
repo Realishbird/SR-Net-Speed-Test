@@ -37,6 +37,7 @@ type Server struct {
 	rel     *releases
 	alerts  *alerter
 	suites  *suiteRunner
+	snmp    *snmpCollector
 
 	mu         sync.Mutex
 	agentCache map[string]int64              // secret hash -> agent id
@@ -52,7 +53,8 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	h := newHub()
 	m := newMetrics(cfg.VictoriaMetricsURL)
 	go m.writer(ctx)
-	go newSNMPCollector(cfg.Switches, m).loop(ctx)
+	snmp := newSNMPCollector(cfg.Switches, m)
+	go snmp.loop(ctx)
 	if n, err := WriteGnmicConfig(cfg, cfg.GnmicConfigPath); err != nil {
 		log.Printf("gnmic config: %v", err)
 	} else if n > 0 {
@@ -63,7 +65,7 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	s := &Server{
 		cfg: cfg, store: store, hub: h, metrics: m, orch: orch,
 		rel:    newReleases(filepath.Join(cfg.DataDir, "releases"), store, h, al),
-		alerts: al, suites: newSuiteRunner(store, orch, al),
+		alerts: al, suites: newSuiteRunner(store, orch, al), snmp: snmp,
 		agentCache: map[string]int64{}, portCache: map[int64]map[string]portMeta{}, hostName: map[int64]string{},
 	}
 	s.refreshPortCache(ctx)
@@ -100,6 +102,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/runs/{id}", s.admin(s.getRun))
 	mux.HandleFunc("POST /api/v1/runs/{id}/cancel", s.admin(s.cancelRun))
 	s.routes3(mux)
+	s.routesSwitches(mux)
 	return mux
 }
 
@@ -274,7 +277,7 @@ func (s *Server) agentResult(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"version": version.Version, "public_url": s.cfg.PublicURL, "grafana_url": s.cfg.GrafanaURL, "time": time.Now(),
-		"switches": len(s.cfg.Switches)})
+		"switches": len(s.switchList())})
 }
 
 func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {

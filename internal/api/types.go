@@ -391,3 +391,43 @@ type Alert struct {
 	OpenedAt   time.Time  `json:"opened_at"`
 	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
 }
+
+// Switch is a SONiC switch the controller reads port counters from, as shown
+// in the UI and CLI. Secrets are never returned; Has* says whether one is set.
+type Switch struct {
+	Name            string       `json:"name"`
+	Address         string       `json:"address"`
+	SNMPVersion     string       `json:"snmp_version,omitempty"`
+	HasSNMP         bool         `json:"has_snmp"`
+	GNMIPort        int          `json:"gnmi_port,omitempty"`
+	GNMIUser        string       `json:"gnmi_user,omitempty"`
+	HasGNMIPassword bool         `json:"has_gnmi_password"`
+	GNMITLS         bool         `json:"gnmi_tls"`
+	SNMP            *SwitchProbe `json:"snmp,omitempty"`
+	GNMI            *SwitchProbe `json:"gnmi,omitempty"`
+}
+
+// SwitchProbe is the latest evidence that a collection path works.
+type SwitchProbe struct {
+	OK      bool       `json:"ok"`
+	At      *time.Time `json:"at,omitempty"`
+	Ports   int        `json:"ports,omitempty"`  // SNMP: interfaces seen on the last poll
+	Series  int        `json:"series,omitempty"` // gNMI: metric series received in the last 2 minutes
+	Message string     `json:"message,omitempty"`
+}
+
+// SwitchRequest adds or replaces a switch. An empty SNMPCommunity or
+// GNMIPassword keeps the stored secret; SNMPEnabled/GNMIEnabled false drops
+// that collection path entirely.
+type SwitchRequest struct {
+	Name          string `json:"name"`
+	Address       string `json:"address"`
+	SNMPEnabled   bool   `json:"snmp_enabled"`
+	SNMPVersion   string `json:"snmp_version,omitempty"`
+	SNMPCommunity string `json:"snmp_community,omitempty"`
+	GNMIEnabled   bool   `json:"gnmi_enabled"`
+	GNMIPort      int    `json:"gnmi_port,omitempty"`
+	GNMIUser      string `json:"gnmi_user,omitempty"`
+	GNMIPassword  string `json:"gnmi_password,omitempty"`
+	GNMITLS       bool   `json:"gnmi_tls"`
+}

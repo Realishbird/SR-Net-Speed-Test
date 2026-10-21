@@ -7,6 +7,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gosnmp/gosnmp"
@@ -32,46 +33,114 @@ type snmpPrev struct {
 
 // snmpCollector polls every switch that has an SNMP community and writes
 // srnet_switch_* metrics. It is the fallback where gNMI is not enabled; gnmic
-// (configured by WriteGnmicConfig) is the primary path.
+// (configured by WriteGnmicConfig) is the primary path. The switch list can be
+// replaced at runtime with set(), which also triggers an immediate poll.
 type snmpCollector struct {
-	switches []SwitchConfig
 	m        *metrics
 	interval time.Duration
-	prev     map[string]snmpPrev // switch/ifIndex
+	kick     chan struct{}
+
+	mu       sync.Mutex
+	switches []SwitchConfig
+	prev     map[string]snmpPrev   // switch/ifIndex
+	status   map[string]snmpStatus // switch name -> last poll
+}
+
+// snmpStatus is the outcome of the last poll of one switch.
+type snmpStatus struct {
+	At    time.Time
+	Ports int
+	Err   string
 }
 
 func newSNMPCollector(sw []SwitchConfig, m *metrics) *snmpCollector {
+	c := &snmpCollector{m: m, interval: 30 * time.Second, kick: make(chan struct{}, 1), prev: map[string]snmpPrev{}, status: map[string]snmpStatus{}}
+	c.set(sw)
+	return c
+}
+
+// set replaces the polled switches (only those with an address and a
+// community are kept) and wakes the loop so the change shows within seconds.
+func (c *snmpCollector) set(sw []SwitchConfig) {
 	var withSNMP []SwitchConfig
+	keep := map[string]bool{}
 	for _, s := range sw {
 		if s.SNMPCommunity != "" && s.Address != "" {
 			withSNMP = append(withSNMP, s)
+			keep[s.Name] = true
 		}
 	}
-	return &snmpCollector{switches: withSNMP, m: m, interval: 30 * time.Second, prev: map[string]snmpPrev{}}
+	c.mu.Lock()
+	c.switches = withSNMP
+	for name := range c.status {
+		if !keep[name] {
+			delete(c.status, name)
+		}
+	}
+	c.mu.Unlock()
+	select {
+	case c.kick <- struct{}{}:
+	default:
+	}
+}
+
+func (c *snmpCollector) current() []SwitchConfig {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]SwitchConfig(nil), c.switches...)
+}
+
+// statuses returns the last poll outcome per switch name.
+func (c *snmpCollector) statuses() map[string]snmpStatus {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]snmpStatus, len(c.status))
+	for k, v := range c.status {
+		out[k] = v
+	}
+	return out
+}
+
+// pollNow polls one switch immediately, records the outcome and pushes its
+// samples. It is what the "test" action in the UI runs.
+func (c *snmpCollector) pollNow(sw SwitchConfig) snmpStatus {
+	st := snmpStatus{At: time.Now()}
+	lines, ports, err := c.poll(sw)
+	st.Ports = ports
+	if err != nil {
+		st.Err = err.Error()
+	} else {
+		c.m.push(lines)
+	}
+	c.mu.Lock()
+	c.status[sw.Name] = st
+	c.mu.Unlock()
+	return st
 }
 
 func (c *snmpCollector) loop(ctx context.Context) {
-	if len(c.switches) == 0 {
-		return
-	}
-	log.Printf("snmp: polling %d switch(es) every %s", len(c.switches), c.interval)
+	logged := -1
 	for {
-		for _, sw := range c.switches {
-			if lines, err := c.poll(sw); err != nil {
-				log.Printf("snmp %s: %v", sw.Name, err)
-			} else {
-				c.m.push(lines)
+		list := c.current()
+		if len(list) != logged {
+			log.Printf("snmp: polling %d switch(es) every %s", len(list), c.interval)
+			logged = len(list)
+		}
+		for _, sw := range list {
+			if st := c.pollNow(sw); st.Err != "" {
+				log.Printf("snmp %s: %s", sw.Name, st.Err)
 			}
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(c.interval):
+		case <-c.kick:
 		}
 	}
 }
 
-func (c *snmpCollector) poll(sw SwitchConfig) ([]byte, error) {
+func (c *snmpCollector) poll(sw SwitchConfig) ([]byte, int, error) {
 	host, port := sw.Address, uint16(161)
 	if h, p, ok := strings.Cut(sw.Address, ":"); ok {
 		if n, err := strconv.Atoi(p); err == nil {
@@ -83,7 +152,7 @@ func (c *snmpCollector) poll(sw SwitchConfig) ([]byte, error) {
 		g.Version = gosnmp.Version1
 	}
 	if err := g.Connect(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer g.Conn.Close()
 
@@ -109,17 +178,21 @@ func (c *snmpCollector) poll(sw SwitchConfig) ([]byte, error) {
 			return nil
 		})
 		if err != nil {
-			return nil, fmt.Errorf("walk %s: %w", col, err)
+			return nil, 0, fmt.Errorf("walk %s: %w", col, err)
 		}
 	}
 	now := time.Now()
 	var buf bytes.Buffer
+	ports := 0
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	ts := now.UnixMilli()
 	for idx, r := range rows {
 		name, _ := r["name"].(string)
 		if name == "" {
 			continue
 		}
+		ports++
 		labels := formatLabels(map[string]string{"switch": sw.Name, "port": name})
 		num := func(col string) (float64, bool) {
 			n, ok := r[col].(int64)
@@ -150,5 +223,5 @@ func (c *snmpCollector) poll(sw SwitchConfig) ([]byte, error) {
 			c.prev[key] = snmpPrev{now, in, out}
 		}
 	}
-	return buf.Bytes(), nil
+	return buf.Bytes(), ports, nil
 }
