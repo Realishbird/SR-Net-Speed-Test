@@ -62,11 +62,6 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	go m.writer(ctx)
 	snmp := newSNMPCollector(cfg.Switches, m)
 	go snmp.loop(ctx)
-	if n, err := WriteGnmicConfig(cfg, cfg.GnmicConfigPath); err != nil {
-		log.Printf("gnmic config: %v", err)
-	} else if n > 0 {
-		log.Printf("gnmic config written for %d switch(es) to %s", n, cfg.GnmicConfigPath)
-	}
 	orch := newOrchestrator(store, h, m)
 	al := newAlerter(store, h, cfg)
 	s := &Server{
@@ -77,9 +72,65 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	}
 	orch.switches = s.switchList
 	s.refreshPortCache(ctx)
+	s.writeGnmic(ctx)
 	go al.loop(ctx)
 	go s.suites.scheduler(ctx)
+	go s.gnmicLoop(ctx)
 	return s, nil
+}
+
+// gnmicPorts lists, per switch, the ports whose transceivers gnmic should
+// subscribe to: every port a host's LLDP maps to that switch, plus every
+// port the switch itself reports as up (gNMI oper-status or the SNMP
+// poller), since those are the ones with a module in them.
+func (s *Server) gnmicPorts(ctx context.Context) map[string][]string {
+	out := map[string][]string{}
+	switches := s.switchList()
+	if hosts, err := s.store.Hosts(ctx); err == nil {
+		for _, h := range hosts {
+			for _, p := range h.Ports {
+				if name := resolveSwitchName(switches, p.LLDPSwitch); name != "" && p.LLDPPort != "" {
+					out[name] = append(out[name], p.LLDPPort)
+				}
+			}
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if ports, _, err := s.switchPortStats(ctx); err == nil {
+		for _, p := range ports {
+			if p.Up != nil && *p.Up {
+				out[p.Switch] = append(out[p.Switch], p.Name)
+			}
+		}
+	}
+	return out
+}
+
+// writeGnmic renders the gnmic config for the current switches and ports.
+func (s *Server) writeGnmic(ctx context.Context) {
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+	if n, err := WriteGnmicConfig(cfg, cfg.GnmicConfigPath, s.gnmicPorts(ctx)); err != nil {
+		log.Printf("gnmic config: %v", err)
+	} else if n > 0 {
+		log.Printf("gnmic config: %d switch(es), %s", n, cfg.GnmicConfigPath)
+	}
+}
+
+// gnmicLoop re-renders the gnmic config as ports come up or hosts report
+// new LLDP neighbours. WriteGnmicConfig leaves an unchanged file alone, so
+// gnmic is only restarted when its subscriptions actually change.
+func (s *Server) gnmicLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Minute):
+		}
+		s.writeGnmic(ctx)
+	}
 }
 
 func (s *Server) Close() { s.store.Close() }

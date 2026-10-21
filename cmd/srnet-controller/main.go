@@ -118,7 +118,7 @@ func main() {
 		if err := cfg.Save(*cfgPath); err != nil {
 			log.Fatal(err)
 		}
-		n, err := controller.WriteGnmicConfig(cfg, cfg.GnmicConfigPath)
+		n, err := controller.WriteGnmicConfig(cfg, cfg.GnmicConfigPath, nil) // the running controller adds the transceiver ports
 		if err != nil {
 			log.Fatal(err)
 		}
