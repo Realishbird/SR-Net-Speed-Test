@@ -274,14 +274,14 @@ async function pageHosts(token) {
           html += `<td ${rs}><span class="dot ${h.online ? 'on' : ''}" title="${h.online ? 'online' : 'offline, last seen ' + ago(h.last_seen)}"></span></td>
             <td ${rs}><input class="cell" value="${esc(h.name)}" onchange="patch('/hosts/${h.id}',{name:this.value})"></td>
             <td ${rs} class="muted">${esc(h.hostname)}</td>
-            <td ${rs}><input class="cell" value="${esc(h.tags.join(', '))}" placeholder="tag, tag" onchange="patch('/hosts/${h.id}',{tags:list(this.value)})"></td>
+            <td ${rs}><input class="cell" value="${esc((h.tags || []).join(', '))}" placeholder="tag, tag" onchange="patch('/hosts/${h.id}',{tags:list(this.value)})"></td>
             <td ${rs}><input class="cell" style="width:90px" value="${esc(h.site)}" onchange="patch('/hosts/${h.id}',{site:this.value})"></td>
             <td ${rs} class="muted">${esc(h.agent_version)}<br><span class="mono">${esc(h.arch)}</span></td>`;
         }
         if (!p) { html += '<td colspan="9" class="muted">no RDMA ports found</td></tr>'; return; }
         const sw = p.lldp_switch || p.lldp_port ? `${esc(p.lldp_switch)} <span class="muted">${esc(p.lldp_port)}</span>` : '<span class="muted">-</span>';
         html += `<td><b>${esc(p.rdma_dev)}/${p.port_num}</b> <span class="muted">${esc(p.netdev)}</span></td>
-          <td class="mono">${esc(p.addrs.join(', '))}</td>
+          <td class="mono">${esc((p.addrs || []).join(', ')) || '<span class="muted">no IP</span>'}</td>
           <td>${badge(p.state, p.state === 'ACTIVE' ? 'pass' : 'fail')}</td>
           <td class="num">${p.speed_mbps / 1000}G</td>
           <td><input class="cell" value="${esc(p.label)}" placeholder="label" onchange="patch('/ports/${p.id}',{label:this.value})"></td>
@@ -369,7 +369,7 @@ const tests = { write: 'RDMA write bandwidth', read: 'RDMA read bandwidth', send
 async function pageNew(token) {
   const hosts = await api('GET', '/hosts');
   const prev = JSON.parse(sessionStorage.getItem('spec') || 'null'); sessionStorage.removeItem('spec');
-  const names = hosts.map(h => h.name), tags = [...new Set(hosts.flatMap(h => h.tags))].map(t => 'tag:' + t);
+  const names = hosts.map(h => h.name), tags = [...new Set(hosts.flatMap(h => h.tags || []))].map(t => 'tag:' + t);
   const opts = [...names, ...tags].map(n => `<option value="${esc(n)}">`).join('');
   const topo = prev ? (prev.mesh ? 'mesh' : prev.legs?.length ? 'legs' : prev.pairs ? 'pairs' : 'cs') : 'cs';
   const v = (k, d = '') => esc(prev?.[k] ?? d);
