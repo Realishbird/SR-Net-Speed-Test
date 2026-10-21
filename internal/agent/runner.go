@@ -178,9 +178,7 @@ func (r *Runner) run(parent context.Context, t api.Task) {
 	}
 	res.Command = args
 
-	// A server waits for its client; a client waits for the shared start time.
-	limit := time.Duration(t.DurationSec)*time.Second + 2*time.Minute
-	ctx, cancel := context.WithTimeout(parent, limit+time.Until(t.StartAt))
+	ctx, cancel := context.WithTimeout(parent, taskTimeout(t, time.Now()))
 	defer cancel()
 	r.mu.Lock()
 	r.cancels[t.ID], r.runOf[t.ID] = cancel, t.RunID
@@ -279,6 +277,20 @@ func (r *Runner) run(parent context.Context, t api.Task) {
 		r.Report(api.Event{TaskID: t.ID, RunID: t.RunID, LegID: t.LegID, Type: api.EventFailed, Message: res.Error})
 	}
 	r.Result(res)
+}
+
+// taskTimeout bounds a task: its duration plus two minutes of slack, plus the
+// wait for the shared start time when a client has one. Servers carry no start
+// time; time.Until on the zero time is hugely negative and would expire the
+// context before the tool even started ("context deadline exceeded").
+func taskTimeout(t api.Task, now time.Time) time.Duration {
+	limit := time.Duration(t.DurationSec)*time.Second + 2*time.Minute
+	if !t.StartAt.IsZero() {
+		if wait := t.StartAt.Sub(now); wait > 0 {
+			limit += wait
+		}
+	}
+	return limit
 }
 
 func parseIPv4(s string) string {
