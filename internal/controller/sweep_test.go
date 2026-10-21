@@ -1,10 +1,17 @@
 package controller
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/Realishbird/SR-Net-Speed-Test/internal/api"
 )
 
 func TestIdleErrorsSkipTestGrowthAndSelfResolve(t *testing.T) {
@@ -83,5 +90,51 @@ func TestVersionLessIsNumeric(t *testing.T) {
 		if !versionLess(ordered[i], ordered[i+1]) || versionLess(ordered[i+1], ordered[i]) {
 			t.Errorf("%s should sort before %s", ordered[i], ordered[i+1])
 		}
+	}
+}
+
+func TestSwitchLLDPFillsHostPorts(t *testing.T) {
+	// VictoriaMetrics answers the two LLDP leaf queries with one neighbour
+	// on Ethernet0 and the 770AP on Ethernet120; the Spark's lldpd said nothing.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query().Get("query")
+		row := func(leaf, iface, id, val string) string {
+			return fmt.Sprintf(`{"metric":{"__name__":"srnet_gnmi_openconfig_lldp_lldp_interfaces_interface_neighbors_neighbor_state_%s","source":"z9864f","name":"%s","id":"%s","%s":"%s"},"value":[1,"1"]}`, leaf, iface, id, leaf, val)
+		}
+		var rows []string
+		switch {
+		case strings.Contains(q, "system_name"):
+			rows = []string{row("system_name", "Ethernet0", "1", "spark-424f"), row("system_name", "Ethernet120", "7", "dell770ap")}
+		case strings.Contains(q, "port_description"):
+			rows = []string{row("port_description", "Ethernet0", "1", "enp1s0f0np0"), row("port_description", "Ethernet120", "7", "eno16695np0")}
+		}
+		fmt.Fprintf(w, `{"status":"success","data":{"result":[%s]}}`, strings.Join(rows, ","))
+	}))
+	defer srv.Close()
+	cfg := DefaultConfig()
+	cfg.Switches = []SwitchConfig{{Name: "Z9864F", Address: "176.16.9.22", GNMIUser: "admin", GNMIPort: 8080}}
+	s := &Server{cfg: cfg, metrics: newMetrics(srv.URL)}
+	hosts := []hostRec{
+		{Host: api.Host{Name: "Dell Spark 1", Hostname: "spark-424f", Ports: []api.HostPort{{Netdev: "enp1s0f0np0"}, {Netdev: "enp1s0f1np1"}}}},
+		{Host: api.Host{Name: "Dell 770AP", Hostname: "DELL770AP", Ports: []api.HostPort{{Netdev: "eno16695np0", LLDPSwitch: "other", LLDPPort: "Ethernet9"}}}},
+	}
+	s.fillLLDP(context.Background(), hosts)
+	if p := hosts[0].Ports[0]; p.LLDPSwitch != "Z9864F" || p.LLDPPort != "Ethernet0" {
+		t.Errorf("spark port 0: %+v", p)
+	}
+	if p := hosts[0].Ports[1]; p.LLDPPort != "" {
+		t.Errorf("uncabled port got a neighbour: %+v", p)
+	}
+	if p := hosts[1].Ports[0]; p.LLDPPort != "Ethernet9" {
+		t.Errorf("host's own LLDP report was overwritten: %+v", p)
+	}
+	if got := speedMbps("openconfig-if-ethernet:SPEED_100GB"); got != 100000 {
+		t.Errorf("speed: %d", got)
+	}
+	if got := speedMbps("SPEED_2500MB"); got != 2500 {
+		t.Errorf("speed: %d", got)
+	}
+	if got := speedMbps("SPEED_UNKNOWN"); got != 0 {
+		t.Errorf("speed: %d", got)
 	}
 }

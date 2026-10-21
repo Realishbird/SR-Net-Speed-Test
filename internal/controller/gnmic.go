@@ -55,12 +55,12 @@ func WriteGnmicConfig(cfg Config, path string, ports map[string][]string) (int, 
 		}
 		names := gnmicPortList(ports[sw.Name])
 		if len(names) == 0 {
-			b.WriteString("    subscriptions: [counters]\n")
+			b.WriteString("    subscriptions: [counters, lldp]\n")
 			continue
 		}
 		// One transceiver subscription per switch, since the port set is the switch's own.
 		sub := "transceivers-" + strings.ToLower(sw.Name)
-		fmt.Fprintf(&b, "    subscriptions: [counters, %s]\n", yamlStr(sub))
+		fmt.Fprintf(&b, "    subscriptions: [counters, lldp, %s]\n", yamlStr(sub))
 		fmt.Fprintf(&xcvr, "  %s:\n    paths:\n", yamlStr(sub))
 		for _, p := range names {
 			fmt.Fprintf(&xcvr, "      - /openconfig-platform:components/component[name=%s]/transceiver/state\n", p)
@@ -85,10 +85,17 @@ subscriptions:
     paths:
       - /openconfig-interfaces:interfaces/interface/state/counters
       - /openconfig-interfaces:interfaces/interface/state/oper-status
-      - /openconfig-interfaces:interfaces/interface/ethernet/state/negotiated-port-speed
+      - /openconfig-interfaces:interfaces/interface/ethernet/state/port-speed
     mode: stream
     stream-mode: sample
     sample-interval: 30s
+    encoding: json_ietf
+  lldp:
+    paths:
+      - /openconfig-lldp:lldp/interfaces/interface/neighbors/neighbor/state
+    mode: stream
+    stream-mode: sample
+    sample-interval: 60s
     encoding: json_ietf
 `)
 	b.WriteString(xcvr.String())

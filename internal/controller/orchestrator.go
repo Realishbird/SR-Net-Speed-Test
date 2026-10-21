@@ -61,6 +61,9 @@ type Orchestrator struct {
 	// switches lists the configured switches, for per-leg switch counters.
 	// Nil when the server has not wired it (tests).
 	switches func() []SwitchConfig
+	// lldp completes host ports' switch neighbours from the switch side.
+	// Nil when the server has not wired it (tests).
+	lldp func(ctx context.Context, hosts []hostRec)
 
 	mu       sync.Mutex
 	portLock map[int64]int64        // port id -> run id
@@ -397,6 +400,9 @@ func (o *Orchestrator) Start(ctx context.Context, spec api.RunSpec) (int64, erro
 	hosts, err := o.store.Hosts(ctx)
 	if err != nil {
 		return 0, err
+	}
+	if o.lldp != nil {
+		o.lldp(ctx, hosts)
 	}
 	plans, err := plan(hosts, spec)
 	if err != nil {

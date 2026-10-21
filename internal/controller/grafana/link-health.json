@@ -134,7 +134,7 @@
     },
     {
      "refId": "B",
-     "expr": "increase({__name__=~\"srnet_nic_rx_(corrected_bits_phy|fec_corrected_blocks_phy|fec_corrected_bits|corrected_bits)\",host=~\"$host\"}[5m])",
+     "expr": "increase({__name__=~\"srnet_nic_rx_(corrected_bits_phy|fec_corrected_blocks_phy|fec_corrected_blocks|fec_uncorrectable_blocks|fec_corrected_bits|corrected_bits)\",host=~\"$host\"}[5m])",
      "legendFormat": "{{host}} {{netdev}} {{__name__}}"
     },
     {

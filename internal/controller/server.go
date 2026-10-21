@@ -50,6 +50,8 @@ type Server struct {
 	// nothing; a changed password hash invalidates the entry by itself.
 	adminOK     [32]byte
 	adminOKHash string
+	lldp        map[string]lldpEntry // switch-side LLDP table, see cachedLLDP
+	lldpAt      time.Time
 }
 
 func NewServer(ctx context.Context, cfg Config) (*Server, error) {
@@ -71,6 +73,7 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 		agentCache: map[string]int64{}, portCache: map[int64]map[string]portMeta{}, hostName: map[int64]string{},
 	}
 	orch.switches = s.switchList
+	orch.lldp = s.fillLLDP
 	s.refreshPortCache(ctx)
 	s.writeGnmic(ctx)
 	go al.loop(ctx)
@@ -87,6 +90,7 @@ func (s *Server) gnmicPorts(ctx context.Context) map[string][]string {
 	out := map[string][]string{}
 	switches := s.switchList()
 	if hosts, err := s.store.Hosts(ctx); err == nil {
+		s.fillLLDP(ctx, hosts)
 		for _, h := range hosts {
 			for _, p := range h.Ports {
 				if name := resolveSwitchName(switches, p.LLDPSwitch); name != "" && p.LLDPPort != "" {
@@ -366,6 +370,7 @@ func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
+	s.fillLLDP(r.Context(), hosts)
 	out := make([]api.Host, len(hosts))
 	for i, h := range hosts {
 		h.Online = s.hub.online(h.ID)
