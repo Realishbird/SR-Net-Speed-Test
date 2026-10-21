@@ -436,18 +436,23 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "srnet_switch_rx_gbps",
-     "legendFormat": "{{switch}} {{port}} {{interface_name}}"
+     "expr": "srnet_switch_rx_gbps > 0.05",
+     "legendFormat": "{{switch}} {{port}} in"
     },
     {
      "refId": "B",
-     "expr": "srnet_switch_tx_gbps",
-     "legendFormat": "{{switch}} {{port}} {{interface_name}}"
+     "expr": "srnet_switch_tx_gbps > 0.05",
+     "legendFormat": "{{switch}} {{port}} out"
     },
     {
      "refId": "C",
-     "expr": "rate(srnet_gnmi_in_octets[30s])*8/1e9",
-     "legendFormat": "{{switch}} {{port}} {{interface_name}}"
+     "expr": "rate({__name__=~\"srnet_gnmi_.*_in_octets\"}[2m])*8/1e9 > 0.05",
+     "legendFormat": "{{source}} {{interface_name}} in"
+    },
+    {
+     "refId": "D",
+     "expr": "rate({__name__=~\"srnet_gnmi_.*_out_octets\"}[2m])*8/1e9 > 0.05",
+     "legendFormat": "{{source}} {{interface_name}} out"
     }
    ]
   }
