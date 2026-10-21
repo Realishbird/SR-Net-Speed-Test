@@ -5,6 +5,7 @@ package controller
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 )
@@ -32,6 +33,8 @@ type Config struct {
 	// Switches to collect port counters from: gNMI through gnmic when GNMIUser
 	// is set, SNMP v1/v2c from the controller itself when SNMPCommunity is set.
 	Switches []SwitchConfig `json:"switches,omitempty"`
+
+	path string // file this config was loaded from, for SaveBack
 }
 
 type SwitchConfig struct {
@@ -63,11 +66,20 @@ func DefaultConfig() Config {
 
 func LoadConfig(path string) (Config, error) {
 	c := DefaultConfig()
+	c.path = path
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return c, err
 	}
 	return c, json.Unmarshal(b, &c)
+}
+
+// SaveBack writes the config to the file it was loaded from.
+func (c Config) SaveBack() error {
+	if c.path == "" {
+		return errors.New("config was not loaded from a file")
+	}
+	return c.Save(c.path)
 }
 
 func (c Config) Save(path string) error {

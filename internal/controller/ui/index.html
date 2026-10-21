@@ -124,6 +124,7 @@ textarea { width:100%; font:12.5px/1.5 var(--mono); resize:vertical; }
   <a href="#new" data-page="new"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg><span class="t">New run</span></a>
   <a href="#suites" data-page="suites"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/></svg><span class="t">Suites</span></a>
   <a href="#fleet" data-page="fleet"><svg viewBox="0 0 24 24"><path d="M12 3v12M8 11l4 4 4-4"/><path d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg><span class="t">Fleet</span></a>
+  <a href="#switches" data-page="switches"><svg viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="10" rx="2"/><path d="M6 11h.01M9 11h.01M12 11h.01M15 11h.01M18 11h.01M6 14h12"/></svg><span class="t">Switches</span></a>
   <a href="#alerts" data-page="alerts"><svg viewBox="0 0 24 24"><path d="M12 3l9.5 17h-19z"/><path d="M12 10v4M12 17h.01"/></svg><span class="t">Alerts</span><span class="badge fail" id="alert-count" style="display:none"></span></a>
   <a id="grafana" href="#" target="_blank"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 15l3-4 3 2 4-6"/></svg><span class="t">Grafana</span></a>
   <div class="foot"><span id="clock"></span><button class="sm" onclick="toggleTheme()">Toggle theme</button></div>
@@ -213,6 +214,7 @@ function route() {
   if (h === '#new') return go(pageNew);
   if (h === '#suites') return go(pageSuites);
   if (h === '#fleet') return go(pageFleet);
+  if (h === '#switches') return go(pageSwitches);
   if (h === '#alerts') return go(pageAlerts);
   return go(pageOverview);
 }
@@ -506,6 +508,64 @@ function startUpdate(version) {
   modal({ title: 'Update agents to ' + version, body: `<div class="row"><label>Hosts <input id="upd-hosts" placeholder="all hosts" style="width:360px"></label></div><p class="help" style="margin-top:12px">Leave empty for every host, or list names and <span class="mono">tag:&lt;tag&gt;</span> selectors. Hosts busy with a test are waited for; each host must report the new version before the next one starts.</p>`,
     actions: [{ label: 'Cancel' }, { label: 'Start update', cls: 'primary', close: false, run: async () => { try { const j = await api('POST', '/updates', { version, hosts: list($('#upd-hosts').value) }); toast(`Update job ${j.id} started`, 'pass'); closeModal(); refreshFn?.(); } catch (e) { fail(e); } } }] });
 }
+
+/* ---------- switches ---------- */
+async function pageSwitches(token) {
+  if (!mount(token, `<div class="page-head"><h1>Switches</h1><span class="spacer"></span><button class="primary" onclick="editSwitch()">Add switch</button></div>
+    <p class="help">Enterprise SONiC switches the controller reads port counters from. gNMI streams every 5 s through gnmic (preferred); SNMP v2c is polled every 30 s and works with just a read-only community. The switch is only ever read. Hosts' LLDP matches their ports to switch ports automatically.</p>
+    <div class="tbl"><table><thead><tr><th>Name</th><th>Address</th><th>SNMP</th><th>gNMI</th><th></th></tr></thead><tbody id="switches"></tbody></table></div>`)) return;
+  const refresh = async () => {
+    const list = await api('GET', '/switches');
+    window._switches = list;
+    const probe = p => !p ? '<span class="muted">off</span>' : `${badge(p.ok ? 'ok' : (p.at || p.series ? 'failing' : 'pending'), p.ok ? 'pass' : (p.at ? 'fail' : 'muted'))} <span class="muted">${esc(p.message)}${p.at ? ' · ' + ago(p.at) : ''}</span>`;
+    set('switches', list.length ? list.map(sw => `<tr><td><b>${esc(sw.name)}</b></td><td class="mono">${esc(sw.address)}</td>
+      <td class="wrap">${probe(sw.snmp)}${sw.has_snmp ? ` <span class="chip">v${esc(sw.snmp_version || '2c')}</span>` : ''}</td>
+      <td class="wrap">${probe(sw.gnmi)}${sw.gnmi_user ? ` <span class="chip">${esc(sw.gnmi_user)}@:${sw.gnmi_port || 8080}${sw.gnmi_tls ? ' tls' : ''}</span>` : ''}</td>
+      <td style="text-align:right;white-space:nowrap"><button class="sm" onclick="testSwitch('${esc(sw.name)}')">Test</button> <button class="sm" onclick="editSwitch('${esc(sw.name)}')">Edit</button> <button class="sm danger" onclick="delSwitch('${esc(sw.name)}')">Remove</button></td></tr>`).join('')
+      : `<tr><td colspan="5" class="empty">No switches yet. Click "Add switch"; you need the switch's management IP and a read-only SNMP community, or a gNMI user and password.</td></tr>`);
+  };
+  await refresh(); setRefresh(refresh, 10000);
+}
+function editSwitch(name) {
+  const sw = (window._switches || []).find(s => s.name === name) || { name: '', address: '', has_snmp: true, snmp_version: '2c', gnmi_port: 8080, gnmi_tls: true, gnmi_user: '' };
+  const editing = !!name;
+  modal({ title: editing ? 'Edit switch ' + name : 'Add switch', body: `
+    <div class="row"><label>Name <input id="sw-name" value="${esc(sw.name)}" placeholder="z9864f" style="width:180px" ${editing ? 'readonly' : ''}></label>
+      <label>Management IP or hostname <input id="sw-addr" value="${esc(sw.address)}" placeholder="10.0.0.2" style="width:220px"></label></div>
+    <h2 style="font-size:13px;margin:18px 0 6px;color:var(--muted);text-transform:uppercase">SNMP (fallback, 30 s)</h2>
+    <div class="row"><label class="inline"><input type="checkbox" id="sw-snmp" ${sw.has_snmp ? 'checked' : ''}> Enabled</label>
+      <label>Version <select id="sw-snmpver"><option value="2c" ${sw.snmp_version !== '1' ? 'selected' : ''}>2c</option><option value="1" ${sw.snmp_version === '1' ? 'selected' : ''}>1</option></select></label>
+      <label>Read-only community <input id="sw-comm" type="password" placeholder="${sw.has_snmp && editing ? 'unchanged' : 'srnetro'}" style="width:180px"></label></div>
+    <h2 style="font-size:13px;margin:18px 0 6px;color:var(--muted);text-transform:uppercase">gNMI (preferred, 5 s streaming)</h2>
+    <div class="row"><label class="inline"><input type="checkbox" id="sw-gnmi" ${sw.gnmi_user ? 'checked' : ''}> Enabled</label>
+      <label>Username <input id="sw-user" value="${esc(sw.gnmi_user || '')}" placeholder="admin" style="width:140px"></label>
+      <label>Password <input id="sw-pass" type="password" placeholder="${sw.has_gnmi_password ? 'unchanged' : ''}" style="width:160px"></label>
+      <label>Port <input id="sw-port" type="number" value="${sw.gnmi_port || 8080}" style="width:90px"></label>
+      <label class="inline"><input type="checkbox" id="sw-tls" ${sw.gnmi_tls !== false ? 'checked' : ''}> TLS</label></div>
+    <p class="help" style="margin-top:14px">On Enterprise SONiC the telemetry (gNMI) server is on by default: port 8080, TLS with a self-signed certificate, password authentication with the switch's own user accounts, in the mgmt VRF. Check it with <span class="mono">show ip telemetry</span> on the switch. The certificate is not verified, so the switch's management network must be trusted.</p>`,
+    actions: [{ label: 'Cancel' }, { label: editing ? 'Save and test' : 'Add and test', cls: 'primary', close: false, run: async () => {
+      const body = { name: $('#sw-name').value.trim(), address: $('#sw-addr').value.trim(),
+        snmp_enabled: $('#sw-snmp').checked, snmp_version: $('#sw-snmpver').value, snmp_community: $('#sw-comm').value,
+        gnmi_enabled: $('#sw-gnmi').checked, gnmi_user: $('#sw-user').value, gnmi_password: $('#sw-pass').value, gnmi_port: +$('#sw-port').value || 8080, gnmi_tls: $('#sw-tls').checked };
+      try {
+        const r = await api('PUT', '/switches/' + encodeURIComponent(body.name), body);
+        closeModal(); refreshFn?.();
+        if (r.snmp && !r.snmp.ok) toast('Saved, but SNMP failed: ' + r.snmp.message, 'warn', 9000);
+        else toast('Saved' + (r.snmp ? '; SNMP sees ' + r.snmp.ports + ' interfaces' : '') + (r.gnmi ? '; gNMI data appears within a minute once gnmic connects' : ''), 'pass', 7000);
+      } catch (e) { fail(e); }
+    } }] });
+}
+async function testSwitch(name) {
+  try {
+    const r = await api('POST', '/switches/' + encodeURIComponent(name) + '/test');
+    const parts = [];
+    if (r.snmp) parts.push('SNMP ' + (r.snmp.ok ? 'ok, ' : 'failed: ') + r.snmp.message);
+    if (r.gnmi) parts.push('gNMI ' + (r.gnmi.ok ? 'ok, ' : '') + r.gnmi.message);
+    toast(parts.join(' · '), (r.snmp && !r.snmp.ok) || (r.gnmi && !r.gnmi.ok) ? 'warn' : 'pass', 9000);
+    refreshFn?.();
+  } catch (e) { fail(e); }
+}
+function delSwitch(name) { confirmBox('Remove switch', `Stop collecting from "${name}"? Its history stays in Grafana.`, 'Remove', async () => { await api('DELETE', '/switches/' + encodeURIComponent(name)); refreshFn?.(); }); }
 
 /* ---------- alerts ---------- */
 async function pageAlerts(token) {

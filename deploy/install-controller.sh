@@ -85,6 +85,29 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
+# The controller runs as the srnet user and cannot restart services, so a path
+# unit restarts gnmic whenever the controller rewrites its config (switches
+# added or removed from the UI).
+cat > /etc/systemd/system/gnmic-restart.service <<'EOF'
+[Unit]
+Description=Restart gnmic after its config changed
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl restart gnmic.service
+EOF
+cat > /etc/systemd/system/gnmic-restart.path <<'EOF'
+[Unit]
+Description=Watch the gnmic config written by srnet-controller
+
+[Path]
+PathChanged=/etc/srnet/gnmic.yaml
+Unit=gnmic-restart.service
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 log "Installing srnet-controller and srnet CLI ($VERSION)"
 if [ "$VERSION" = "latest" ]; then
   BASE="https://github.com/$REPO/releases/latest/download"
@@ -220,6 +243,7 @@ fi
 systemctl daemon-reload
 systemctl enable --now victoriametrics grafana-server srnet-controller >/dev/null
 systemctl enable gnmic >/dev/null 2>&1 || true
+systemctl enable --now gnmic-restart.path >/dev/null 2>&1 || true
 systemctl restart srnet-controller
 systemctl restart gnmic 2>/dev/null || true
 
@@ -229,7 +253,7 @@ echo "  srnet-controller: $(systemctl is-active srnet-controller)"
 echo "  victoriametrics:  $(systemctl is-active victoriametrics)"
 echo "  grafana:          $(systemctl is-active grafana-server) (port 3000, login admin/admin on first visit)"
 echo "  postgresql:       $(systemctl is-active postgresql)"
-echo "  gnmic:            $(systemctl is-active gnmic) (idle until a switch with gNMI is added: srnet-controller switch --help)"
+echo "  gnmic:            $(systemctl is-active gnmic) (idle until a switch with gNMI is added on the Switches page)"
 echo "  web UI:           https://<this host>:8443 (admin login)"
 for svc in srnet-controller victoriametrics grafana-server postgresql; do
   if [ "$(systemctl is-active "$svc")" != "active" ]; then

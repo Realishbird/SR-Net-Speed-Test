@@ -98,12 +98,16 @@ Grafana is provisioned with VictoriaMetrics as its data source and three dashboa
 
 ## Switch telemetry (Enterprise SONiC)
 
+Open **Switches** in the web UI, click **Add switch**, and enter the management IP plus a read-only SNMP community, a gNMI user and password, or both. Saving tests SNMP straight away; gNMI data shows within a minute. The same thing from the shell:
+
 ```bash
 srnet-controller switch --name z9864f --address 10.0.0.2 --snmp-community public --gnmi-user admin --gnmi-password secret
-systemctl restart srnet-controller gnmic
+systemctl restart srnet-controller
 ```
 
-With gNMI credentials the controller writes `/etc/srnet/gnmic.yaml` and `gnmic` streams OpenConfig interface counters and transceiver state every 5 s as `srnet_gnmi_*` metrics. With only an SNMP community the controller polls IF-MIB every 30 s as `srnet_switch_*` metrics (octets, errors, discards, oper status, derived Gbps). Both can be set; gNMI is preferred. The switch is only ever read.
+With gNMI credentials the controller writes `/etc/srnet/gnmic.yaml` (a path unit restarts `gnmic` when it changes) and `gnmic` streams OpenConfig interface counters and transceiver state every 5 s as `srnet_gnmi_*` metrics. With only an SNMP community the controller polls IF-MIB every 30 s as `srnet_switch_*` metrics (octets, errors, discards, oper status, derived Gbps). Both can be set; gNMI is preferred. The switch is only ever read.
+
+On Enterprise SONiC the telemetry server is on by default (port 8080, TLS with a self-signed certificate, password authentication with the switch's user accounts, mgmt VRF); `show ip telemetry` on the switch confirms it. For SNMP, create a read-only community, for example `snmp-server community srnetro group ro` in `configure terminal`. To test gNMI from the controller: `gnmic -a <switch>:8080 -u admin -p '<password>' --skip-verify capabilities`.
 
 Hosts run `lldpd`, so each port's switch neighbour and port id show in `srnet hosts` and the UI without a cable map.
 
