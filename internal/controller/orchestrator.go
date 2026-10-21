@@ -338,6 +338,9 @@ func plan(hosts []hostRec, spec api.RunSpec) ([]*legPlan, error) {
 		if se.ExpectedGbps > 0 && (exp == 0 || se.ExpectedGbps < exp) {
 			exp = se.ExpectedGbps
 		}
+		if spec.Bidir {
+			exp *= 2 // bidirectional rates add both directions, so line rate is counted twice
+		}
 		base = append(base, &legPlan{
 			client: ce, server: se,
 			leg: api.Leg{ClientHost: ce.Host, ClientIP: ce.IP, ServerHost: se.Host, ServerIP: se.IP, Fabric: fabric, ExpectedGbps: exp},
@@ -660,10 +663,19 @@ func allClientsDone(ps []*legPlan) bool {
 	return true
 }
 
+// counterDir is which byte counter on a port measures a leg.
+type counterDir int
+
+const (
+	dirRx counterDir = iota
+	dirTx
+	dirBoth // bidirectional: tx plus rx, to match the tool's combined figure
+)
+
 // counterSide picks the port whose byte counter measures one leg alone within
-// its stage: the server port in a fan-out, the client port in a fan-in. tx is
+// its stage: the server port in a fan-out, the client port in a fan-in. dir is
 // the direction data flows on that port; nic selects netdev counters for IP tests.
-func counterSide(ar *activeRun, p *legPlan) (portID int64, tx, nic, ok bool) {
+func counterSide(ar *activeRun, p *legPlan) (portID int64, dir counterDir, nic, ok bool) {
 	uses := map[int64]int{}
 	for _, q := range ar.stages[p.stage] {
 		uses[q.client.PortID]++
@@ -671,17 +683,20 @@ func counterSide(ar *activeRun, p *legPlan) (portID int64, tx, nic, ok bool) {
 	}
 	nic = api.IsIP(ar.spec.Test)
 	// write/send/tcp/udp: data flows client -> server. read: server -> client.
-	serverTx := ar.spec.Test == "read" || ar.spec.Test == "read_lat"
+	serverDir, clientDir := dirRx, dirTx
+	if ar.spec.Test == "read" || ar.spec.Test == "read_lat" {
+		serverDir, clientDir = dirTx, dirRx
+	}
 	if ar.spec.Bidir {
-		serverTx = false // measure the receive side on either end
+		serverDir, clientDir = dirBoth, dirBoth
 	}
 	if uses[p.server.PortID] == 1 {
-		return p.server.PortID, serverTx, nic, true
+		return p.server.PortID, serverDir, nic, true
 	}
 	if uses[p.client.PortID] == 1 {
-		return p.client.PortID, !serverTx, nic, true
+		return p.client.PortID, clientDir, nic, true
 	}
-	return 0, false, nic, false
+	return 0, dirRx, nic, false
 }
 
 func (o *Orchestrator) score(ar *activeRun) (api.RunSummary, string) {
@@ -709,8 +724,8 @@ func (o *Orchestrator) score(ar *activeRun) (api.RunSummary, string) {
 		if !lat && !p.startAt.IsZero() {
 			from := p.startAt.Add(2 * time.Second)
 			to := p.startAt.Add(time.Duration(ar.spec.DurationSec-1) * time.Second)
-			if id, tx, nic, ok := counterSide(ar, p); ok {
-				l.CounterGbps = o.metrics.counterGbps(id, from, to, tx, nic)
+			if id, dir, nic, ok := counterSide(ar, p); ok {
+				l.CounterGbps = o.metrics.counterGbps(id, from, to, dir, nic)
 			} else {
 				l.Note = "both ports shared with other legs; no per-leg counter rate"
 			}
@@ -788,15 +803,18 @@ func (o *Orchestrator) Live(r *api.Run) {
 		if p.startAt.IsZero() || (p.clientRes != nil && p.serverRes != nil) {
 			continue // not in the running stage
 		}
-		if id, tx, nic, ok := counterSide(ar, p); ok {
-			t, rx := o.metrics.live(id)
+		if id, dir, nic, ok := counterSide(ar, p); ok {
+			tx, rx := o.metrics.live(id)
 			if nic {
-				t, rx = o.metrics.liveNIC(id)
+				tx, rx = o.metrics.liveNIC(id)
 			}
-			if tx {
-				r.Legs[i].LiveGbps = t
-			} else {
+			switch dir {
+			case dirTx:
+				r.Legs[i].LiveGbps = tx
+			case dirRx:
 				r.Legs[i].LiveGbps = rx
+			default:
+				r.Legs[i].LiveGbps = tx + rx
 			}
 			r.Summary.LiveGbps += r.Legs[i].LiveGbps
 		}

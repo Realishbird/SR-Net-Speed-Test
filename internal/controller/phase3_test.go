@@ -96,7 +96,7 @@ func TestRunReports(t *testing.T) {
 		Spec:    api.RunSpec{Test: "write", DurationSec: 60, MsgSize: 65536, QPs: 1, PassPct: 90},
 		Summary: api.RunSummary{ToolGbps: 1580.2, CounterGbps: 1575.9, ByFabric: map[string]float64{"A": 790, "B": 790}},
 		Legs: []api.Leg{
-			{Index: 0, ClientHost: "770AP", ClientIP: "172.27.100.1", ServerHost: "Spark-01", ServerIP: "172.27.100.11", Fabric: "A", MsgSize: 65536, ExpectedGbps: 200, ToolGbps: 197.5, CounterGbps: 197.1, Verdict: "pass"},
+			{Index: 0, ClientHost: "770AP", ClientIP: "172.27.100.1", ServerHost: "Spark-01", ServerIP: "172.27.100.11", Fabric: "A", MsgSize: 65536, ExpectedGbps: 200, ToolGbps: 197.5, CounterGbps: 197.1234, Verdict: "pass"},
 			{Index: 1, ClientHost: "770AP", ClientIP: "172.27.100.2", ServerHost: "Spark-02 \"b\"", ServerIP: "172.27.100.12", Fabric: "B", MsgSize: 65536, ExpectedGbps: 200, ToolGbps: 150, CounterGbps: 149.8,
 				ErrorDeltas: map[string]int64{"out_of_sequence": 3, "local_ack_timeout_err": 1}, Verdict: "warn", Note: "75% of line rate <script>"},
 		}}
@@ -107,6 +107,10 @@ func TestRunReports(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(csvOut.String()), "\n")
 	if len(lines) != 3 || !strings.HasPrefix(lines[0], "run_id,run_name,test,status,verdict,leg,stage,client,") {
 		t.Fatalf("csv:\n%s", csvOut.String())
+	}
+	// Gbps rounded to 2 places; latency, retransmit, loss and jitter columns empty for a write test.
+	if !strings.Contains(lines[1], ",200,197.5,197.12,,,,,,,,,,,pass,") {
+		t.Errorf("csv row 1: %s", lines[1])
 	}
 	if !strings.Contains(lines[2], `"Spark-02 ""b"""`) || !strings.Contains(lines[2], "local_ack_timeout_err=1;out_of_sequence=3") {
 		t.Errorf("csv row 2: %s", lines[2])

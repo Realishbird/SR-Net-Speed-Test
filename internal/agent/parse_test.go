@@ -203,6 +203,11 @@ func TestParseIperf3(t *testing.T) {
 	if !ok || r.Gbps < 93.7 || r.Gbps > 93.9 || r.Retransmits != 17 {
 		t.Errorf("tcp = %+v ok=%v", r, ok)
 	}
+	bidir := `{"end":{"sum_sent":{"bits_per_second":9.4e10,"retransmits":3},"sum_received":{"bits_per_second":9.7e10},"sum_sent_bidir_reverse":{"bits_per_second":9.6e10,"retransmits":4},"sum_received_bidir_reverse":{"bits_per_second":9.6e10}}}`
+	r, ok = ParseIperf3(bidir)
+	if !ok || r.Gbps < 192.9 || r.Gbps > 193.1 || r.Retransmits != 7 {
+		t.Errorf("bidir = %+v ok=%v", r, ok)
+	}
 	udp := `{"end":{"sum":{"bits_per_second":2.5e10,"jitter_ms":0.012,"lost_percent":0.4}}}`
 	r, ok = ParseIperf3(udp)
 	if !ok || r.Gbps != 25 || r.LossPct != 0.4 || r.JitterMs != 0.012 {

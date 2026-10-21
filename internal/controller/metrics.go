@@ -157,9 +157,9 @@ func (m *metrics) liveNIC(portID int64) (tx, rx float64) {
 }
 
 // counterGbps is the average rate on a port between from and to, from the
-// byte counters. tx selects the transmit direction; nic selects the netdev
-// counters (IP traffic) instead of the RDMA port counters.
-func (m *metrics) counterGbps(portID int64, from, to time.Time, tx, nic bool) float64 {
+// byte counters. dir selects transmit, receive or both added together; nic
+// selects the netdev counters (IP traffic) instead of the RDMA port counters.
+func (m *metrics) counterGbps(portID int64, from, to time.Time, dir counterDir, nic bool) float64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var a, b *bytesPoint
@@ -179,19 +179,19 @@ func (m *metrics) counterGbps(portID int64, from, to time.Time, tx, nic bool) fl
 	if dt < 1 {
 		return 0
 	}
-	var d float64
-	switch {
-	case nic && tx:
-		d = b.nicTx - a.nicTx
-	case nic:
-		d = b.nicRx - a.nicRx
-	case tx:
-		d = b.tx - a.tx
-	default:
-		d = b.rx - a.rx
+	tx, rx := b.tx-a.tx, b.rx-a.rx
+	if nic {
+		tx, rx = b.nicTx-a.nicTx, b.nicRx-a.nicRx
 	}
-	if d < 0 {
-		return 0
+	if tx < 0 || rx < 0 {
+		return 0 // counter reset
+	}
+	d := rx
+	switch dir {
+	case dirTx:
+		d = tx
+	case dirBoth:
+		d = tx + rx
 	}
 	return d * 8 / dt / 1e9
 }

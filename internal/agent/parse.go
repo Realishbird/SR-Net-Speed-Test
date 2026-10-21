@@ -233,6 +233,14 @@ func ParseIperf3(out string) (Iperf3Result, bool) {
 				BitsPerSecond float64 `json:"bits_per_second"`
 				Retransmits   int64   `json:"retransmits"`
 			} `json:"sum_sent"`
+			// --bidir reports the reverse direction separately; perftest -b
+			// reports both added together, so iperf3 does the same here.
+			SumReceivedReverse *struct {
+				BitsPerSecond float64 `json:"bits_per_second"`
+			} `json:"sum_received_bidir_reverse"`
+			SumSentReverse *struct {
+				Retransmits int64 `json:"retransmits"`
+			} `json:"sum_sent_bidir_reverse"`
 			Sum *struct {
 				BitsPerSecond float64 `json:"bits_per_second"`
 				JitterMs      float64 `json:"jitter_ms"`
@@ -248,6 +256,12 @@ func ParseIperf3(out string) (Iperf3Result, bool) {
 		r.Gbps = doc.End.SumReceived.BitsPerSecond / 1e9
 		if doc.End.SumSent != nil {
 			r.Retransmits = doc.End.SumSent.Retransmits
+		}
+		if rev := doc.End.SumReceivedReverse; rev != nil {
+			r.Gbps += rev.BitsPerSecond / 1e9
+		}
+		if rev := doc.End.SumSentReverse; rev != nil {
+			r.Retransmits += rev.Retransmits
 		}
 	case doc.End.Sum != nil:
 		r.Gbps = doc.End.Sum.BitsPerSecond / 1e9

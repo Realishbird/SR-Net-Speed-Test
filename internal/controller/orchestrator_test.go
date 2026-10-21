@@ -119,6 +119,47 @@ func TestScoreUsesCountersAndErrorDeltas(t *testing.T) {
 	}
 }
 
+func TestScoreBidirCountsBothDirections(t *testing.T) {
+	m := newMetrics("")
+	o := &Orchestrator{metrics: m}
+	hosts := lab()
+	hosts[0].Ports[0].SpeedMbps, hosts[1].Ports[0].SpeedMbps = 100000, 100000
+	spec := api.RunSpec{Test: "write", Bidir: true, DurationSec: 60, PassPct: 90, Clients: []string{"Dell Spark 1"}, Servers: []string{"Dell 770AP"}}
+	plans, err := plan(hosts, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both directions add up, so a 100G link is expected to reach 200.
+	if plans[0].leg.ExpectedGbps != 200 {
+		t.Fatalf("expected = %v", plans[0].leg.ExpectedGbps)
+	}
+	start := time.Now().Add(-70 * time.Second)
+	plans[0].startAt = start
+	for sec := 0; sec <= 60; sec++ {
+		b := 1e9 / 8 * float64(sec)
+		m.track(10, api.Sample{Time: start.Add(time.Duration(sec) * time.Second),
+			Values: map[string]float64{"rdma_tx_bytes": 98 * b, "rdma_rx_bytes": 99 * b}})
+	}
+	plans[0].clientRes = &api.LegResult{AvgGbps: 195.3}
+	plans[0].serverRes = &api.LegResult{}
+	ar := &activeRun{id: 1, spec: spec, plans: plans, stages: stagesOf(plans)}
+	sum, verdict := o.score(ar)
+	l := plans[0].leg
+	if verdict != "pass" || l.CounterGbps < 196 || l.CounterGbps > 198 || sum.CounterGbps != l.CounterGbps {
+		t.Errorf("verdict = %s, leg = %+v", verdict, l)
+	}
+	// A link that only reaches line rate one way is a fail in bidirectional mode.
+	plans[0].clientRes.AvgGbps = 100
+	m.ring[10] = nil
+	for sec := 0; sec <= 60; sec++ {
+		m.track(10, api.Sample{Time: start.Add(time.Duration(sec) * time.Second),
+			Values: map[string]float64{"rdma_tx_bytes": 0, "rdma_rx_bytes": 99 * 1e9 / 8 * float64(sec)}})
+	}
+	if _, verdict = o.score(ar); verdict != "fail" {
+		t.Errorf("one-way traffic should fail a bidirectional run, got %s (%+v)", verdict, plans[0].leg)
+	}
+}
+
 func TestFormatLabelsAndMetricNames(t *testing.T) {
 	got := formatLabels(map[string]string{"host": "Dell Spark 1", "fabric": "", "netdev": "enp1s0f0np0"})
 	if got != `{host="Dell Spark 1",netdev="enp1s0f0np0"}` {
@@ -164,8 +205,8 @@ func TestPlanMeshSweepAndSerial(t *testing.T) {
 	}
 	// In a serial matrix each leg has its own stage, so even a shared client port is unshared per stage.
 	ar := &activeRun{spec: serial, plans: plans, stages: stagesOf(plans)}
-	if id, tx, nic, ok := counterSide(ar, plans[0]); !ok || tx || nic || id != 20 {
-		t.Errorf("counterSide = %d %v %v %v", id, tx, nic, ok)
+	if id, dir, nic, ok := counterSide(ar, plans[0]); !ok || dir != dirRx || nic || id != 20 {
+		t.Errorf("counterSide = %d %v %v %v", id, dir, nic, ok)
 	}
 }
 
