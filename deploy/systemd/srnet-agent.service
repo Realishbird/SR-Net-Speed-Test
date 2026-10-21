@@ -1,0 +1,27 @@
+[Unit]
+Description=SR-Net-Speed-Test agent
+Documentation=https://github.com/Realishbird/SR-Net-Speed-Test
+After=network-online.target chrony.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=srnet
+Group=srnet
+ExecStart=/usr/local/bin/srnet-agent run
+Restart=always
+RestartSec=5
+# perftest pins memory for RDMA; the agent itself needs no root.
+LimitMEMLOCK=infinity
+AmbientCapabilities=CAP_NET_ADMIN CAP_IPC_LOCK CAP_SYS_NICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_IPC_LOCK CAP_SYS_NICE
+NoNewPrivileges=false
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/srnet
+StateDirectory=srnet
+ConfigurationDirectory=srnet
+
+[Install]
+WantedBy=multi-user.target

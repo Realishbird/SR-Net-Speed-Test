@@ -1,0 +1,570 @@
+package controller
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/csv"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"golang.org/x/crypto/bcrypt"
+
+	"github.com/Realishbird/SR-Net-Speed-Test/internal/api"
+	"github.com/Realishbird/SR-Net-Speed-Test/internal/version"
+)
+
+type Server struct {
+	cfg     Config
+	store   *Store
+	hub     *hub
+	metrics *metrics
+	orch    *Orchestrator
+
+	mu         sync.Mutex
+	agentCache map[string]int64              // secret hash -> agent id
+	portCache  map[int64]map[string]portMeta // agent id -> "dev/port" -> meta
+	hostName   map[int64]string
+}
+
+func NewServer(ctx context.Context, cfg Config) (*Server, error) {
+	store, err := OpenStore(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return nil, err
+	}
+	h := newHub()
+	m := newMetrics(cfg.VictoriaMetricsURL)
+	go m.writer(ctx)
+	s := &Server{
+		cfg: cfg, store: store, hub: h, metrics: m, orch: newOrchestrator(store, h, m),
+		agentCache: map[string]int64{}, portCache: map[int64]map[string]portMeta{}, hostName: map[int64]string{},
+	}
+	s.refreshPortCache(ctx)
+	return s, nil
+}
+
+func (s *Server) Close() { s.store.Close() }
+
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
+	mux.HandleFunc("GET /ca.pem", func(w http.ResponseWriter, r *http.Request) { http.ServeFile(w, r, s.cfg.CACert) })
+
+	mux.HandleFunc("POST /api/v1/enroll", s.enroll)
+	mux.HandleFunc("GET /api/v1/agent/tasks", s.agent(s.agentTasks))
+	mux.HandleFunc("POST /api/v1/agent/inventory", s.agent(s.agentInventory))
+	mux.HandleFunc("POST /api/v1/agent/samples", s.agent(s.agentSamples))
+	mux.HandleFunc("POST /api/v1/agent/events", s.agent(s.agentEvent))
+	mux.HandleFunc("POST /api/v1/agent/results", s.agent(s.agentResult))
+
+	mux.HandleFunc("GET /api/v1/status", s.admin(s.status))
+	mux.HandleFunc("GET /api/v1/hosts", s.admin(s.listHosts))
+	mux.HandleFunc("PATCH /api/v1/hosts/{id}", s.admin(s.patchHost))
+	mux.HandleFunc("DELETE /api/v1/hosts/{id}", s.admin(s.deleteHost))
+	mux.HandleFunc("PATCH /api/v1/ports/{id}", s.admin(s.patchPort))
+	mux.HandleFunc("POST /api/v1/hosts/import", s.admin(s.importHosts))
+	mux.HandleFunc("POST /api/v1/tokens", s.admin(s.createToken))
+	mux.HandleFunc("GET /api/v1/runs", s.admin(s.listRuns))
+	mux.HandleFunc("POST /api/v1/runs", s.admin(s.createRun))
+	mux.HandleFunc("GET /api/v1/runs/{id}", s.admin(s.getRun))
+	mux.HandleFunc("POST /api/v1/runs/{id}/cancel", s.admin(s.cancelRun))
+	return mux
+}
+
+// Auth.
+
+func hashSecret(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+func randomToken(n int) string {
+	b := make([]byte, n)
+	rand.Read(b)
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func (s *Server) admin(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok := r.BasicAuth()
+		if !ok || subtle.ConstantTimeCompare([]byte(user), []byte(s.cfg.AdminUser)) != 1 ||
+			bcrypt.CompareHashAndPassword([]byte(s.cfg.AdminPasswordHash), []byte(pass)) != nil {
+			w.Header().Set("WWW-Authenticate", `Basic realm="srnet"`)
+			httpError(w, http.StatusUnauthorized, "admin login required")
+			return
+		}
+		h(w, r)
+	}
+}
+
+type agentKey struct{}
+
+func (s *Server) agent(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok || tok == "" {
+			httpError(w, http.StatusUnauthorized, "agent token required")
+			return
+		}
+		hash := hashSecret(tok)
+		s.mu.Lock()
+		id, cached := s.agentCache[hash]
+		s.mu.Unlock()
+		if !cached {
+			var err error
+			id, err = s.store.AgentBySecret(r.Context(), hash)
+			if err != nil {
+				httpError(w, http.StatusUnauthorized, "unknown agent")
+				return
+			}
+			s.mu.Lock()
+			s.agentCache[hash] = id
+			s.mu.Unlock()
+		}
+		h(w, r.WithContext(context.WithValue(r.Context(), agentKey{}, id)))
+	}
+}
+
+func agentID(r *http.Request) int64 { return r.Context().Value(agentKey{}).(int64) }
+
+// Agent endpoints.
+
+func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
+	var req api.EnrollRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if req.Inventory.Hostname == "" {
+		httpError(w, http.StatusBadRequest, "hostname missing from inventory")
+		return
+	}
+	if err := s.store.ConsumeToken(r.Context(), hashSecret(req.Token)); err != nil {
+		httpError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	secret := randomToken(32)
+	uid, err := s.store.EnrollAgent(r.Context(), "agt_"+randomToken(9), hashSecret(secret), req.Inventory)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	s.mu.Lock()
+	s.agentCache = map[string]int64{} // a re-enrolled host's old secret must stop working
+	s.mu.Unlock()
+	s.store.Audit(r.Context(), "agent.enroll", map[string]string{"uid": uid, "hostname": req.Inventory.Hostname, "ip": clientIP(r)})
+	writeJSON(w, api.EnrollResponse{AgentID: uid, Secret: secret})
+}
+
+func (s *Server) agentTasks(w http.ResponseWriter, r *http.Request) {
+	wait, _ := strconv.Atoi(r.URL.Query().Get("wait"))
+	if wait <= 0 || wait > 30 {
+		wait = 25
+	}
+	id := agentID(r)
+	s.store.TouchAgent(r.Context(), id)
+	writeJSON(w, s.hub.poll(r.Context(), id, time.Duration(wait)*time.Second))
+}
+
+func (s *Server) agentInventory(w http.ResponseWriter, r *http.Request) {
+	var inv api.Inventory
+	if !readJSON(w, r, &inv) {
+		return
+	}
+	if err := s.store.SaveInventory(r.Context(), agentID(r), inv); err != nil {
+		serverError(w, err)
+		return
+	}
+	s.refreshPortCache(r.Context())
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) refreshPortCache(ctx context.Context) {
+	hosts, err := s.store.Hosts(ctx)
+	if err != nil {
+		log.Printf("port cache: %v", err)
+		return
+	}
+	pc := map[int64]map[string]portMeta{}
+	names := map[int64]string{}
+	for _, h := range hosts {
+		names[h.ID] = h.Name
+		m := map[string]portMeta{}
+		for _, p := range h.Ports {
+			m[p.RdmaDev+"/"+strconv.Itoa(p.PortNum)] = portMeta{PortID: p.ID, Host: h.Name, RdmaDev: p.RdmaDev, PortNum: p.PortNum, Netdev: p.Netdev, Label: p.Label, Fabric: p.Fabric}
+		}
+		pc[h.ID] = m
+	}
+	s.mu.Lock()
+	s.portCache, s.hostName = pc, names
+	s.mu.Unlock()
+}
+
+func (s *Server) agentSamples(w http.ResponseWriter, r *http.Request) {
+	var b api.SampleBatch
+	if !readJSON(w, r, &b) {
+		return
+	}
+	id := agentID(r)
+	s.mu.Lock()
+	ports, host := s.portCache[id], s.hostName[id]
+	s.mu.Unlock()
+	s.metrics.ingest(host, ports, b.Samples)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) agentEvent(w http.ResponseWriter, r *http.Request) {
+	var e api.Event
+	if !readJSON(w, r, &e) {
+		return
+	}
+	if !s.hub.deliver(agentID(r), msg{taskID: e.TaskID, event: &e}) {
+		httpError(w, http.StatusGone, "no run is waiting on this task")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) agentResult(w http.ResponseWriter, r *http.Request) {
+	var res api.LegResult
+	if !readJSON(w, r, &res) {
+		return
+	}
+	if !s.hub.deliver(agentID(r), msg{taskID: res.TaskID, result: &res}) {
+		httpError(w, http.StatusGone, "no run is waiting on this task")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// Admin endpoints.
+
+func (s *Server) status(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"version": version.Version, "public_url": s.cfg.PublicURL, "time": time.Now()})
+}
+
+func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {
+	hosts, err := s.store.Hosts(r.Context())
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	out := make([]api.Host, len(hosts))
+	for i, h := range hosts {
+		h.Online = s.hub.online(h.ID)
+		for j := range h.Ports {
+			h.Ports[j].TxGbps, h.Ports[j].RxGbps = s.metrics.live(h.Ports[j].ID)
+		}
+		out[i] = h.Host
+	}
+	writeJSON(w, out)
+}
+
+func (s *Server) patchHost(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	var u api.HostUpdate
+	if !readJSON(w, r, &u) {
+		return
+	}
+	if u.Name != nil && strings.TrimSpace(*u.Name) == "" {
+		httpError(w, http.StatusBadRequest, "name cannot be empty")
+		return
+	}
+	if err := s.store.UpdateHost(r.Context(), id, u); err != nil {
+		storeError(w, err)
+		return
+	}
+	s.store.Audit(r.Context(), "host.update", map[string]any{"id": id, "update": u})
+	s.refreshPortCache(r.Context())
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) deleteHost(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	if err := s.store.DeleteHost(r.Context(), id); err != nil {
+		serverError(w, err)
+		return
+	}
+	s.mu.Lock()
+	s.agentCache = map[string]int64{}
+	s.mu.Unlock()
+	s.store.Audit(r.Context(), "host.delete", map[string]any{"id": id})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) patchPort(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	var u api.PortUpdate
+	if !readJSON(w, r, &u) {
+		return
+	}
+	if err := s.store.UpdatePort(r.Context(), id, u); err != nil {
+		storeError(w, err)
+		return
+	}
+	s.store.Audit(r.Context(), "port.update", map[string]any{"id": id, "update": u})
+	s.refreshPortCache(r.Context())
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// importHosts applies a CSV of names, tags and port labels. Columns are found by
+// header: host (required: current name or hostname), name, tags (separated by ;),
+// site, rack, ip, label, fabric, expected_gbps. Port columns apply to the port with that ip.
+func (s *Server) importHosts(w http.ResponseWriter, r *http.Request) {
+	rd := csv.NewReader(io.LimitReader(r.Body, 1<<20))
+	rd.TrimLeadingSpace = true
+	rows, err := rd.ReadAll()
+	if err != nil || len(rows) < 2 {
+		httpError(w, http.StatusBadRequest, "expected a CSV with a header row and at least one data row")
+		return
+	}
+	col := map[string]int{}
+	for i, h := range rows[0] {
+		col[strings.ToLower(strings.TrimSpace(h))] = i
+	}
+	if _, ok := col["host"]; !ok {
+		httpError(w, http.StatusBadRequest, `CSV needs a "host" column`)
+		return
+	}
+	get := func(row []string, k string) (string, bool) {
+		i, ok := col[k]
+		if !ok || i >= len(row) || strings.TrimSpace(row[i]) == "" {
+			return "", false
+		}
+		return strings.TrimSpace(row[i]), true
+	}
+	hosts, err := s.store.Hosts(r.Context())
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	var problems []string
+	applied := 0
+	for n, row := range rows[1:] {
+		line := n + 2
+		sel, _ := get(row, "host")
+		var h *hostRec
+		for i := range hosts {
+			if strings.EqualFold(hosts[i].Name, sel) || strings.EqualFold(hosts[i].Hostname, sel) {
+				h = &hosts[i]
+				break
+			}
+		}
+		if h == nil {
+			problems = append(problems, fmt.Sprintf("line %d: no enrolled host %q", line, sel))
+			continue
+		}
+		var hu api.HostUpdate
+		if v, ok := get(row, "name"); ok {
+			hu.Name = &v
+		}
+		if v, ok := get(row, "tags"); ok {
+			var tags []string
+			for _, t := range strings.Split(v, ";") {
+				if t = strings.TrimSpace(t); t != "" {
+					tags = append(tags, t)
+				}
+			}
+			hu.Tags = &tags
+		}
+		if v, ok := get(row, "site"); ok {
+			hu.Site = &v
+		}
+		if v, ok := get(row, "rack"); ok {
+			hu.Rack = &v
+		}
+		if err := s.store.UpdateHost(r.Context(), h.ID, hu); err != nil {
+			problems = append(problems, fmt.Sprintf("line %d: %v", line, err))
+			continue
+		}
+		if ip, ok := get(row, "ip"); ok {
+			var portID int64
+			for _, p := range h.Ports {
+				for _, a := range p.Addrs {
+					if pip, _, err := net.ParseCIDR(a); err == nil && pip.String() == ip {
+						portID = p.ID
+					}
+				}
+			}
+			if portID == 0 {
+				problems = append(problems, fmt.Sprintf("line %d: %s has no port with ip %s", line, sel, ip))
+				continue
+			}
+			var pu api.PortUpdate
+			if v, ok := get(row, "label"); ok {
+				pu.Label = &v
+			}
+			if v, ok := get(row, "fabric"); ok {
+				pu.Fabric = &v
+			}
+			if v, ok := get(row, "expected_gbps"); ok {
+				f, err := strconv.ParseFloat(v, 64)
+				if err != nil {
+					problems = append(problems, fmt.Sprintf("line %d: expected_gbps %q is not a number", line, v))
+					continue
+				}
+				pu.ExpectedGbps = &f
+			}
+			if err := s.store.UpdatePort(r.Context(), portID, pu); err != nil {
+				problems = append(problems, fmt.Sprintf("line %d: %v", line, err))
+				continue
+			}
+		}
+		applied++
+	}
+	s.store.Audit(r.Context(), "host.import", map[string]any{"rows": applied, "problems": problems})
+	s.refreshPortCache(r.Context())
+	writeJSON(w, map[string]any{"applied": applied, "problems": problems})
+}
+
+func (s *Server) createToken(w http.ResponseWriter, r *http.Request) {
+	tok := randomToken(24)
+	exp := time.Now().Add(time.Hour)
+	if err := s.store.CreateToken(r.Context(), hashSecret(tok), exp); err != nil {
+		serverError(w, err)
+		return
+	}
+	fp, err := CAFingerprint(s.cfg.CACert)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	cmd := fmt.Sprintf("curl -fsSL %s | sudo bash -s -- --controller %s --token %s --ca-sha256 %s",
+		s.cfg.InstallScriptURL, s.cfg.PublicURL, tok, fp)
+	s.store.Audit(r.Context(), "token.create", map[string]any{"expires_at": exp})
+	writeJSON(w, api.TokenResponse{Token: tok, ExpiresAt: exp, InstallCommand: cmd})
+}
+
+func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
+	runs, err := s.store.Runs(r.Context(), 50)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if runs == nil {
+		runs = []api.Run{}
+	}
+	writeJSON(w, runs)
+}
+
+func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
+	var spec api.RunSpec
+	if !readJSON(w, r, &spec) {
+		return
+	}
+	id, err := s.orch.Start(r.Context(), spec)
+	var ue *userError
+	if errors.As(err, &ue) {
+		httpError(w, http.StatusConflict, ue.Error())
+		return
+	}
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	run, err := s.store.Run(r.Context(), id)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(run)
+}
+
+func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	run, err := s.store.Run(r.Context(), id)
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	s.orch.Live(&run)
+	writeJSON(w, run)
+}
+
+func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	if !s.orch.Cancel(id) {
+		httpError(w, http.StatusConflict, "run is not active")
+		return
+	}
+	s.store.Audit(r.Context(), "run.cancel", map[string]any{"run_id": id})
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// Helpers.
+
+func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	dec := json.NewDecoder(io.LimitReader(r.Body, 8<<20))
+	if err := dec.Decode(v); err != nil {
+		httpError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return false
+	}
+	return true
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(v)
+}
+
+func httpError(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func serverError(w http.ResponseWriter, err error) {
+	log.Printf("error: %v", err)
+	httpError(w, http.StatusInternalServerError, "internal error")
+}
+
+func storeError(w http.ResponseWriter, err error) {
+	if errors.Is(err, pgx.ErrNoRows) {
+		httpError(w, http.StatusNotFound, "not found")
+		return
+	}
+	serverError(w, err)
+}
+
+func pathID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid id")
+		return 0, false
+	}
+	return id, true
+}
+
+func clientIP(r *http.Request) string {
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	return host
+}

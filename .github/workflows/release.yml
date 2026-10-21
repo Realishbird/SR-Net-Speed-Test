@@ -1,0 +1,70 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+      - name: shellcheck
+        run: |
+          sudo apt-get install -y -qq shellcheck >/dev/null
+          shellcheck -S warning install.sh deploy/install-controller.sh proxmox/create-lxc.sh
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: build
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+        run: |
+          VERSION=${GITHUB_REF_NAME}
+          [[ "$GITHUB_REF" == refs/tags/* ]] || VERSION="dev-${GITHUB_SHA::8}"
+          mkdir -p dist
+          for bin in srnet-agent srnet-controller srnet; do
+            go build -trimpath -ldflags "-s -w -X github.com/Realishbird/SR-Net-Speed-Test/internal/version.Version=$VERSION" \
+              -o "dist/$bin-linux-${{ matrix.arch }}" "./cmd/$bin"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.arch }}
+          path: dist/*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        run: cd dist && sha256sum * > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
