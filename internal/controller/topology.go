@@ -590,6 +590,36 @@ func applyVLANs(t *api.Topology, vlans map[string]string) {
 	}
 }
 
+// collapseTwins folds two host ports that sit on the same switch port into
+// one cable. A ConnectX-7 on the Sparks presents each physical port as two
+// PCIe functions (enp1s0f0np0 and enP2p1s0f0np0), both run lldpd, and the
+// switch lists both as neighbours on the one port. The port with an
+// address keeps the switch port and is drawn; its twin points at it and
+// loses the switch port, so the picture, the switch port's host list and
+// the per-host switch port column count the cable once.
+func collapseTwins(ports []api.TopoHostPort) {
+	first := map[string]int{} // switch/port -> index of the port that keeps it
+	for i := range ports {
+		p := &ports[i]
+		if p.SwitchPort == "" {
+			continue
+		}
+		key := strings.ToLower(p.Switch + "/" + p.SwitchPort)
+		j, seen := first[key]
+		if !seen {
+			first[key] = i
+			continue
+		}
+		keep, twin := &ports[j], p
+		if p.IP != "" && keep.IP == "" {
+			keep, twin = p, keep
+			first[key] = i
+		}
+		twin.TwinOf = keep.Netdev
+		twin.Switch, twin.SwitchPort = "", ""
+	}
+}
+
 // buildTopology joins hosts, their LLDP neighbours and the switch port
 // figures into one picture. A host port names its switch by the chassis
 // name lldpd saw, which may differ in case from the configured switch name,
@@ -617,19 +647,24 @@ func buildTopology(hosts []hostRec, switches []SwitchConfig, ports map[string]*a
 			}
 			tp.TxGbps, tp.RxGbps = live(p.ID)
 			if p.LLDPPort != "" {
-				tp.Switch = resolveSwitch(p.LLDPSwitch)
-				if tp.Switch != "" {
+				if tp.Switch = resolveSwitch(p.LLDPSwitch); tp.Switch != "" {
 					tp.SwitchPort = p.LLDPPort
-					key := strings.ToLower(tp.Switch + "/" + p.LLDPPort)
-					used[key] = true
-					if sp := ports[key]; sp != nil {
-						sp.Hosts = append(sp.Hosts, h.Name)
-					} else {
-						ports[key] = &api.TopoSwitchPort{Switch: tp.Switch, Name: p.LLDPPort, Hosts: []string{h.Name}}
-					}
 				}
 			}
 			th.Ports = append(th.Ports, tp)
+		}
+		collapseTwins(th.Ports)
+		for _, tp := range th.Ports {
+			if tp.SwitchPort == "" {
+				continue
+			}
+			key := strings.ToLower(tp.Switch + "/" + tp.SwitchPort)
+			used[key] = true
+			if sp := ports[key]; sp != nil {
+				sp.Hosts = append(sp.Hosts, h.Name)
+			} else {
+				ports[key] = &api.TopoSwitchPort{Switch: tp.Switch, Name: tp.SwitchPort, Hosts: []string{h.Name}}
+			}
 		}
 		t.Hosts = append(t.Hosts, th)
 	}

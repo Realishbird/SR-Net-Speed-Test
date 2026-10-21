@@ -504,6 +504,7 @@ type TopoHostPort struct {
 	LLDPPort   string  `json:"lldp_port,omitempty"`
 	Switch     string  `json:"switch,omitempty"`      // configured switch the LLDP neighbour resolved to
 	SwitchPort string  `json:"switch_port,omitempty"` // its port
+	TwinOf     string  `json:"twin_of,omitempty"`     // netdev of the port this one shares a cable with (a second PCIe function of the same physical port); drawn once, under that port
 }
 
 type TopoRun struct {

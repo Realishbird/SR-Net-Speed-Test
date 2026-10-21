@@ -404,7 +404,7 @@ function drawTopology(t) {
       out.push(`<text class="sm mut" x="${x0 + 10}" y="${y0 + 55}">CPU ${fmt(cpu, 0)}% · load ${fmt(st.load1)} · mem ${fmt(st.mem_pct, 0)}%</text>`);
       out.push(`<rect class="meter" x="${x0 + 10}" y="${y0 + 64}" width="${HW - 20}" height="6" rx="3"/><rect x="${x0 + 10}" y="${y0 + 64}" width="${(HW - 20) * cpu / 100}" height="6" rx="3" fill="${cpu > 85 ? 'var(--fail)' : cpu > 60 ? 'var(--warn)' : 'var(--accent)'}"/>`);
     } else out.push(`<text class="sm mut" x="${x0 + 10}" y="${y0 + 55}">${h.online ? 'no telemetry yet' : 'offline'}</text>`);
-    const ports = h.ports.filter(p => p.ip || p.switch_port); // an ACTIVE port with no IP is a cabled port's second PCIe function, drawn once
+    const ports = h.ports.filter(p => p.ip || p.switch_port); // a cabled port's second PCIe function (twin_of) has neither and is drawn as part of its twin
     ports.forEach((p, j) => {
       const x = x0 + HW * (j + 0.5) / Math.max(ports.length, 1), y = y0;
       const col = fabricColor(p.fabric, fabrics), rate = Math.max(p.tx_gbps || 0, p.rx_gbps || 0);
@@ -452,7 +452,7 @@ async function pageTopology(token) {
       return `<tr><td><span class="dot ${h.online ? 'on' : ''}"></span></td><td><b>${esc(h.name)}</b> <span class="muted">${esc(h.hostname)}</span></td>
         <td class="num" style="color:${cpu > 85 ? 'var(--fail)' : cpu > 60 ? 'var(--warn)' : 'inherit'}">${st ? fmt(cpu, 0) + '%' : '<span class="muted">-</span>'}</td><td class="num">${st ? fmt(st.load1, 2) : ''}</td><td class="num">${st ? fmt(st.mem_pct, 0) + '%' : ''}</td>
         <td>${h.ports.filter(p => p.ip).map(p => `<span class="chip">${esc(p.label || p.netdev)} <span class="muted">${esc(p.ip)}</span></span>`).join(' ')}</td>
-        <td>${h.ports.filter(p => p.switch_port || p.lldp_port).map(p => `<span class="mono">${esc(p.switch || p.lldp_switch)} ${esc(p.switch_port || p.lldp_port)}</span>`).join(', ') || '<span class="muted">no LLDP yet</span>'}</td>
+        <td>${h.ports.filter(p => !p.twin_of && (p.switch_port || p.lldp_port)).map(p => `<span class="mono">${esc(p.switch || p.lldp_switch)} ${esc(p.switch_port || p.lldp_port)}</span>`).join(', ') || '<span class="muted">no LLDP yet</span>'}</td>
         <td class="num">${fmt(tx)} / ${fmt(rx)}</td></tr>`;
     }).join('') || `<tr><td colspan="8" class="empty">No hosts enrolled yet.</td></tr>`);
     const legs = (t.runs || []).reduce((a, r) => a + r.legs.length, 0);
