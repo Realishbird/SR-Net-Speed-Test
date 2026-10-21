@@ -158,6 +158,40 @@ if [ ! -s /etc/srnet/controller.json ]; then
   umask 022
 fi
 
+# Grafana's unit enables systemd sandboxing (ProtectSystem, PrivateTmp,
+# ProtectProc ...) which needs a private mount namespace. An unprivileged LXC
+# cannot create one, so the service dies with status=226/NAMESPACE. Clear
+# those options; the container itself is the sandbox.
+log "Grafana systemd override for unprivileged containers"
+install -d /etc/systemd/system/grafana-server.service.d
+cat > /etc/systemd/system/grafana-server.service.d/lxc.conf <<'EOF'
+[Service]
+ProtectSystem=
+ProtectHome=
+PrivateTmp=
+PrivateDevices=
+ProtectProc=
+ProcSubset=
+ProtectKernelTunables=
+ProtectKernelModules=
+ProtectKernelLogs=
+ProtectControlGroups=
+ProtectClock=
+ProtectHostname=
+RestrictNamespaces=
+LockPersonality=
+MemoryDenyWriteExecute=
+RestrictRealtime=
+RestrictSUIDSGID=
+SystemCallFilter=
+SystemCallArchitectures=
+CapabilityBoundingSet=
+NoNewPrivileges=
+UMask=0027
+EOF
+systemctl daemon-reload
+systemctl reset-failed grafana-server 2>/dev/null || true
+
 log "Grafana data source and dashboards"
 install -d /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards
 cat > /etc/grafana/provisioning/datasources/srnet.yaml <<'EOF'
