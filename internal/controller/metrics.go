@@ -79,6 +79,10 @@ func (m *metrics) ingest(host string, ports map[string]portMeta, batch []api.Sam
 			if isPort {
 				labels["port_label"] = meta.Label
 				labels["fabric"] = meta.Fabric
+				// Dashboards count configured ports; a port with no address
+				// (an empty second NIC port, or the Sparks' twin PCIe
+				// function of a cabled port) is not a fault when it is down.
+				labels["configured"] = map[bool]string{true: "yes", false: "no"}[meta.HasIP]
 			}
 		}
 		if len(s.RunIDs) > 0 {

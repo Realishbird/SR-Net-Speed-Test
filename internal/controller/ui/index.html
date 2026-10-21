@@ -295,7 +295,9 @@ async function pageHosts(token) {
     const hosts = await api('GET', '/hosts');
     let html = '';
     for (const h of hosts) {
-      const ports = h.ports.length ? h.ports : [null];
+      // Configured ports (with an address) first; the uncabled and twin
+      // PCIe-function rows follow, so the port a test uses is the first row.
+      const ports = h.ports.length ? [...h.ports].sort((a, b) => (b.addrs?.length ? 1 : 0) - (a.addrs?.length ? 1 : 0)) : [null];
       ports.forEach((p, i) => {
         html += '<tr>';
         if (i === 0) {
@@ -466,7 +468,7 @@ async function pageRun(token, id) {
     <div id="run-error"></div>
     <div class="tiles" id="run-tiles"></div>
     <div class="card"><div class="kv">
-      <b>Test</b><span>${esc(s.test)} · ${s.duration_sec} s · message size ${s.msg_size}${s.sizes?.length ? ' (sweep ' + s.sizes.join(', ') + ')' : ''} · qps ${s.qps}${s.streams > 1 ? ' · ' + s.streams + ' streams' : ''}${s.bidir ? ' · bidirectional (rates add both directions)' : ''}${s.serial ? ' · serial' : ''}${s.mesh ? ' · full mesh' : ''}</span>
+      <b>Test</b><span>${esc(s.test)} · ${s.duration_sec} s · message size ${s.msg_size}${s.sizes?.length ? ' (sweep ' + s.sizes.join(', ') + ')' : ''} · ${s.qps} QP${s.qps === 1 ? '' : 's'}${s.streams > 1 ? ' · ' + s.streams + ' streams' : ''}${s.bidir ? ' · bidirectional (rates add both directions)' : ''}${s.serial ? ' · serial' : ''}${s.mesh ? ' · full mesh' : ''}</span>
       <b>Thresholds</b><span>${s.pass_pct}% of line rate${s.max_lat_p99_us ? ' · p99 ≤ ' + s.max_lat_p99_us + ' µs' : ''}${s.test === 'udp' ? ' · loss ≤ ' + s.max_loss_pct + '%' : ''}</span>
       <b>When</b><span id="run-when"></span></div></div>
     <div class="tbl"><table><thead><tr><th>#</th><th>Client</th><th>Server</th><th>Fabric</th><th class="num">Size</th>${head}${headSw}<th>Error counters</th><th>Verdict</th><th>Note</th></tr></thead><tbody id="legs"></tbody></table></div>`)) return;

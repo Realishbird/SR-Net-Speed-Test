@@ -9,7 +9,7 @@
  "version": 1,
  "refresh": "5s",
  "time": {
-  "from": "now-15m",
+  "from": "now-3h",
   "to": "now"
  },
  "editable": true,
@@ -30,7 +30,8 @@
     "refresh": 2,
     "sort": 4,
     "includeAll": false,
-    "current": {}
+    "current": {},
+    "description": "Set the time range to cover the run, or open this dashboard from the run page."
    }
   ]
  },
@@ -456,5 +457,6 @@
     }
    ]
   }
- ]
+ ],
+ "description": "One run second by second. The Grafana button on a run page opens this dashboard on that run with the time range set to it; when picking a run here, set the time range to cover it or every panel is empty."
 }
