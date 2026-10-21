@@ -62,6 +62,10 @@ const $ = (s, el=document) => el.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const fmt = (n, d=1) => (n ?? 0).toFixed(d);
 let timer = null;
+// Only one page poller may run; each render checks it still owns the page.
+function poll(fn, ms) { clearInterval(timer); timer = setInterval(fn, ms); }
+const here = () => location.hash || '#hosts';
+function render(page, html) { if (here() !== page) return false; $('#view').innerHTML = html; return true; }
 
 async function api(method, path, body) {
   const opt = { method, headers: {} };
@@ -91,6 +95,7 @@ window.addEventListener('hashchange', route);
 
 /* Hosts */
 async function showHosts() {
+  const page = here();
   const hosts = await api('GET', '/hosts').catch(say) || [];
   let html = `<div class="row" style="margin-bottom:12px"><h2 style="margin:0">Hosts</h2>
     <button onclick="newToken()">Agent install command</button>
@@ -126,12 +131,12 @@ async function showHosts() {
         <td class="num">${fmt(p.tx_gbps)} / ${fmt(p.rx_gbps)}</td></tr>`;
     });
   }
-  $('#view').innerHTML = html + '</table>';
+  if (!render(page, html + '</table>')) return;
   $('#csv').onchange = async e => {
     const f = e.target.files[0]; if (!f) return;
     try { const r = await api('POST', '/hosts/import', await f.text()); say(r.problems.length ? r.problems.join('; ') : ''); showHosts(); } catch (x) { say(x); }
   };
-  timer = setInterval(async () => {
+  poll(async () => {
     if (document.activeElement && document.activeElement.classList.contains('cell')) return;
     showHosts();
   }, 5000);
@@ -144,17 +149,19 @@ async function newToken() {
 
 /* Runs */
 async function showRuns() {
+  const page = here();
   const runs = await api('GET', '/runs').catch(say) || [];
   let html = `<h2>Runs</h2><table><tr><th>ID</th><th>Name</th><th>Test</th><th>Status</th><th>Verdict</th><th class="num">Tool Gbps</th><th class="num">Counter Gbps</th><th>Started</th></tr>`;
   if (!runs.length) html += `<tr><td colspan="8" class="muted">No runs yet.</td></tr>`;
   for (const r of runs) html += `<tr><td><a class="link" href="#run/${r.id}">${r.id}</a></td><td><a class="link" href="#run/${r.id}">${esc(r.name)}</a></td><td>${esc(r.spec.test)}</td>
     <td><span class="v ${r.status}">${r.status}</span></td><td>${r.verdict ? `<span class="v ${r.verdict}">${r.verdict}</span>` : ''}</td>
     <td class="num">${fmt(r.summary.tool_gbps)}</td><td class="num">${fmt(r.summary.counter_gbps)}</td><td class="muted">${r.started_at ? new Date(r.started_at).toLocaleString() : '-'}</td></tr>`;
-  $('#view').innerHTML = html + '</table>';
-  timer = setInterval(showRuns, 5000);
+  if (!render(page, html + '</table>')) return;
+  poll(showRuns, 5000);
 }
 
 async function showRun(id) {
+  const page = here();
   let r; try { r = await api('GET', '/runs/' + id); } catch (e) { return say(e); }
   const live = r.status === 'running' || r.status === 'queued';
   const lat = r.spec.test.endsWith('_lat');
@@ -187,21 +194,22 @@ async function showRun(id) {
     }
     html += `<td class="muted">${esc(errs)}</td><td>${l.verdict ? `<span class="v ${l.verdict}">${l.verdict}</span>` : ''}</td><td class="muted">${esc(l.note)}</td></tr>`;
   }
-  $('#view').innerHTML = html + '</table>';
-  if (live) timer = setInterval(() => showRun(id), 2000);
+  if (!render(page, html + '</table>')) return;
+  if (live) poll(() => showRun(id), 2000);
 }
 async function cancelRun(id) { try { await api('POST', `/runs/${id}/cancel`); } catch (e) { say(e); } }
 
 /* New run */
 const tests = { write: 'RDMA write bandwidth', read: 'RDMA read bandwidth', send: 'RDMA send bandwidth', write_lat: 'RDMA write latency', read_lat: 'RDMA read latency', send_lat: 'RDMA send latency', tcp: 'TCP (iperf3)', udp: 'UDP (iperf3)' };
 async function showNew() {
+  const page = here();
   const hosts = await api('GET', '/hosts').catch(say) || [];
   const prev = JSON.parse(sessionStorage.getItem('spec') || 'null'); sessionStorage.removeItem('spec');
   const names = hosts.map(h => h.name);
   const tags = [...new Set(hosts.flatMap(h => h.tags))].map(t => 'tag:' + t);
   const opts = [...names, ...tags].map(n => `<option value="${esc(n)}">`).join('');
   const topo = prev ? (prev.mesh ? 'mesh' : prev.legs?.length ? 'legs' : prev.pairs ? 'pairs' : 'cs') : 'cs';
-  $('#view').innerHTML = `<h2>New run</h2><datalist id="sel">${opts}</datalist>
+  render(page, `<h2>New run</h2><datalist id="sel">${opts}</datalist>
   <form id="f" class="card" onsubmit="return startRun(event)">
     <div class="row">
       <label>Name <input name="name" value="${esc(prev?.name || '')}" placeholder="optional"></label>
@@ -229,7 +237,7 @@ async function showNew() {
       <label><span><input name="serial" type="checkbox" ${prev?.serial ? 'checked' : ''}> Serial (one leg at a time, link matrix)</span></label>
     </div>
     <div class="row" style="margin-top:12px"><button class="primary" type="submit">Start</button><span class="muted">Servers start first; all clients start together 3 s later.</span></div>
-  </form>`;
+  </form>`);
   topoChange(topo);
 }
 function topoChange(t) { $('#t-cs').style.display = (t === 'cs' || t === 'pairs') ? '' : 'none'; $('#t-mesh').style.display = t === 'mesh' ? '' : 'none'; $('#t-legs').style.display = t === 'legs' ? '' : 'none'; }
@@ -250,6 +258,7 @@ async function startRun(ev) {
 
 /* Suites and schedules */
 async function showSuites() {
+  const page = here();
   const [suites, scheds, sruns] = await Promise.all([api('GET', '/suites'), api('GET', '/schedules'), api('GET', '/suite-runs')]).catch(e => { say(e); return [[], [], []]; });
   const added = JSON.parse(sessionStorage.getItem('suitespec') || 'null'); sessionStorage.removeItem('suitespec');
   let html = `<h2>Suites</h2><p class="muted">A suite is an ordered list of runs executed back to back. Edit the JSON (an array of run specs, the same fields the New run form sends), or open a finished run and click "Add to a suite".</p>`;
@@ -271,7 +280,7 @@ async function showSuites() {
   for (const r of sruns) html += `<tr><td>${r.id}</td><td>${esc(r.suite_name)}</td><td>${esc(r.trigger)}</td><td><span class="v ${r.status}">${r.status}</span></td>
     <td>${r.verdict ? `<span class="v ${r.verdict}">${r.verdict}</span>` : ''}</td><td>${r.run_ids.map(id => `<a class="link" href="#run/${id}">${id}</a>`).join(' ')}</td>
     <td class="muted">${new Date(r.started_at).toLocaleString()}</td><td>${r.status === 'running' ? `<button onclick="api('POST','/suite-runs/${r.id}/cancel').then(showSuites,say)">Cancel</button>` : ''}</td></tr>`;
-  $('#view').innerHTML = html + '</table>';
+  if (!render(page, html + '</table>')) return;
 }
 function suiteCard(su) {
   return `<form class="card" onsubmit="return saveSuite(event, ${su.id})">
@@ -300,6 +309,7 @@ async function delSchedule(id) { try { await api('DELETE', '/schedules/' + id); 
 
 /* Fleet: releases and agent updates */
 async function showFleet(check) {
+  const page = here();
   const [rel, jobs, hosts] = await Promise.all([api('GET', '/releases' + (check ? '?check=1' : '')), api('GET', '/updates'), api('GET', '/hosts')]).catch(e => { say(e); return [{ mirrored: [] }, [], []]; });
   const versions = [...new Set(hosts.map(h => h.agent_version))];
   let html = `<div class="row" style="margin-bottom:12px"><h2 style="margin:0">Fleet</h2><span class="muted">controller ${esc(rel.controller_version)} · agents on ${versions.map(esc).join(', ') || 'none'}</span>
@@ -315,8 +325,8 @@ async function showFleet(check) {
     html += `<div class="card"><div class="row"><b>Job ${j.id}</b> to ${esc(j.version)} <span class="v ${j.status === 'done' ? 'pass' : j.status === 'failed' ? 'fail' : 'running'}">${j.status}</span><span class="muted">${new Date(j.created_at).toLocaleString()}</span></div>
       <table><tr><th>Host</th><th>From</th><th>Status</th><th>Note</th></tr>${j.hosts.map(h => `<tr><td>${esc(h.name)}</td><td class="muted">${esc(h.from)}</td><td><span class="v ${h.status === 'done' ? 'pass' : h.status === 'failed' ? 'fail' : h.status === 'skipped' ? 'warn' : 'running'}">${h.status}</span></td><td class="muted">${esc(h.note)}</td></tr>`).join('')}</table></div>`;
   }
-  $('#view').innerHTML = html;
-  if (jobs.some(j => j.status === 'running')) timer = setInterval(() => showFleet(), 3000);
+  if (!render(page, html)) return;
+  if (jobs.some(j => j.status === 'running')) poll(() => showFleet(), 3000);
 }
 async function fetchRelease(ev) {
   ev.preventDefault();
@@ -334,14 +344,15 @@ async function startUpdate(ev, version) {
 
 /* Alerts */
 async function showAlerts(all) {
+  const page = here();
   const alerts = await api('GET', '/alerts' + (all ? '?all=1' : '')).catch(say) || [];
   let html = `<div class="row" style="margin-bottom:12px"><h2 style="margin:0">Alerts</h2><label><input type="checkbox" ${all ? 'checked' : ''} onchange="showAlerts(this.checked)"> include resolved</label></div>
     <table><tr><th>State</th><th>Kind</th><th>Host</th><th>Port</th><th>Message</th><th>Opened</th><th>Resolved</th></tr>`;
   if (!alerts.length) html += `<tr><td colspan="7" class="muted">No ${all ? '' : 'open '}alerts.</td></tr>`;
   for (const a of alerts) html += `<tr><td><span class="v ${a.resolved_at ? 'pass' : 'fail'}">${a.resolved_at ? 'resolved' : 'open'}</span></td><td>${esc(a.kind)}</td><td>${esc(a.host)}</td><td>${esc(a.port)}</td>
     <td style="white-space:normal">${esc(a.message)}</td><td class="muted">${new Date(a.opened_at).toLocaleString()}</td><td class="muted">${a.resolved_at ? new Date(a.resolved_at).toLocaleString() : ''}</td></tr>`;
-  $('#view').innerHTML = html + '</table>';
-  timer = setInterval(() => showAlerts(all), 10000);
+  if (!render(page, html + '</table>')) return;
+  poll(() => showAlerts(all), 10000);
 }
 async function alertBadge() {
   const n = (await api('GET', '/alerts').catch(() => [])).length;
