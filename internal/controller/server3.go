@@ -33,6 +33,8 @@ func (s *Server) routes3(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/v1/schedules/{id}", s.admin(s.deleteSchedule))
 
 	mux.HandleFunc("GET /api/v1/alerts", s.admin(s.listAlerts))
+	mux.HandleFunc("POST /api/v1/alerts/clear", s.admin(s.clearAlerts))
+	mux.HandleFunc("POST /api/v1/alerts/{id}/clear", s.admin(s.clearAlert))
 	mux.HandleFunc("GET /api/v1/runs/{id}/report.csv", s.admin(s.reportCSV))
 	mux.HandleFunc("GET /api/v1/runs/{id}/report.html", s.admin(s.reportHTML))
 }
@@ -323,6 +325,40 @@ func (s *Server) listAlerts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, out)
+}
+
+// clearAlert resolves one alert by hand. The condition is not re-checked:
+// an alert whose cause persists is opened again by the next check.
+func (s *Server) clearAlert(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	a, found, err := s.store.ClearAlert(r.Context(), id)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if !found {
+		httpError(w, http.StatusNotFound, "no open alert with that id")
+		return
+	}
+	s.alerts.notify("resolved", a)
+	s.store.Audit(r.Context(), "alert.clear", map[string]any{"id": a.ID, "kind": a.Kind, "host": a.Host, "port": a.Port})
+	writeJSON(w, a)
+}
+
+func (s *Server) clearAlerts(w http.ResponseWriter, r *http.Request) {
+	cleared, err := s.store.ClearAlerts(r.Context())
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	for _, a := range cleared {
+		s.alerts.notify("resolved", a)
+	}
+	s.store.Audit(r.Context(), "alert.clear_all", map[string]any{"count": len(cleared)})
+	writeJSON(w, map[string]int{"cleared": len(cleared)})
 }
 
 func (s *Server) reportCSV(w http.ResponseWriter, r *http.Request) {
