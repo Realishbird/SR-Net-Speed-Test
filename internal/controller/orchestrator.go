@@ -82,6 +82,22 @@ var errorCounterKeys = map[string]bool{
 	"implied_nak_seq_err": true, "duplicate_request": true, "req_cqe_error": true, "resp_cqe_error": true,
 }
 
+// sendExpectedKeys are counters a two-sided (Send/Receive) test moves by
+// design, so they do not warn on a send leg: the receiver's queue of posted
+// receives runs dry for an instant now and then and the sender gets an RNR
+// NAK and retries (rnr_nak_retry_err), and at teardown the receives still
+// posted are flushed with an error completion (resp_cqe_error, one per
+// buffer). On a one-sided write or read test both still mean trouble.
+var sendExpectedKeys = map[string]bool{"rnr_nak_retry_err": true, "resp_cqe_error": true}
+
+// counterIsError says whether a grown counter is a fault for this test.
+func counterIsError(test, key string) bool {
+	if !errorCounterKeys[key] {
+		return false
+	}
+	return !(sendExpectedKeys[key] && (test == "send" || test == "send_lat"))
+}
+
 func applyDefaults(s *api.RunSpec) error {
 	if s.Test == "" {
 		s.Test = "write"
@@ -768,15 +784,22 @@ func (o *Orchestrator) score(ar *activeRun) (api.RunSummary, string) {
 			l.Note = fmt.Sprintf("%.1f Gbps is below %.0f%% of %.0f Gbps", measured, ar.spec.PassPct, l.ExpectedGbps)
 		}
 		if l.Verdict == "pass" {
-			var bad []string
+			var bad, expected []string
 			for k, v := range l.ErrorDeltas {
-				if errorCounterKeys[k] && v > 0 {
+				switch {
+				case v <= 0 || !errorCounterKeys[k]:
+				case counterIsError(ar.spec.Test, k):
 					bad = append(bad, fmt.Sprintf("%s +%d", k, v))
+				default:
+					expected = append(expected, fmt.Sprintf("%s +%d", k, v))
 				}
 			}
 			if len(bad) > 0 {
 				sort.Strings(bad)
 				l.Verdict, l.Note = "warn", "error counters grew: "+strings.Join(bad, ", ")
+			} else if len(expected) > 0 {
+				sort.Strings(expected)
+				l.Note = "normal for a send test: " + strings.Join(expected, ", ")
 			} else if ar.spec.Test == "tcp" && l.Retransmits > 0 {
 				l.Verdict, l.Note = "warn", fmt.Sprintf("%d TCP retransmits", l.Retransmits)
 			}
