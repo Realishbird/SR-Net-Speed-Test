@@ -76,7 +76,7 @@ srnet runs; srnet show 12; srnet watch 12; srnet cancel 12
 
 | Test | Tool | Result per leg |
 | --- | --- | --- |
-| `write`, `read`, `send` | `ib_write_bw`, `ib_read_bw`, `ib_send_bw` (`--bidir` for both directions) | Gbps from the tool and from the hardware counters, error counter growth |
+| `write`, `read`, `send` | `ib_write_bw`, `ib_read_bw`, `ib_send_bw` (`--bidir` for both directions; every rate and the expected rate then add both directions, so a 100G link expects 200) | Gbps from the tool and from the hardware counters, error counter growth |
 | `write_lat`, `read_lat`, `send_lat` | `ib_*_lat` | min, typical, avg, p99, p99.9, max in µs |
 | `tcp` | `iperf3` (`--streams N`) | Gbps, retransmits |
 | `udp` | `iperf3 -u` | Gbps, loss %, jitter |

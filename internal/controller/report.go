@@ -69,7 +69,7 @@ th,td{border:1px solid #ccc;padding:5px 8px;text-align:left}th{background:#f2f2f
 	fmt.Fprintf(w, `<h1>Run %d: %s</h1><div class="muted">SR-Net-Speed-Test report · generated %s · controller %s</div>`, r.ID, e(r.Name), time.Now().Format("2006-01-02 15:04 MST"), e(controllerVersion))
 	fmt.Fprintf(w, `<div class="kv"><b>Result</b><span><span class="%s">%s</span> (%s)%s</span>`, e(r.Verdict), e(strings.ToUpper(nonEmpty(r.Verdict, "none"))), e(r.Status), errHTML(r.Error))
 	fmt.Fprintf(w, `<b>Test</b><span>%s · %d s · message size %d%s · qps %d%s%s%s%s</span>`, e(s.Test), s.DurationSec, s.MsgSize, sizesHTML(s.Sizes), s.QPs,
-		optHTML(s.Streams > 1, fmt.Sprintf(" · %d streams", s.Streams)), optHTML(s.Bidir, " · bidirectional"), optHTML(s.Serial, " · serial"), optHTML(s.Mesh, " · full mesh"))
+		optHTML(s.Streams > 1, fmt.Sprintf(" · %d streams", s.Streams)), optHTML(s.Bidir, " · bidirectional (rates add both directions)"), optHTML(s.Serial, " · serial"), optHTML(s.Mesh, " · full mesh"))
 	fmt.Fprintf(w, `<b>Thresholds</b><span>%.0f%% of line rate%s%s</span>`, s.PassPct, optHTML(s.MaxLatP99Us > 0, fmt.Sprintf(" · p99 ≤ %.2f µs", s.MaxLatP99Us)), optHTML(s.Test == "udp", fmt.Sprintf(" · loss ≤ %.2f%%", s.MaxLossPct)))
 	if r.StartedAt != nil {
 		end := ""
