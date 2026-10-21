@@ -201,3 +201,11 @@ echo "  grafana:          $(systemctl is-active grafana-server) (port 3000, logi
 echo "  postgresql:       $(systemctl is-active postgresql)"
 echo "  gnmic:            $(systemctl is-active gnmic) (idle until a switch with gNMI is added: srnet-controller switch --help)"
 echo "  web UI:           https://<this host>:8443 (admin login)"
+for svc in srnet-controller victoriametrics grafana-server postgresql; do
+  if [ "$(systemctl is-active "$svc")" != "active" ]; then
+    echo
+    echo "==> $svc is not running; last log lines:"
+    journalctl -u "$svc" -n 25 --no-pager 2>/dev/null | sed 's/^/    /'
+    echo "    (fix the cause, then: systemctl restart $svc)"
+  fi
+done
