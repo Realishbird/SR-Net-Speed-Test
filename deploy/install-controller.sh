@@ -231,20 +231,25 @@ providers:
     type: file
     allowUiUpdates: true
     options:
-      path: /var/lib/srnet/grafana
+      path: /var/lib/grafana/dashboards/srnet
 EOF
-install -d -m 0755 -o srnet -g srnet /var/lib/srnet/grafana
-# Re-running init refreshes the bundled dashboards without touching other settings.
-if [ -s /etc/srnet/controller.json ]; then
-  PUB=$(python3 -c 'import json;print(json.load(open("/etc/srnet/controller.json"))["public_url"])' 2>/dev/null || true)
-  [ -n "$PUB" ] && runuser -u srnet -- /usr/local/bin/srnet-controller init --public-url "$PUB" --admin-password-file /etc/srnet/admin-password >/dev/null 2>&1 || true
-fi
+# The dashboards must live where the grafana user can read them. /var/lib/srnet
+# is 0750 srnet:srnet, so Grafana could never open the old location and the
+# SR-Net folder stayed empty. Write them as root into Grafana's own state dir;
+# every upgrade refreshes them.
+DASH_DIR=/var/lib/grafana/dashboards/srnet
+install -d -m 0755 -o grafana -g grafana /var/lib/grafana/dashboards "$DASH_DIR"
+/usr/local/bin/srnet-controller dashboards --dir "$DASH_DIR" >/dev/null
+chown -R grafana:grafana "$DASH_DIR"
+chmod 0644 "$DASH_DIR"/*.json
+rm -rf /var/lib/srnet/grafana
 
 systemctl daemon-reload
 systemctl enable --now victoriametrics grafana-server srnet-controller >/dev/null
 systemctl enable gnmic >/dev/null 2>&1 || true
 systemctl enable --now gnmic-restart.path >/dev/null 2>&1 || true
 systemctl restart srnet-controller
+systemctl restart grafana-server
 systemctl restart gnmic 2>/dev/null || true
 
 sleep 2
