@@ -15,6 +15,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,6 +34,9 @@ type Server struct {
 	hub     *hub
 	metrics *metrics
 	orch    *Orchestrator
+	rel     *releases
+	alerts  *alerter
+	suites  *suiteRunner
 
 	mu         sync.Mutex
 	agentCache map[string]int64              // secret hash -> agent id
@@ -54,11 +58,17 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	} else if n > 0 {
 		log.Printf("gnmic config written for %d switch(es) to %s", n, cfg.GnmicConfigPath)
 	}
+	orch := newOrchestrator(store, h, m)
+	al := newAlerter(store, h, cfg)
 	s := &Server{
-		cfg: cfg, store: store, hub: h, metrics: m, orch: newOrchestrator(store, h, m),
+		cfg: cfg, store: store, hub: h, metrics: m, orch: orch,
+		rel:    newReleases(filepath.Join(cfg.DataDir, "releases"), store, h, al),
+		alerts: al, suites: newSuiteRunner(store, orch, al),
 		agentCache: map[string]int64{}, portCache: map[int64]map[string]portMeta{}, hostName: map[int64]string{},
 	}
 	s.refreshPortCache(ctx)
+	go al.loop(ctx)
+	go s.suites.scheduler(ctx)
 	return s, nil
 }
 
@@ -89,6 +99,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/runs", s.admin(s.createRun))
 	mux.HandleFunc("GET /api/v1/runs/{id}", s.admin(s.getRun))
 	mux.HandleFunc("POST /api/v1/runs/{id}/cancel", s.admin(s.cancelRun))
+	s.routes3(mux)
 	return mux
 }
 
@@ -195,6 +206,7 @@ func (s *Server) agentInventory(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
+	s.rel.noteVersion(agentID(r), inv.AgentVersion)
 	s.refreshPortCache(r.Context())
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -230,6 +242,7 @@ func (s *Server) agentSamples(w http.ResponseWriter, r *http.Request) {
 	ports, host := s.portCache[id], s.hostName[id]
 	s.mu.Unlock()
 	s.metrics.ingest(host, ports, b.Samples)
+	s.alerts.onSamples(r.Context(), host, ports, b.Samples)
 	w.WriteHeader(http.StatusNoContent)
 }
 

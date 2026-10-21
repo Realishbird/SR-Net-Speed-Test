@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Realishbird/SR-Net-Speed-Test/internal/api"
+	"github.com/Realishbird/SR-Net-Speed-Test/internal/version"
 )
 
 const DefaultConfigPath = "/etc/srnet/agent.json"
@@ -172,8 +173,9 @@ func Run(ctx context.Context, cfg Config) error {
 		spool.loop(ctx)
 	}()
 
-	log.Printf("agent %s polling %s", cfg.AgentID, cfg.Controller)
+	log.Printf("agent %s (%s) polling %s", cfg.AgentID, version.Version, cfg.Controller)
 	backoff := time.Second
+	healthy := false
 	for ctx.Err() == nil {
 		var tasks []api.Task
 		err := c.do(ctx, "GET", "/api/v1/agent/tasks?wait=25", nil, &tasks, 40*time.Second)
@@ -187,13 +189,49 @@ func Run(ctx context.Context, cfg Config) error {
 			continue
 		}
 		backoff = time.Second
+		if !healthy {
+			healthy = true
+			MarkHealthy()
+		}
 		for _, t := range tasks {
 			log.Printf("task %s: %s %s run=%d leg=%d", t.ID, t.Kind, t.Tool, t.RunID, t.LegID)
+			if t.Kind == api.TaskUpdate {
+				if restart := handleUpdate(ctx, c, runner, spool, t); restart {
+					wg.Wait()
+					return errRestart
+				}
+				continue
+			}
 			runner.Handle(ctx, t)
 		}
 	}
 	wg.Wait()
 	return ctx.Err()
+}
+
+// ErrRestart is returned by Run when a staged update needs a process restart;
+// main exits 0 and systemd starts the launcher, which swaps the binary in.
+var errRestart = errors.New("restart to apply update")
+
+func IsRestart(err error) bool { return errors.Is(err, errRestart) }
+
+func handleUpdate(ctx context.Context, c *Client, runner *Runner, sp *spool, t api.Task) bool {
+	ev := api.Event{TaskID: t.ID, Type: api.EventUpdateApplied, Message: t.Version}
+	if runner.Active() {
+		ev.Type, ev.Message = api.EventUpdateFailed, "a test is running on this host"
+	} else if err := c.ApplyUpdate(ctx, t); err != nil {
+		ev.Type, ev.Message = api.EventUpdateFailed, err.Error()
+	}
+	// Deliver synchronously: the process is about to exit.
+	if err := c.do(ctx, "POST", "/api/v1/agent/events", ev, nil, 15*time.Second); err != nil {
+		sp.send(ctx, "/api/v1/agent/events", ev)
+	}
+	if ev.Type == api.EventUpdateFailed {
+		log.Printf("update to %s failed: %s", t.Version, ev.Message)
+		return false
+	}
+	log.Printf("update to %s staged; restarting", t.Version)
+	return true
 }
 
 // spool delivers events and results in order, retrying while the controller is

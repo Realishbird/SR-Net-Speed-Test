@@ -107,6 +107,45 @@ With gNMI credentials the controller writes `/etc/srnet/gnmic.yaml` and `gnmic` 
 
 Hosts run `lldpd`, so each port's switch neighbour and port id show in `srnet hosts` and the UI without a cable map.
 
+## Agent updates from the controller
+
+Releases are mirrored on the controller and pushed to agents one host at a time, with rollback.
+
+```bash
+srnet releases --check           # what is mirrored, and the newest tag on GitHub
+srnet fetch-release              # mirror the latest release (or: srnet fetch-release v0.4.0)
+srnet update --version v0.4.0    # every host; or --host spark-01,spark-02 / --tag client
+srnet updates                    # job history
+```
+
+The Fleet page in the UI does the same. For each host the controller waits until no test uses it, sends an update task, and the agent downloads the binary over its existing TLS session, checks the SHA-256 from the release's `SHA256SUMS`, stages it and exits. The launcher (`/usr/local/bin/srnet-agent-launch`) swaps the new binary in and keeps the old one. The controller waits up to 90 s for the host to report the new version; if it does not come back, the job marks the host failed and the launcher restores the previous binary on the next restart (a new binary that never completes a poll is rolled back). A failed host stops nothing else: the job carries on with the next host and an `update_failed` alert opens.
+
+## Suites and schedules
+
+A suite is an ordered list of runs (a JSON array of run specs, the same fields `srnet run` sends). Schedules run a suite on a 5-field cron expression in the controller's local time.
+
+```bash
+cat > nightly.json <<'EOF'
+[
+  {"name": "fan-out write", "test": "write", "clients": ["770AP"], "servers": ["tag:spark"], "duration_sec": 60},
+  {"name": "link matrix", "test": "write", "clients": ["770AP"], "servers": ["tag:spark"], "serial": true, "duration_sec": 20},
+  {"name": "latency", "test": "write_lat", "clients": ["770AP"], "servers": ["tag:spark"], "serial": true, "duration_sec": 10, "max_lat_p99_us": 5}
+]
+EOF
+srnet suite create nightly nightly.json
+srnet suite run nightly
+srnet schedule add nightly --suite nightly --cron "0 2 * * *"
+srnet suite-runs
+```
+
+In the UI, open any finished run and click "Add to a suite" to copy its spec into the suite editor.
+
+## Alerts and reports
+
+The controller opens an alert when an agent stops reporting for 2 minutes, a port leaves ACTIVE, error counters grow while no test runs on that port, a transceiver reports 70 C or more (`transceiver_max_c` in `controller.json`), a run or suite fails, or an update fails. Alerts close themselves when the condition clears. `srnet alerts` and the Alerts page list them; set `alert_webhook_url` in `/etc/srnet/controller.json` to POST a JSON body (`state`, `kind`, `host`, `port`, `message`, `text`) to Slack, Teams, Alertmanager or a script on every open and resolve.
+
+Every run has a CSV and an HTML report (print to PDF from the browser): `srnet report 42 --format csv -o run42.csv`, `srnet report 42 --format html -o run42.html`, or the links on the run page.
+
 ## Development
 
 ```bash

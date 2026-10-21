@@ -12,20 +12,22 @@ import (
 const DefaultConfigPath = "/etc/srnet/controller.json"
 
 type Config struct {
-	Listen             string `json:"listen"`     // :8443
-	PublicURL          string `json:"public_url"` // https://10.0.0.5:8443, used in agent install commands
-	DataDir            string `json:"data_dir"`
-	DatabaseURL        string `json:"database_url"`
-	VictoriaMetricsURL string `json:"victoriametrics_url"`
-	TLSCert            string `json:"tls_cert"`
-	TLSKey             string `json:"tls_key"`
-	CACert             string `json:"ca_cert"`
-	AdminUser          string `json:"admin_user"`
-	AdminPasswordHash  string `json:"admin_password_hash"`
-	InstallScriptURL   string `json:"install_script_url"`
-	GrafanaURL         string `json:"grafana_url,omitempty"` // shown in the UI; defaults to port 3000 on the same host
-	GnmicConfigPath    string `json:"gnmic_config_path"`
-	GrafanaDashDir     string `json:"grafana_dashboard_dir"`
+	Listen             string  `json:"listen"`     // :8443
+	PublicURL          string  `json:"public_url"` // https://10.0.0.5:8443, used in agent install commands
+	DataDir            string  `json:"data_dir"`
+	DatabaseURL        string  `json:"database_url"`
+	VictoriaMetricsURL string  `json:"victoriametrics_url"`
+	TLSCert            string  `json:"tls_cert"`
+	TLSKey             string  `json:"tls_key"`
+	CACert             string  `json:"ca_cert"`
+	AdminUser          string  `json:"admin_user"`
+	AdminPasswordHash  string  `json:"admin_password_hash"`
+	InstallScriptURL   string  `json:"install_script_url"`
+	GrafanaURL         string  `json:"grafana_url,omitempty"` // shown in the UI; defaults to port 3000 on the same host
+	GnmicConfigPath    string  `json:"gnmic_config_path"`
+	GrafanaDashDir     string  `json:"grafana_dashboard_dir"`
+	AlertWebhookURL    string  `json:"alert_webhook_url,omitempty"` // POSTed a JSON body when an alert opens or resolves
+	TransceiverMaxC    float64 `json:"transceiver_max_c,omitempty"` // alert when a module reports this temperature or more (default 70)
 
 	// Switches to collect port counters from: gNMI through gnmic when GNMIUser
 	// is set, SNMP v1/v2c from the controller itself when SNMPCommunity is set.

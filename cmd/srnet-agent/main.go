@@ -31,7 +31,11 @@ func main() {
 		if err != nil {
 			log.Fatalf("load config: %v", err)
 		}
-		if err := agent.Run(ctx, cfg); err != nil && ctx.Err() == nil {
+		err = agent.Run(ctx, cfg)
+		if agent.IsRestart(err) {
+			os.Exit(0) // systemd Restart=always brings the launcher back with the new binary
+		}
+		if err != nil && ctx.Err() == nil {
 			log.Fatal(err)
 		}
 	case "enroll":
