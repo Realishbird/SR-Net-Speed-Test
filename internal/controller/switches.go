@@ -130,8 +130,8 @@ func (s *Server) switchView(sw SwitchConfig, snmp map[string]snmpStatus, gnmiSer
 		switch {
 		case gnmiErr != nil:
 			p.Message = "could not query VictoriaMetrics: " + gnmiErr.Error()
-		case gnmiSeries[sw.Name] > 0:
-			p.OK, p.Series = true, gnmiSeries[sw.Name]
+		case gnmiSeriesFor(gnmiSeries, sw) > 0:
+			p.OK, p.Series = true, gnmiSeriesFor(gnmiSeries, sw)
 			p.Message = fmt.Sprintf("%d series in the last 2 min", p.Series)
 		default:
 			p.Message = "no data in the last 2 min (check the switch's telemetry service and the gnmic journal)"
@@ -226,6 +226,20 @@ func (s *Server) testSwitch(w http.ResponseWriter, r *http.Request) {
 // gnmiSeries asks VictoriaMetrics how many srnet_gnmi_* series each switch
 // produced in the last two minutes, which is the only cheap way to tell
 // whether gnmic's subscription to a switch is alive.
+// gnmiSeriesFor returns the series count gnmic reported for a switch, matching
+// the lower-cased target name first and the address (with and without the
+// gNMI port) as a fallback.
+func gnmiSeriesFor(series map[string]int, sw SwitchConfig) int {
+	if n := series[strings.ToLower(sw.Name)]; n > 0 {
+		return n
+	}
+	addr := strings.ToLower(sw.Address)
+	if n := series[fmt.Sprintf("%s:%d", addr, sw.GNMIPort)]; n > 0 {
+		return n
+	}
+	return series[addr]
+}
+
 func (s *Server) gnmiSeries(ctx context.Context) (map[string]int, error) {
 	out := map[string]int{}
 	if s.metrics.vmURL == "" {
@@ -257,8 +271,11 @@ func (s *Server) gnmiSeries(ctx context.Context) (map[string]int, error) {
 		}
 		n := 0
 		fmt.Sscanf(fmt.Sprint(r.Value[1]), "%d", &n)
-		src := r.Metric["source"]
-		// gnmic labels samples with the target name, or host:port when unnamed.
+		// gnmic labels samples with the target name as it read it from its
+		// config, which viper lower-cases ("z9864F" becomes "z9864f"), or with
+		// host:port when the target is unnamed. Keys are stored lower-cased and
+		// looked up the same way by gnmiSeriesFor.
+		src := strings.ToLower(r.Metric["source"])
 		name, _, _ := strings.Cut(src, ":")
 		out[src] += n
 		if name != src {

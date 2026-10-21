@@ -59,3 +59,16 @@ func TestSNMPCollectorSet(t *testing.T) {
 		t.Error("set should wake the poll loop")
 	}
 }
+
+func TestGnmiSeriesFor(t *testing.T) {
+	series := map[string]int{"z9864f": 12, "10.0.0.2:8080": 3, "10.0.0.2": 3}
+	if n := gnmiSeriesFor(series, SwitchConfig{Name: "z9864F", Address: "10.0.0.9", GNMIPort: 8080}); n != 12 {
+		t.Fatalf("name match: got %d, want 12", n)
+	}
+	if n := gnmiSeriesFor(series, SwitchConfig{Name: "other", Address: "10.0.0.2", GNMIPort: 8080}); n != 3 {
+		t.Fatalf("address match: got %d, want 3", n)
+	}
+	if n := gnmiSeriesFor(series, SwitchConfig{Name: "none", Address: "10.0.0.3", GNMIPort: 8080}); n != 0 {
+		t.Fatalf("no match: got %d, want 0", n)
+	}
+}
