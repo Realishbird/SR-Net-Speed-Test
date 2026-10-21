@@ -40,9 +40,9 @@ func TestSwitchPortStatsPrefersGNMIAndFallsBackToSNMP(t *testing.T) {
 		row := func(labels, v string) string { return `{"metric":{` + labels + `},"value":[1,"` + v + `"]}` }
 		var rows []string
 		switch {
-		case strings.HasPrefix(q, "rate(srnet_gnmi_in_octets"):
+		case strings.HasPrefix(q, `rate({__name__=~"srnet_gnmi_.*in_octets"}`):
 			rows = []string{row(`"source":"z9864f","interface_name":"Ethernet64"`, "97.9")}
-		case strings.HasPrefix(q, "last_over_time(srnet_gnmi_oper_status"):
+		case strings.HasPrefix(q, `last_over_time({__name__=~"srnet_gnmi_.*oper_status"}`):
 			rows = []string{row(`"source":"z9864f","interface_name":"Ethernet64","oper_status":"UP"`, "1")}
 		case strings.HasPrefix(q, "last_over_time(srnet_switch_rx_gbps"):
 			rows = []string{row(`"switch":"edge","port":"Ethernet0"`, "12.5"), row(`"switch":"z9864F","port":"Ethernet64"`, "50")}

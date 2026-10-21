@@ -40,15 +40,18 @@ func resolveSwitchName(switches []SwitchConfig, chassis string) string {
 	return ""
 }
 
-// switchSelector is the label matcher for one port of a switch in
-// VictoriaMetrics: gnmic labels series by its lower-cased target name or
-// host:port, the SNMP poller by the configured switch name.
-func switchSelector(sw SwitchConfig, gnmi bool, port string) string {
+// switchSeries returns a function that selects one counter of one switch
+// port in VictoriaMetrics: gnmic names series after the whole gNMI path and
+// labels them with its lower-cased target name or host:port, the SNMP poller
+// uses srnet_switch_<counter> with the configured switch name.
+func switchSeries(sw SwitchConfig, gnmi bool, port string) func(counter string) string {
 	if gnmi {
 		src := fmt.Sprintf("(?i)(%s|%s|%s:%d)", regexp.QuoteMeta(sw.Name), regexp.QuoteMeta(sw.Address), regexp.QuoteMeta(sw.Address), sw.GNMIPort)
-		return fmt.Sprintf(`source=~"%s",interface_name="%s"`, src, port)
+		return func(c string) string {
+			return gnmiMetric(c, fmt.Sprintf(`source=~"%s"`, src), fmt.Sprintf(`interface_name="%s"`, port))
+		}
 	}
-	return fmt.Sprintf(`switch="%s",port="%s"`, sw.Name, port)
+	return func(c string) string { return fmt.Sprintf(`srnet_switch_%s{switch="%s",port="%s"}`, c, sw.Name, port) }
 }
 
 // counterSnap is one switch sample: the counter value and when it was taken.
@@ -61,9 +64,9 @@ type counterSnap struct {
 // at or before t, looking back 90 s (three 30 s samples), keyed by counter
 // name. Switch samples are not aligned to the test, so the caller divides by
 // the sample spacing rather than the test length.
-func (m *metrics) switchCountersAt(ctx context.Context, prefix, sel string, t time.Time) (map[string]counterSnap, error) {
+func (m *metrics) switchCountersAt(ctx context.Context, series func(string) string, t time.Time) (map[string]counterSnap, error) {
 	out := map[string]counterSnap{}
-	ts, err := m.vmQuery(ctx, fmt.Sprintf(`tlast_over_time(%sin_octets{%s}[90s] @ %d)`, prefix, sel, t.Unix()))
+	ts, err := m.vmQuery(ctx, fmt.Sprintf(`tlast_over_time(%s[90s] @ %d)`, series("in_octets"), t.Unix()))
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +75,7 @@ func (m *metrics) switchCountersAt(ctx context.Context, prefix, sel string, t ti
 	}
 	at := ts[0].Value
 	for _, c := range switchCounters {
-		rows, err := m.vmQuery(ctx, fmt.Sprintf(`last_over_time(%s%s{%s}[90s] @ %d)`, prefix, c, sel, t.Unix()))
+		rows, err := m.vmQuery(ctx, fmt.Sprintf(`last_over_time(%s[90s] @ %d)`, series(c), t.Unix()))
 		if err != nil {
 			return nil, err
 		}
@@ -132,16 +135,11 @@ func (o *Orchestrator) legSwitch(ar *activeRun, p *legPlan, from, to time.Time) 
 		if !ok || side.port == "" {
 			continue
 		}
-		gnmi := sw.GNMIUser != ""
-		prefix := "srnet_switch_"
-		if gnmi {
-			prefix = "srnet_gnmi_"
-		}
-		sel := switchSelector(sw, gnmi, side.port)
-		s0, err := o.metrics.switchCountersAt(ctx, prefix, sel, from)
+		series := switchSeries(sw, sw.GNMIUser != "", side.port)
+		s0, err := o.metrics.switchCountersAt(ctx, series, from)
 		var s1 map[string]counterSnap
 		if err == nil {
-			s1, err = o.metrics.switchCountersAt(ctx, prefix, sel, to)
+			s1, err = o.metrics.switchCountersAt(ctx, series, to)
 		}
 		if err != nil {
 			ls.Note = "switch counters unavailable: " + err.Error()

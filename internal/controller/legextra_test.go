@@ -40,7 +40,7 @@ func TestLegSwitchFromVictoriaMetrics(t *testing.T) {
 		"in_errors":    {0, 0},
 		"out_errors":   {0, 0},
 	}
-	re := regexp.MustCompile(`^(tlast_over_time|last_over_time)\(srnet_gnmi_(\w+)\{([^}]*)\}\[90s\] @ (\d+)\)$`)
+	re := regexp.MustCompile(`^(tlast_over_time|last_over_time)\(\{__name__=~"srnet_gnmi_\.\*(\w+)",([^}]*)\}\[90s\] @ (\d+)\)$`)
 	var queries []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query().Get("query")
