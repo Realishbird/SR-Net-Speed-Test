@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/csv"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -378,5 +380,77 @@ func TestSwitchDashboardJSON(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestRawMatchersQuoted checks every selector the export and the per-leg
+// switch figures build is valid MetricsQL: each string literal unquotes and
+// each regex compiles. v0.1.26 wrote the switch's IP address as "176\.16..."
+// inside a plain string, VictoriaMetrics rejected it and run exports came
+// back empty.
+func TestRawMatchersQuoted(t *testing.T) {
+	sw := SwitchConfig{Name: "z9864F", Address: "176.16.9.22", GNMIPort: 8080}
+	sc := rawScope{Switches: []SwitchConfig{sw}, Hosts: []string{"Dell Spark 1", "lab.host (2)"}, SwitchPorts: map[string][]string{"z9864F": {"Ethernet0", "Ethernet1.5"}}}
+	hosts, switches := sc.matchers()
+	all := append([]string{hosts}, switches...)
+	all = append(all, switchSeries(sw, true, "Ethernet0")("in_octets"), switchSeries(sw, false, "Ethernet0")("in_octets"))
+	lit := regexp.MustCompile(`(=~|=|!=)("(?:[^"\\]|\\.)*")`)
+	for _, m := range all {
+		found := lit.FindAllStringSubmatch(m, -1)
+		if len(found) == 0 {
+			t.Errorf("no labels in %s", m)
+		}
+		for _, f := range found {
+			v, err := strconv.Unquote(f[2])
+			if err != nil {
+				t.Errorf("%s: %s does not unquote: %v", m, f[2], err)
+				continue
+			}
+			if f[1] == "=~" {
+				re, err := regexp.Compile("^(?:" + v + ")$")
+				if err != nil {
+					t.Errorf("%s: bad regex %q: %v", m, v, err)
+				} else if strings.Contains(m, "source=~") && !re.MatchString("176.16.9.22:8080") && strings.Contains(f[0], "176") {
+					t.Errorf("source regex %q misses the address", v)
+				}
+			}
+		}
+	}
+	if !strings.Contains(hosts, `lab\\.host \\(2\\)`) {
+		t.Errorf("host regex not escaped: %s", hosts)
+	}
+}
+
+// TestRawZipFinishesOnError: when the store fails part way, the archive is
+// still a valid zip and says why in ERROR.txt.
+func TestRawZipFinishesOnError(t *testing.T) {
+	vm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(strings.Join(r.URL.Query()["match[]"], " "), "srnet_switch_") {
+			http.Error(w, "cannot parse string literal", http.StatusBadRequest)
+			return
+		}
+		w.Write([]byte(`{"metric":{"__name__":"srnet_rdma_rx_bytes","host":"h"},"values":[1],"timestamps":[1700000000000]}` + "\n"))
+	}))
+	defer vm.Close()
+	s, _ := testServer(t)
+	s.metrics = newMetrics(vm.URL)
+	sc := rawScope{From: time.Unix(1700000000, 0), To: time.Unix(1700000100, 0), Switches: []SwitchConfig{{Name: "sw", Address: "10.0.0.2"}}, AllSwitch: true}
+	var zb bytes.Buffer
+	if err := s.writeRawZip(context.Background(), &zb, sc, rawManifest{}); err == nil {
+		t.Fatal("want the store's error")
+	}
+	zr, err := zip.NewReader(bytes.NewReader(zb.Bytes()), int64(zb.Len()))
+	if err != nil {
+		t.Fatalf("archive does not open: %v", err)
+	}
+	var names []string
+	for _, f := range zr.File {
+		names = append(names, f.Name)
+	}
+	if got := strings.Join(names, ","); got != "manifest.json,host_samples.csv,switch_samples.csv,ERROR.txt" {
+		t.Errorf("entries = %s", got)
+	}
+	if err := s.metrics.vmCheck(context.Background(), []string{`{__name__=~"srnet_switch_.+"}`}, sc.From, sc.To); err == nil || !strings.Contains(err.Error(), "400") {
+		t.Errorf("vmCheck = %v", err)
 	}
 }
