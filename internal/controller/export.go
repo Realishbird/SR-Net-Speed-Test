@@ -57,7 +57,7 @@ var rawHeader = []string{"time", "unix_ms", "source", "name", "port", "rdma_dev"
 func (sc rawScope) matchers() (hosts string, switches []string) {
 	hosts = `{__name__=~"srnet_.+",host!=""}`
 	if sc.Hosts != nil {
-		hosts = `{__name__=~"srnet_.+",host=~"` + anyOf(sc.Hosts) + `"}`
+		hosts = fmt.Sprintf(`{__name__=~"srnet_.+",host=~%q}`, anyOf(sc.Hosts))
 	}
 	if sc.NoSwitch {
 		return hosts, nil
@@ -72,17 +72,18 @@ func (sc rawScope) matchers() (hosts string, switches []string) {
 	sort.Strings(names)
 	for _, n := range names {
 		ports := anyOf(sc.SwitchPorts[n])
-		switches = append(switches, fmt.Sprintf(`{__name__=~"srnet_switch_.+",switch="%s",port=~"%s"}`, n, ports))
-		src := n
+		switches = append(switches, fmt.Sprintf(`{__name__=~"srnet_switch_.+",switch=%q,port=~%q}`, n, ports))
+		src := "(?i)" + regexp.QuoteMeta(n)
 		for _, sw := range sc.Switches {
 			if sw.Name == n {
-				src = fmt.Sprintf("(?i)(%s|%s|%s:%d)", regexp.QuoteMeta(sw.Name), regexp.QuoteMeta(sw.Address), regexp.QuoteMeta(sw.Address), sw.GNMIPort)
+				src = gnmiSourceRe(sw)
 			}
 		}
-		switches = append(switches, fmt.Sprintf(`{__name__=~"srnet_gnmi_.+",source=~"%s",interface_name=~"%s"}`, src, ports))
-		switches = append(switches, fmt.Sprintf(`{__name__=~"srnet_gnmi_.+",source=~"%s",interface_interface_id=~"%s"}`, src, ports))
-		switches = append(switches, fmt.Sprintf(`{__name__=~"srnet_gnmi_.+",source=~"%s",component_name=~"%s"}`, src, ports))
-		switches = append(switches, fmt.Sprintf(`{__name__=~"srnet_gnmi_.+",source=~"%s",name=~"%s"}`, src, ports))
+		// Every regex goes in with %q, which doubles the backslashes of
+		// QuoteMeta: a bare "176\.16" is not a valid MetricsQL string.
+		for _, key := range []string{"interface_name", "interface_interface_id", "component_name", "name"} {
+			switches = append(switches, fmt.Sprintf(`{__name__=~"srnet_gnmi_.+",source=~%q,%s=~%q}`, src, key, ports))
+		}
 	}
 	return hosts, switches
 }
@@ -93,6 +94,45 @@ func anyOf(list []string) string {
 		q = append(q, regexp.QuoteMeta(v))
 	}
 	return "^(?:" + strings.Join(q, "|") + ")$"
+}
+
+// vmCheck asks VictoriaMetrics for one series per selector, so a selector
+// it rejects or an unreachable store is reported as an HTTP error before
+// any of the download has been sent.
+func (m *metrics) vmCheck(ctx context.Context, matchers []string, from, to time.Time) error {
+	if m.vmURL == "" {
+		return fmt.Errorf("no metrics store is configured")
+	}
+	q := url.Values{"start": {strconv.FormatInt(from.Unix(), 10)}, "end": {strconv.FormatInt(to.Unix(), 10)}, "limit": {"1"}}
+	for _, s := range matchers {
+		q.Add("match[]", s)
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", m.vmURL+"/api/v1/series?"+q.Encode(), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
+		return fmt.Errorf("victoriametrics: %s %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	return nil
+}
+
+// checkScope runs vmCheck on a scope's selectors and answers 502 when it
+// fails. It returns false when the request has been answered.
+func (s *Server) checkScope(w http.ResponseWriter, r *http.Request, sc rawScope) bool {
+	hosts, switches := sc.matchers()
+	if err := s.metrics.vmCheck(r.Context(), append([]string{hosts}, switches...), sc.From, sc.To); err != nil {
+		log.Printf("raw export: %v", err)
+		httpError(w, http.StatusBadGateway, "the metrics store refused the export: "+err.Error())
+		return false
+	}
+	return true
 }
 
 // vmExport streams the series matching the selectors in the window, one
@@ -221,6 +261,11 @@ func (s *Server) writeRawCSV(ctx context.Context, w io.Writer, sc rawScope, part
 	err := s.metrics.vmExport(ctx, sel, sc.From, sc.To, func(l vmLine) error {
 		return rawRows(l, sc.Switches, cw.Write)
 	})
+	if err != nil {
+		// The header (and maybe rows) are already sent: end the file with
+		// the reason rather than leave it looking complete.
+		cw.Write([]string{"# export stopped early: " + err.Error()})
+	}
 	cw.Flush()
 	if err != nil {
 		return err
@@ -233,9 +278,13 @@ func (s *Server) writeRawCSV(ctx context.Context, w io.Writer, sc rawScope, part
 func (s *Server) writeRawJSONL(ctx context.Context, w io.Writer, sc rawScope) error {
 	hosts, switches := sc.matchers()
 	enc := json.NewEncoder(w)
-	return s.metrics.vmExport(ctx, append([]string{hosts}, switches...), sc.From, sc.To, func(l vmLine) error {
+	err := s.metrics.vmExport(ctx, append([]string{hosts}, switches...), sc.From, sc.To, func(l vmLine) error {
 		return enc.Encode(l)
 	})
+	if err != nil {
+		enc.Encode(map[string]string{"error": "export stopped early: " + err.Error()})
+	}
+	return err
 }
 
 // rawManifest is the zip's manifest.json: what was exported and from what.
@@ -268,8 +317,20 @@ var rawNotes = []string{
 }
 
 // writeRawZip writes manifest.json, host_samples.csv, switch_samples.csv.
-func (s *Server) writeRawZip(ctx context.Context, w io.Writer, sc rawScope, man rawManifest) error {
+// The archive is always finished: if a part fails, ERROR.txt says why, so
+// the file still opens instead of looking empty.
+func (s *Server) writeRawZip(ctx context.Context, w io.Writer, sc rawScope, man rawManifest) (err error) {
 	zw := zip.NewWriter(w)
+	defer func() {
+		if err != nil {
+			if f, e := zw.Create("ERROR.txt"); e == nil {
+				fmt.Fprintf(f, "The export stopped early, so the files in this archive are incomplete.\r\n\r\n%v\r\n", err)
+			}
+		}
+		if e := zw.Close(); err == nil {
+			err = e
+		}
+	}()
 	man.Generated, man.Controller, man.From, man.To = time.Now(), version.Version, sc.From, sc.To
 	man.Columns, man.Notes = rawHeader, rawNotes
 	man.Files = []string{"manifest.json", "host_samples.csv", "switch_samples.csv"}
@@ -298,7 +359,7 @@ func (s *Server) writeRawZip(ctx context.Context, w io.Writer, sc rawScope, man 
 			return err
 		}
 	}
-	return zw.Close()
+	return nil
 }
 
 // runScope is the window and the hosts and switch ports a run touched.
@@ -402,6 +463,9 @@ func (s *Server) rawRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sc, hosts := s.runScope(r.Context(), run, r.URL.Query().Get("switch"))
+	if f := rawFormat(r); (f == "csv" || f == "jsonl" || f == "zip") && !s.checkScope(w, r, sc) {
+		return
+	}
 	name := fmt.Sprintf("srnet-run-%d-raw", id)
 	switch rawFormat(r) {
 	case "csv":
@@ -436,6 +500,14 @@ func (s *Server) rawSuiteRun(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		storeError(w, err)
 		return
+	}
+	for _, rid := range sr.RunIDs { // the selectors are built the same way for every run; check the first
+		if run, err := s.store.Run(r.Context(), rid); err == nil && run.StartedAt != nil {
+			if sc, _ := s.runScope(r.Context(), run, r.URL.Query().Get("switch")); !s.checkScope(w, r, sc) {
+				return
+			}
+			break
+		}
 	}
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="srnet-suite-run-%d-raw.zip"`, id))
@@ -501,6 +573,9 @@ func (s *Server) rawWindow(w http.ResponseWriter, r *http.Request) {
 	}
 	if q.Get("switch") == "none" {
 		sc.NoSwitch, sc.AllSwitch = true, false
+	}
+	if f := rawFormat(r); (f == "csv" || f == "jsonl" || f == "zip") && !s.checkScope(w, r, sc) {
+		return
 	}
 	name := "srnet-raw-" + from.UTC().Format("20060102T150405Z") + "-" + to.UTC().Format("20060102T150405Z")
 	switch rawFormat(r) {

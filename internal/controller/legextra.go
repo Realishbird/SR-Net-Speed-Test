@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -46,12 +45,12 @@ func resolveSwitchName(switches []SwitchConfig, chassis string) string {
 // uses srnet_switch_<counter> with the configured switch name.
 func switchSeries(sw SwitchConfig, gnmi bool, port string) func(counter string) string {
 	if gnmi {
-		src := fmt.Sprintf("(?i)(%s|%s|%s:%d)", regexp.QuoteMeta(sw.Name), regexp.QuoteMeta(sw.Address), regexp.QuoteMeta(sw.Address), sw.GNMIPort)
+		src := gnmiSourceRe(sw)
 		return func(c string) string {
-			return gnmiMetric(c, fmt.Sprintf(`source=~"%s"`, src), fmt.Sprintf(`interface_name="%s"`, port))
+			return gnmiMetric(c, fmt.Sprintf(`source=~%q`, src), fmt.Sprintf(`interface_name=%q`, port))
 		}
 	}
-	return func(c string) string { return fmt.Sprintf(`srnet_switch_%s{switch="%s",port="%s"}`, c, sw.Name, port) }
+	return func(c string) string { return fmt.Sprintf(`srnet_switch_%s{switch=%q,port=%q}`, c, sw.Name, port) }
 }
 
 // counterSnap is one switch sample: the counter value and when it was taken.

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,6 +30,15 @@ type vmSeries struct {
 // names metrics after the whole gNMI path with the configured prefix, e.g.
 // srnet_gnmi_interfaces_interface_state_counters_in_octets, and the exact
 // middle depends on how the switch answers, so match on the leaf.
+// gnmiSourceRe matches the source label gnmic puts on one switch's series:
+// its name (gnmic lower-cases it), its address, or address:port. Embed it in
+// a query with %q (strconv.Quote): the escaped dots of an IP address are not
+// valid escapes inside a MetricsQL string written as "%s", and
+// VictoriaMetrics rejects the whole query.
+func gnmiSourceRe(sw SwitchConfig) string {
+	return fmt.Sprintf("(?i)(%s|%s|%s:%d)", regexp.QuoteMeta(sw.Name), regexp.QuoteMeta(sw.Address), regexp.QuoteMeta(sw.Address), sw.GNMIPort)
+}
+
 func gnmiMetric(leaf string, labels ...string) string {
 	sel := `__name__=~"srnet_gnmi_.*` + leaf + `"`
 	for _, l := range labels {
