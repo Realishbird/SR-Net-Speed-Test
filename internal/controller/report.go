@@ -124,6 +124,9 @@ func writeRunBody(w io.Writer, r api.Run) {
 	if fi := r.Summary.FabricIssues; len(fi) > 0 {
 		fmt.Fprintf(w, `<b>Fabric</b><span class="warn">%d finding(s) on the run's cables when it started: %s</span>`, len(fi), e(strings.Join(fi, "; ")))
 	}
+	if ps := r.Summary.PortSpread; len(ps) > 0 {
+		fmt.Fprintf(w, `<b>Ports</b><span class="warn">ran slower than their siblings: %s</span>`, e(strings.Join(ps, "; ")))
+	}
 	if r.Baseline {
 		fmt.Fprint(w, `<b>Baseline</b><span>this run is the baseline for runs of its shape</span>`)
 	} else if b := r.Summary; b.BaselineRunID != 0 {

@@ -229,7 +229,7 @@ func (s *Store) Hosts(ctx context.Context) ([]hostRec, error) {
 		}
 		var p api.Port
 		json.Unmarshal(info, &p)
-		hp.RdmaDev, hp.PortNum, hp.Netdev, hp.Addrs = p.RdmaDev, p.PortNum, p.Netdev, p.Addrs
+		hp.RdmaDev, hp.PortNum, hp.Netdev, hp.Addrs = p.RdmaDev, p.PortNum, p.Netdev, api.RoutableAddrs(p.Addrs)
 		hp.State, hp.SpeedMbps, hp.FWVersion, hp.Transceiver = p.State, p.SpeedMbps, p.FWVersion, p.Transceiver
 		hp.LLDPSwitch, hp.LLDPPort, hp.LLDPDescr = p.LLDPSwitch, p.LLDPPort, p.LLDPDescr
 		hp.MTU, hp.Driver, hp.PCIe, hp.Netplan = p.MTU, p.Driver, p.PCIe, p.Netplan

@@ -110,12 +110,26 @@ func TestScoreUsesCountersAndErrorDeltas(t *testing.T) {
 	if sum.ToolGbps != 292 || sum.ByFabric["100"] != 191 || sum.ByFabric["101"] != 101 {
 		t.Errorf("summary = %+v", sum)
 	}
-	// Only a counter error, not a bandwidth miss: warn.
+	// Two packets resent out of some 357 million: a pass that says so.
 	plans[1].clientRes.AvgGbps = 195
 	fill(30, 195)
 	_, verdict = o.score(ar)
-	if verdict != "warn" || !strings.Contains(plans[1].leg.Note, "out_of_sequence +2") {
+	if verdict != "pass" || !strings.Contains(plans[1].leg.Note, "out_of_sequence +2, about 1 in 179 million") {
 		t.Errorf("verdict = %s, leg = %+v", verdict, plans[1].leg)
+	}
+	// Above 1 in a million: warn.
+	plans[1].clientRes.ErrorDeltas = map[string]int64{"out_of_sequence": 2000, "packet_seq_err": 9}
+	_, verdict = o.score(ar)
+	if verdict != "warn" || plans[1].leg.Note != "error counters grew: out_of_sequence +2000, packet_seq_err +9" {
+		t.Errorf("verdict = %s, leg = %+v", verdict, plans[1].leg)
+	}
+	// Any other error counter warns at once; on a send test the teardown
+	// counters are named as normal next to it.
+	ar.spec.Test = "send"
+	plans[1].clientRes.ErrorDeltas = map[string]int64{"out_of_sequence": 3, "local_ack_timeout_err": 1, "resp_cqe_error": 270}
+	_, verdict = o.score(ar)
+	if want := "error counters grew: local_ack_timeout_err +1; a few packets lost and resent (out_of_sequence +3, about 1 in 119 million, under 1 in a million); normal for a send test: resp_cqe_error +270"; verdict != "warn" || plans[1].leg.Note != want {
+		t.Errorf("verdict = %s, note = %q\nwant %q", verdict, plans[1].leg.Note, want)
 	}
 }
 
@@ -255,5 +269,38 @@ func TestScoreLatencyAndUDP(t *testing.T) {
 	plans[0].clientRes = &api.LegResult{AvgGbps: 150, Retransmits: 3}
 	if _, v := o.score(ar); v != "warn" {
 		t.Errorf("tcp retransmit verdict %s note %q", v, plans[0].leg.Note)
+	}
+}
+
+// TestCounterSideRing: run 19's Spark ring, where every port sends on one
+// leg and receives on the next. Each leg still owns its server port's rx;
+// bidirectional, no port belongs to one leg alone.
+func TestCounterSideRing(t *testing.T) {
+	ep := func(id int64) endpoint { return endpoint{Host: "spark", PortID: id} }
+	var plans []*legPlan
+	for i := int64(1); i <= 4; i++ {
+		plans = append(plans, &legPlan{client: ep(i), server: ep(i%4 + 1)})
+	}
+	ar := &activeRun{spec: api.RunSpec{Test: "write"}, plans: plans, stages: [][]*legPlan{plans}}
+	for i, p := range plans {
+		if id, dir, _, ok := counterSide(ar, p); !ok || dir != dirRx || id != p.server.PortID {
+			t.Errorf("leg %d: counterSide = %d %v %v, want server port %d rx", i, id, dir, ok, p.server.PortID)
+		}
+	}
+	ar.spec.Test = "read"
+	if id, dir, _, ok := counterSide(ar, plans[0]); !ok || dir != dirTx || id != 2 {
+		t.Errorf("read: counterSide = %d %v %v", id, dir, ok)
+	}
+	ar.spec.Test, ar.spec.Bidir = "write", true
+	if _, _, _, ok := counterSide(ar, plans[0]); ok {
+		t.Error("bidir ring: every port carries two legs each way, no per-leg counter")
+	}
+	// Fan-in: two clients into one server port. The server's rx is shared,
+	// each client's tx is its own.
+	ar.spec.Bidir = false
+	fan := []*legPlan{{client: ep(1), server: ep(9)}, {client: ep(2), server: ep(9)}}
+	ar.stages = [][]*legPlan{fan}
+	if id, dir, _, ok := counterSide(ar, fan[1]); !ok || dir != dirTx || id != 2 {
+		t.Errorf("fan-in: counterSide = %d %v %v", id, dir, ok)
 	}
 }

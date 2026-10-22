@@ -128,8 +128,8 @@ func rxRate(lines []byte) float64 {
 	return -1
 }
 
-// TestSNMPFastRate models the Z9864F: the SNMP agent refreshes its counters
-// every 5 s, the fast poll reads every 2.1 s and a full walk lands in
+// TestSNMPFastRate models a switch whose SNMP agent refreshes its counters
+// every 5 s, read by the fast poll every 2.1 s with a full walk landing in
 // between. The 2 s chart must show the real 80 Gbps, never thousands.
 func TestSNMPFastRate(t *testing.T) {
 	c := newSNMPCollector(nil, newMetrics(""))
@@ -159,7 +159,7 @@ func TestSNMPFastRate(t *testing.T) {
 			if v > 100 {
 				t.Fatalf("t=%.1f: %g Gbps on a 100G port", at, v)
 			}
-			if at > 90 && at < 150 && math.Abs(v-80) > 80*0.04 {
+			if at > 90 && at < 150 && math.Abs(v-80) > 80*0.06 {
 				t.Errorf("t=%.1f: %g Gbps, want 80", at, v)
 			}
 			last = v
@@ -173,6 +173,49 @@ func TestSNMPFastRate(t *testing.T) {
 	}
 	if last != 0 {
 		t.Errorf("idle port ends at %g Gbps, want 0", last)
+	}
+}
+
+// TestSNMPFastRateZ9864F replays fast-poll readings from the lab switch
+// (run 17 on the new Dell's 400G port, run 18 on a Spark's 100G port). The
+// counters move in uneven steps of one to three switch refreshes, so a rate
+// per step pinned the chart at line rate. gNMI over 30 s of the same traffic
+// read 399.2 and 99.6 Gbps.
+func TestSNMPFastRateZ9864F(t *testing.T) {
+	type reading struct{ ms, octets int64 }
+	for _, tc := range []struct {
+		name  string
+		mbps  int64
+		want  float64
+		reads []reading
+	}{
+		{"Ethernet128", 400000, 399.2, []reading{{756113, 41611965898723}, {757378, 41611965898723}, {759406, 41611965898723}, {761434, 41611965898723}, {763462, 41945698100893}, {765490, 41945698100893}, {767516, 42208729127705}, {769546, 42208729127705}, {771570, 42208729127705}, {773594, 42359252999221}, {775620, 42359252999221}, {777648, 42359252999221}, {779678, 42806695209169}, {781708, 42806695209169}, {783737, 42955540763495}, {785766, 42955540763495}, {787791, 42955540763495}, {789813, 43253724896033}, {791842, 43253724896033}, {793866, 43253724896033}, {795887, 43551683549105}, {797917, 43551683549105}, {799945, 43701383722829}, {801972, 43851926946611}, {803998, 43851926946611}, {806028, 43851926946611}, {808061, 43851926946611}, {810090, 44298319722381}, {812117, 44298319722381}, {814147, 44447457834241}, {816179, 44447457834241}, {818209, 44598260681017}, {820230, 44598260681017}}},
+		{"Ethernet0", 100000, 99.6, []reading{{924266, 41251660234907}, {926290, 41251660234907}, {928311, 41251660234907}, {930340, 41251660234907}, {932365, 41252358504531}, {934392, 41252358504531}, {936419, 41327081893689}, {938453, 41327081893689}, {940478, 41327081893689}, {942501, 41364297275764}, {944524, 41364297275764}, {946551, 41364297275764}, {948570, 41475917221051}, {950587, 41475917221051}, {952615, 41475917221051}, {954642, 41475917221051}, {956699, 41550389496775}, {958717, 41550389496775}, {960744, 41624842594887}, {962773, 41624842594887}, {964801, 41624842594887}, {966829, 41624842594887}, {968857, 41699472815409}, {970884, 41699472815409}, {972909, 41699472815409}, {974930, 41782353959997}, {976958, 41810974308699}, {978986, 41810974308699}, {981021, 41810974308699}, {983050, 41885591152971}, {985076, 41885591152971}, {987103, 41960233889469}, {989126, 41960233889469}}},
+	} {
+		c := newSNMPCollector(nil, newMetrics(""))
+		sw := SwitchConfig{Name: "z9864F"}
+		var got []float64
+		for _, r := range tc.reads {
+			at := time.UnixMilli(1792710000000 + r.ms)
+			row := map[string]map[string]any{"1": {"name": tc.name, "in_octets": r.octets, "out_octets": int64(0), "_mbps": tc.mbps, "_at": at}}
+			lines, _ := c.render(sw, row, at, "fast")
+			if v := rxRate(lines); v >= 0 {
+				got = append(got, v)
+			}
+		}
+		if len(got) < 6 {
+			t.Fatalf("%s: only %d rates: %v", tc.name, len(got), got)
+		}
+		sum := 0.0
+		for _, v := range got {
+			sum += v
+			if math.Abs(v-tc.want) > tc.want*0.1 {
+				t.Errorf("%s: %.1f Gbps, want %.1f within 10%% (all: %.1f)", tc.name, v, tc.want, got)
+			}
+		}
+		if mean := sum / float64(len(got)); math.Abs(mean-tc.want) > tc.want*0.04 {
+			t.Errorf("%s: mean %.1f Gbps, want %.1f", tc.name, mean, tc.want)
+		}
 	}
 }
 

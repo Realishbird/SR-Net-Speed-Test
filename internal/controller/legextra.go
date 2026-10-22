@@ -154,6 +154,7 @@ func (o *Orchestrator) legSwitch(ar *activeRun, p *legPlan, from, to time.Time) 
 	// it is mapped, else on the client port, never both.
 	toServer := !strings.HasPrefix(ar.spec.Test, "read")
 	deltas := map[string]float64{}
+	var ignored []string
 	rated := false
 	for _, side := range []struct {
 		name, port string
@@ -226,14 +227,19 @@ func (o *Orchestrator) legSwitch(ar *activeRun, p *legPlan, from, to time.Time) 
 			}
 		}
 		if sw.GNMIUser != "" {
-			for k, v := range o.metrics.qosDeltas(ctx, sw, side.port, from, to) {
+			qd := o.metrics.qosDeltas(ctx, sw, side.port, from, to)
+			for k, v := range qd {
 				deltas[k] = v
+			}
+			if len(qd) > 0 {
+				ignored = append(ignored, pfcIgnored(side.port, qd, o.metrics.pfcOff(ctx, sw, side.port, to))...)
 			}
 		}
 	}
 	if len(deltas) > 0 {
 		ls.Deltas = deltas
 	}
+	ls.PFCIgnored = strings.Join(ignored, ", ")
 	return ls
 }
 

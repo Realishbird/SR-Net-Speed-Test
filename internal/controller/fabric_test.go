@@ -210,3 +210,32 @@ func TestCableInUseSkipsTwinsAndUnusedPorts(t *testing.T) {
 		t.Error("labelled port on its own cable should be checked")
 	}
 }
+
+// TestCheckCablePausingHost: the new Dell's Broadcom NICs, whose PFC setting
+// the agent cannot read, sent pause frames to switch ports with PFC off.
+func TestCheckCablePausingHost(t *testing.T) {
+	up := true
+	spc := &switchPortCfg{MTU: 9100, SpeedMbps: 400000, AdminUp: &up, PFC: []int{}, PFCRead: true, PauseRx: 111, PauseRead: true, Queues: map[int]queueStat{}}
+	v := hostPortView{host: "dellr7615", mtu: 9000, port: api.HostPort{Netdev: "eno16595np0", Addrs: []string{"172.27.100.2/24"}, State: "ACTIVE", SpeedMbps: 400000, Fabric: "100"}}
+	cc := checkCable(v, "100", "z9864f", "Ethernet128", spc, "100", api.FabricProfile{}, false)
+	for _, c := range cc.Checks {
+		if c.Name == "PFC" {
+			if c.State != "bad" || c.Host != "sends pause frames" || !strings.Contains(c.Note, "received 111 PFC pause frames") {
+				t.Fatalf("pfc check: %+v", c)
+			}
+			return
+		}
+	}
+	t.Fatal("no PFC check")
+}
+
+func TestPFCIgnored(t *testing.T) {
+	deltas := map[string]float64{"Ethernet132 prio 3 pause_frames_rx": 46, "Ethernet132 prio 4 pause_frames_rx": 2, "Ethernet132 queue 0 dropped_pkts": 2, "Ethernet1320 prio 3 pause_frames_rx": 9}
+	got := pfcIgnored("Ethernet132", deltas, map[string]bool{"3": true, "4": false})
+	if len(got) != 1 || got[0] != "Ethernet132 priority 3 (46)" {
+		t.Fatalf("got %v", got)
+	}
+	if pfcIgnored("Ethernet132", deltas, nil) != nil {
+		t.Fatal("unknown PFC state must not flag")
+	}
+}

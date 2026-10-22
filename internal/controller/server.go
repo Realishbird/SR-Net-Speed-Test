@@ -345,6 +345,9 @@ func (s *Server) agentInventory(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &inv) {
 		return
 	}
+	for i := range inv.Ports { // agents before v0.1.33 report 169.254 addresses too
+		inv.Ports[i].Addrs = api.RoutableAddrs(inv.Ports[i].Addrs)
+	}
 	if err := s.store.SaveInventory(r.Context(), agentID(r), inv); err != nil {
 		serverError(w, err)
 		return

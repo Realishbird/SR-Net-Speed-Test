@@ -477,6 +477,10 @@ type RunSummary struct {
 	DeltaPct      float64  `json:"delta_pct,omitempty"`     // aggregate change against the baseline, in percent (+ is faster)
 	Regressed     int      `json:"regressed,omitempty"`     // legs that fell behind their baseline by more than the allowance
 	FabricIssues  []string `json:"fabric_issues,omitempty"` // fabric check findings on the run's cables when it started
+	// PortSpread names hosts whose legs ran consistently slower through one
+	// of their ports than through another ("Dell 770AP NIC-2: its 4 legs
+	// averaged 186.2 Gbps, 3.4% below NIC-1's 192.8").
+	PortSpread []string `json:"port_spread,omitempty"`
 	// Workload-shaped figures (Phase 6). Fairness is the slowest leg's rate
 	// over the fastest among the legs of the last stage, 1 = perfectly fair;
 	// Congestion sums the counters that show the fabric pushing back:
@@ -793,6 +797,10 @@ type LegSwitch struct {
 	Gbps       float64            `json:"gbps"`             // average rate along the data flow, from the switch's octet counters
 	Deltas     map[string]float64 `json:"deltas,omitempty"` // "<port> <counter>": growth during the test, only when > 0
 	Note       string             `json:"note,omitempty"`
+	// PFCIgnored names the pause frames a host sent during the test on a
+	// priority the switch port has PFC off for, e.g. "Ethernet132 priority
+	// 3 (46)": the host is set up for lossless and the switch ignores it.
+	PFCIgnored string `json:"pfc_ignored,omitempty"`
 }
 
 // LegBaseline compares a leg with the same leg (same client, server and

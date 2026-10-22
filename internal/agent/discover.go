@@ -114,7 +114,7 @@ func fillNetdev(ctx context.Context, p *api.Port) {
 	if ifc, err := net.InterfaceByName(p.Netdev); err == nil {
 		addrs, _ := ifc.Addrs()
 		for _, a := range addrs {
-			if ipn, ok := a.(*net.IPNet); ok && ipn.IP.To4() != nil {
+			if ipn, ok := a.(*net.IPNet); ok && ipn.IP.To4() != nil && !ipn.IP.IsLinkLocalUnicast() {
 				p.Addrs = append(p.Addrs, ipn.String())
 			}
 		}
