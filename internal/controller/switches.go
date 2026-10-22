@@ -21,7 +21,7 @@ var switchNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
 // config is rewritten; a systemd path unit (installed by
 // deploy/install-controller.sh) restarts gnmic when that file changes.
 func (s *Server) routesSwitches(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/v1/switches", s.admin(s.listSwitches))
+	mux.HandleFunc("GET /api/v1/switches", s.view(s.listSwitches))
 	mux.HandleFunc("PUT /api/v1/switches/{name}", s.admin(s.putSwitch))
 	mux.HandleFunc("DELETE /api/v1/switches/{name}", s.admin(s.deleteSwitch))
 	mux.HandleFunc("POST /api/v1/switches/{name}/test", s.admin(s.testSwitch))

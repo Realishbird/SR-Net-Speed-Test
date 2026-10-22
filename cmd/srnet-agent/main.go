@@ -42,11 +42,11 @@ func main() {
 		fs := flag.NewFlagSet("enroll", flag.ExitOnError)
 		cfgPath := fs.String("config", agent.DefaultConfigPath, "config file to write")
 		controller := fs.String("controller", "", "controller URL, e.g. https://10.0.0.5:8443")
-		token := fs.String("token", "", "one-time enrollment token")
+		token := fs.String("token", "", "enrollment token (optional when the controller allows this subnet to enrol without one)")
 		ca := fs.String("ca", "/etc/srnet/ca.pem", "controller CA certificate")
 		fs.Parse(args)
-		if *controller == "" || *token == "" {
-			log.Fatal("--controller and --token are required")
+		if *controller == "" {
+			log.Fatal("--controller is required")
 		}
 		if err := agent.Enroll(ctx, agent.Config{Controller: *controller, CAFile: *ca}, *token, *cfgPath); err != nil {
 			log.Fatalf("enroll: %v", err)

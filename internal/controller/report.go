@@ -85,16 +85,28 @@ func errorDeltas(m map[string]int64) string {
 }
 
 // WriteRunHTML writes a self-contained report page (print to PDF from the browser).
+// reportCSS is shared by the run report and the acceptance report.
+const reportCSS = `<style>body{font:13px/1.4 system-ui,sans-serif;margin:32px;color:#111}h1{font-size:20px;margin:0 0 4px}h2{font-size:16px;margin:28px 0 4px}table{border-collapse:collapse;width:100%;margin-top:16px}
+th,td{border:1px solid #ccc;padding:5px 8px;text-align:left}th{background:#f2f2f2;font-size:11px;text-transform:uppercase}td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+.pass,.ok{color:#15803d;font-weight:600}.warn{color:#b45309;font-weight:600}.fail,.bad{color:#b91c1c;font-weight:600}.muted{color:#666}.kv{display:grid;grid-template-columns:max-content 1fr;gap:2px 16px;margin-top:12px}
+.verdict{display:inline-block;padding:4px 12px;border-radius:6px;color:#fff;font-weight:700;font-size:14px}.verdict.pass{background:#15803d}.verdict.warn{background:#b45309}.verdict.fail{background:#b91c1c}
+.sign{margin-top:40px;display:grid;grid-template-columns:1fr 1fr;gap:40px}.sign div{border-top:1px solid #333;padding-top:6px;color:#666;font-size:12px}
+@media print{body{margin:12mm}h2{page-break-after:avoid}table{page-break-inside:auto}tr{page-break-inside:avoid}.pb{page-break-before:always}}</style>`
+
 func WriteRunHTML(w io.Writer, r api.Run, controllerVersion string) {
+	e := html.EscapeString
+	fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><title>Run %d: %s</title>%s</head><body>`, r.ID, e(r.Name), reportCSS)
+	fmt.Fprintf(w, `<h1>Run %d: %s</h1><div class="muted">SR-Net-Speed-Test report · generated %s · controller %s</div>`, r.ID, e(r.Name), time.Now().Format("2006-01-02 15:04 MST"), e(controllerVersion))
+	writeRunBody(w, r)
+	fmt.Fprint(w, `</body></html>`)
+}
+
+// writeRunBody renders a run's summary and leg table, the part of the run
+// report the acceptance report repeats for each run of a suite.
+func writeRunBody(w io.Writer, r api.Run) {
 	e := html.EscapeString
 	lat := api.IsLatency(r.Spec.Test)
 	s := r.Spec
-	fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><title>Run %d: %s</title>
-<style>body{font:13px/1.4 system-ui,sans-serif;margin:32px;color:#111}h1{font-size:20px;margin:0 0 4px}table{border-collapse:collapse;width:100%%;margin-top:16px}
-th,td{border:1px solid #ccc;padding:5px 8px;text-align:left}th{background:#f2f2f2;font-size:11px;text-transform:uppercase}td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
-.pass{color:#15803d;font-weight:600}.warn{color:#b45309;font-weight:600}.fail{color:#b91c1c;font-weight:600}.muted{color:#666}.kv{display:grid;grid-template-columns:max-content 1fr;gap:2px 16px;margin-top:12px}
-@media print{body{margin:12mm}}</style></head><body>`, r.ID, e(r.Name))
-	fmt.Fprintf(w, `<h1>Run %d: %s</h1><div class="muted">SR-Net-Speed-Test report · generated %s · controller %s</div>`, r.ID, e(r.Name), time.Now().Format("2006-01-02 15:04 MST"), e(controllerVersion))
 	fmt.Fprintf(w, `<div class="kv"><b>Result</b><span><span class="%s">%s</span> (%s)%s</span>`, e(r.Verdict), e(strings.ToUpper(nonEmpty(r.Verdict, "none"))), e(r.Status), errHTML(r.Error))
 	fmt.Fprintf(w, `<b>Test</b><span>%s · %d s · message size %d%s · qps %d%s%s%s%s</span>`, e(s.Test), s.DurationSec, s.MsgSize, sizesHTML(s.Sizes), s.QPs,
 		optHTML(s.Streams > 1, fmt.Sprintf(" · %d streams", s.Streams)), optHTML(s.Bidir, " · bidirectional (rates add both directions)"), optHTML(s.Serial, " · serial"), optHTML(s.Mesh, " · full mesh"))
@@ -182,7 +194,7 @@ th,td{border:1px solid #ccc;padding:5px 8px;text-align:left}th{background:#f2f2f
 		}
 		fmt.Fprintf(w, `<td class="n muted">%s</td><td class="muted">%s</td><td class="%s">%s</td><td class="muted">%s</td></tr>`, e(cpu), e(errs), e(l.Verdict), e(l.Verdict), e(note))
 	}
-	fmt.Fprint(w, `</table></body></html>`)
+	fmt.Fprint(w, `</table>`)
 }
 
 // deltaHTML words an aggregate change against a baseline.

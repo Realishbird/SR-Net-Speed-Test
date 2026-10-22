@@ -14,29 +14,29 @@ import (
 func (s *Server) routes3(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/agent/release/{version}/{arch}", s.agent(s.agentRelease))
 
-	mux.HandleFunc("GET /api/v1/releases", s.admin(s.listReleases))
+	mux.HandleFunc("GET /api/v1/releases", s.view(s.listReleases))
 	mux.HandleFunc("POST /api/v1/releases/fetch", s.admin(s.fetchRelease))
-	mux.HandleFunc("GET /api/v1/updates", s.admin(s.listUpdates))
+	mux.HandleFunc("GET /api/v1/updates", s.view(s.listUpdates))
 	mux.HandleFunc("POST /api/v1/updates", s.admin(s.startUpdate))
 
-	mux.HandleFunc("GET /api/v1/suites", s.admin(s.listSuites))
+	mux.HandleFunc("GET /api/v1/suites", s.view(s.listSuites))
 	mux.HandleFunc("POST /api/v1/suites", s.admin(s.saveSuite))
 	mux.HandleFunc("PUT /api/v1/suites/{id}", s.admin(s.saveSuite))
 	mux.HandleFunc("DELETE /api/v1/suites/{id}", s.admin(s.deleteSuite))
 	mux.HandleFunc("POST /api/v1/suites/{id}/run", s.admin(s.runSuite))
-	mux.HandleFunc("GET /api/v1/suite-runs", s.admin(s.listSuiteRuns))
+	mux.HandleFunc("GET /api/v1/suite-runs", s.view(s.listSuiteRuns))
 	mux.HandleFunc("POST /api/v1/suite-runs/{id}/cancel", s.admin(s.cancelSuiteRun))
 
-	mux.HandleFunc("GET /api/v1/schedules", s.admin(s.listSchedules))
+	mux.HandleFunc("GET /api/v1/schedules", s.view(s.listSchedules))
 	mux.HandleFunc("POST /api/v1/schedules", s.admin(s.saveSchedule))
 	mux.HandleFunc("PUT /api/v1/schedules/{id}", s.admin(s.saveSchedule))
 	mux.HandleFunc("DELETE /api/v1/schedules/{id}", s.admin(s.deleteSchedule))
 
-	mux.HandleFunc("GET /api/v1/alerts", s.admin(s.listAlerts))
+	mux.HandleFunc("GET /api/v1/alerts", s.view(s.listAlerts))
 	mux.HandleFunc("POST /api/v1/alerts/clear", s.admin(s.clearAlerts))
 	mux.HandleFunc("POST /api/v1/alerts/{id}/clear", s.admin(s.clearAlert))
-	mux.HandleFunc("GET /api/v1/runs/{id}/report.csv", s.admin(s.reportCSV))
-	mux.HandleFunc("GET /api/v1/runs/{id}/report.html", s.admin(s.reportHTML))
+	mux.HandleFunc("GET /api/v1/runs/{id}/report.csv", s.view(s.reportCSV))
+	mux.HandleFunc("GET /api/v1/runs/{id}/report.html", s.view(s.reportHTML))
 }
 
 // Releases and updates.
@@ -127,7 +127,11 @@ func (s *Server) startUpdate(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	job, err := s.rel.StartJob(r.Context(), req.Version, targets, s.orch)
+	parallel := s.updateSettings().Parallel
+	if req.Parallel > 0 && req.Parallel <= 20 {
+		parallel = req.Parallel
+	}
+	job, err := s.rel.StartJob(r.Context(), req.Version, targets, s.orch, parallel)
 	if userErr(w, err) {
 		return
 	}

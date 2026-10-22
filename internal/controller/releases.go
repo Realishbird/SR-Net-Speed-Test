@@ -29,11 +29,12 @@ var versionRe = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`)
 // releases mirrors agent builds from GitHub Releases under
 // <DataDir>/releases/<version>/ and runs fleet update jobs one host at a time.
 type releases struct {
-	dir   string
-	store *Store
-	hub   *hub
-	al    *alerter
-	http  *http.Client
+	dir    string
+	store  *Store
+	hub    *hub
+	al     *alerter
+	notify *notifier
+	http   *http.Client
 
 	mu       sync.Mutex
 	versions map[int64]string      // agent id -> last reported version
@@ -246,7 +247,7 @@ func (r *releases) BinaryPath(version, arch string) (string, string, bool) {
 }
 
 // StartJob updates the given hosts to version, one at a time, in the background.
-func (r *releases) StartJob(ctx context.Context, version string, hosts []hostRec, o *Orchestrator) (*api.UpdateJob, error) {
+func (r *releases) StartJob(ctx context.Context, version string, hosts []hostRec, o *Orchestrator, parallel int) (*api.UpdateJob, error) {
 	r.mu.Lock()
 	if r.job != nil && r.job.Status == "running" {
 		r.mu.Unlock()
@@ -276,7 +277,7 @@ func (r *releases) StartJob(ctx context.Context, version string, hosts []hostRec
 	r.mu.Lock()
 	r.job = job
 	r.mu.Unlock()
-	go r.runJob(job, hosts, rel, o)
+	go r.runJob(job, hosts, rel, o, parallel)
 	return job, nil
 }
 
@@ -289,33 +290,53 @@ func (r *releases) find(version string) *api.Release {
 	return nil
 }
 
-func (r *releases) runJob(job *api.UpdateJob, hosts []hostRec, rel *api.Release, o *Orchestrator) {
+// runJob updates the pending hosts, `parallel` at a time (Phase 8: a fleet
+// of hundreds would otherwise take hours one by one). Each host still gets
+// the same wait-for-idle, verify-and-roll-back treatment.
+func (r *releases) runJob(job *api.UpdateJob, hosts []hostRec, rel *api.Release, o *Orchestrator, parallel int) {
 	ctx := context.Background()
 	byID := map[int64]hostRec{}
 	for _, h := range hosts {
 		byID[h.ID] = h
 	}
+	if parallel < 1 {
+		parallel = 1
+	}
+	var mu sync.Mutex
 	failed := 0
+	sem := make(chan struct{}, parallel)
+	var wg sync.WaitGroup
 	for i := range job.Hosts {
-		st := &job.Hosts[i]
-		if st.Status != "pending" {
+		if job.Hosts[i].Status != "pending" {
 			continue
 		}
-		h := byID[st.HostID]
-		st.Status = "updating"
-		r.store.SaveUpdateJob(ctx, job)
-		if err := r.updateOne(ctx, h, rel, o); err != nil {
-			st.Status, st.Note = "failed", err.Error()
-			failed++
-			log.Printf("update %s to %s: %v", h.Name, rel.Version, err)
-			r.al.open(ctx, api.Alert{Kind: "update_failed", Host: h.Name, Message: fmt.Sprintf("update of %s to %s failed: %v", h.Name, rel.Version, err)})
-		} else {
-			st.Status = "done"
-			log.Printf("update %s to %s: done", h.Name, rel.Version)
-			r.al.resolve(ctx, "update_failed", h.Name, "")
-		}
-		r.store.SaveUpdateJob(ctx, job)
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(st *api.UpdateHostStatus) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			h := byID[st.HostID]
+			mu.Lock()
+			st.Status = "updating"
+			r.store.SaveUpdateJob(ctx, job)
+			mu.Unlock()
+			err := r.updateOne(ctx, h, rel, o)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				st.Status, st.Note = "failed", err.Error()
+				failed++
+				log.Printf("update %s to %s: %v", h.Name, rel.Version, err)
+				r.al.open(ctx, api.Alert{Kind: "update_failed", Host: h.Name, Message: fmt.Sprintf("update of %s to %s failed: %v", h.Name, rel.Version, err)})
+			} else {
+				st.Status = "done"
+				log.Printf("update %s to %s: done", h.Name, rel.Version)
+				r.al.resolve(ctx, "update_failed", h.Name, "")
+			}
+			r.store.SaveUpdateJob(ctx, job)
+		}(&job.Hosts[i])
 	}
+	wg.Wait()
 	now := time.Now()
 	job.EndedAt = &now
 	job.Status = "done"
@@ -323,6 +344,7 @@ func (r *releases) runJob(job *api.UpdateJob, hosts []hostRec, rel *api.Release,
 		job.Status = "failed"
 	}
 	r.store.SaveUpdateJob(ctx, job)
+	r.notify.updateFinished(*job)
 }
 
 func (r *releases) updateOne(ctx context.Context, h hostRec, rel *api.Release, o *Orchestrator) error {

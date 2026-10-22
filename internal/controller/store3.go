@@ -164,6 +164,16 @@ func (s *Store) SuiteRuns(ctx context.Context, limit int) ([]api.SuiteRun, error
 	return out, rows.Err()
 }
 
+func (s *Store) SuiteRun(ctx context.Context, id int64) (api.SuiteRun, error) {
+	var sr api.SuiteRun
+	err := s.db.QueryRow(ctx, `SELECT id, coalesce(suite_id, 0), suite_name, trigger, status, verdict, run_ids, started_at, ended_at FROM suite_runs WHERE id=$1`, id).
+		Scan(&sr.ID, &sr.SuiteID, &sr.SuiteName, &sr.Trigger, &sr.Status, &sr.Verdict, &sr.RunIDs, &sr.StartedAt, &sr.EndedAt)
+	if sr.RunIDs == nil {
+		sr.RunIDs = []int64{}
+	}
+	return sr, err
+}
+
 // Schedules.
 
 func (s *Store) Schedules(ctx context.Context) ([]api.Schedule, error) {

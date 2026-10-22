@@ -25,6 +25,7 @@ type suiteRunner struct {
 	store  *Store
 	orch   *Orchestrator
 	alerts *alerter
+	notify *notifier
 
 	mu      sync.Mutex
 	running map[int64]context.CancelFunc // suite run id -> cancel
@@ -110,6 +111,7 @@ func (sr *suiteRunner) execute(ctx context.Context, rec *api.SuiteRun, suite api
 		sr.alerts.resolve(bg, "run_failed", suite.Name, "")
 	}
 	log.Printf("suite %s (%s): %s, %s", suite.Name, rec.Trigger, status, worst)
+	sr.notify.suiteFinished(*rec)
 }
 
 func (sr *suiteRunner) waitRun(ctx context.Context, id int64) api.Run {

@@ -85,7 +85,7 @@ func OpenStore(ctx context.Context, url string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(ctx, schema+schema3+schemaFabric); err != nil {
+	if _, err := db.Exec(ctx, schema+schema3+schemaFabric+schemaAccess+schemaScale); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
@@ -98,6 +98,9 @@ func OpenStore(ctx context.Context, url string) (*Store, error) {
 func (s *Store) Close() { s.db.Close() }
 
 func (s *Store) Audit(ctx context.Context, action string, detail any) {
+	if s == nil || s.db == nil {
+		return
+	}
 	b, _ := json.Marshal(detail)
 	s.db.Exec(ctx, `INSERT INTO audit (action, detail) VALUES ($1, $2)`, action, b)
 }
@@ -125,7 +128,7 @@ func (s *Store) ConsumeToken(ctx context.Context, hash string) error {
 
 // EnrollAgent creates an agent, or re-keys the existing one with the same
 // hostname so a reinstall keeps its name, tags and port labels.
-func (s *Store) EnrollAgent(ctx context.Context, uid, secretHash string, inv api.Inventory) (string, error) {
+func (s *Store) EnrollAgent(ctx context.Context, uid, secretHash string, inv api.Inventory, approved bool) (string, error) {
 	invJSON, _ := json.Marshal(inv)
 	var gotUID string
 	err := s.db.QueryRow(ctx, `UPDATE agents SET secret_hash=$1, inventory=$2, last_seen=now()
@@ -136,8 +139,8 @@ func (s *Store) EnrollAgent(ctx context.Context, uid, secretHash string, inv api
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return "", err
 	}
-	_, err = s.db.Exec(ctx, `INSERT INTO agents (uid, secret_hash, hostname, name, inventory, last_seen)
-		VALUES ($1, $2, $3, $3, $4, now())`, uid, secretHash, inv.Hostname, invJSON)
+	_, err = s.db.Exec(ctx, `INSERT INTO agents (uid, secret_hash, hostname, name, inventory, last_seen, approved)
+		VALUES ($1, $2, $3, $3, $4, now(), $5)`, uid, secretHash, inv.Hostname, invJSON, approved)
 	return uid, err
 }
 
@@ -189,7 +192,7 @@ type hostRec struct {
 }
 
 func (s *Store) Hosts(ctx context.Context) ([]hostRec, error) {
-	rows, err := s.db.Query(ctx, `SELECT id, uid, name, hostname, tags, site, rack, inventory, coalesce(last_seen, 'epoch') FROM agents ORDER BY lower(name), id`)
+	rows, err := s.db.Query(ctx, `SELECT id, uid, name, hostname, tags, site, rack, inventory, coalesce(last_seen, 'epoch'), approved FROM agents ORDER BY lower(name), id`)
 	if err != nil {
 		return nil, err
 	}
@@ -198,7 +201,7 @@ func (s *Store) Hosts(ctx context.Context) ([]hostRec, error) {
 	for rows.Next() {
 		var h hostRec
 		var inv []byte
-		if err := rows.Scan(&h.ID, &h.UID, &h.Name, &h.Hostname, &h.Tags, &h.Site, &h.Rack, &inv, &h.LastSeen); err != nil {
+		if err := rows.Scan(&h.ID, &h.UID, &h.Name, &h.Hostname, &h.Tags, &h.Site, &h.Rack, &inv, &h.LastSeen, &h.Approved); err != nil {
 			rows.Close()
 			return nil, err
 		}

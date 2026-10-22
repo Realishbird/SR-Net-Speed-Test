@@ -980,11 +980,11 @@ func (s *Server) fabricIssuesFor(ctx context.Context, portIDs map[int64]bool) []
 // Routes.
 
 func (s *Server) routesFabric(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/v1/fabric-check", s.admin(s.getFabricCheck))
-	mux.HandleFunc("GET /api/v1/fabrics", s.admin(s.listFabrics))
+	mux.HandleFunc("GET /api/v1/fabric-check", s.view(s.getFabricCheck))
+	mux.HandleFunc("GET /api/v1/fabrics", s.view(s.listFabrics))
 	mux.HandleFunc("PUT /api/v1/fabrics/{name}", s.admin(s.putFabric))
 	mux.HandleFunc("DELETE /api/v1/fabrics/{name}", s.admin(s.deleteFabric))
-	mux.HandleFunc("GET /api/v1/fabrics/presets", s.admin(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/v1/fabrics/presets", s.view(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]api.FabricProfile{"lossless": fabricPreset("lossless"), "lossy": fabricPreset("lossy")})
 	}))
 }
