@@ -41,10 +41,29 @@ func TestLegSwitchFromVictoriaMetrics(t *testing.T) {
 		"out_errors":   {0, 0},
 	}
 	re := regexp.MustCompile(`^(tlast_over_time|last_over_time)\(\{__name__=~"srnet_gnmi_\.\*(\w+)",([^}]*)\}\[90s\] @ (\d+)\)$`)
+	qosRe := regexp.MustCompile(`^last_over_time\(\{__name__=~"srnet_gnmi_\.\*qos[^"]*",source=~"[^"]*",interface_id="(Ethernet\d+)"\}\[90s\] @ (\d+)\)$`)
 	var queries []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query().Get("query")
 		queries = append(queries, q)
+		if qm := qosRe.FindStringSubmatch(q); qm != nil {
+			// The QoS subscription (Phase 5): queue 0 on the server port dropped
+			// 40 packets during the test and its PFC priority 3 saw 5 pauses.
+			if qm[1] != "Ethernet64" {
+				w.Write([]byte(`{"status":"success","data":{"result":[]}}`))
+				return
+			}
+			drops, pauses := 100, 10
+			if qm[2] == fmt.Sprint(end.Unix()) {
+				drops, pauses = 140, 15
+			}
+			fmt.Fprintf(w, `{"status":"success","data":{"result":[
+				{"metric":{"__name__":"srnet_gnmi_openconfig_qos_qos_interfaces_interface_output_queues_queue_state_dropped_pkts","source":"z9864f","interface_id":"Ethernet64","name":"Ethernet64:0"},"value":[%d,"%d"]},
+				{"metric":{"__name__":"srnet_gnmi_openconfig_qos_qos_interfaces_interface_output_queues_queue_state_dropped_pkts","source":"z9864f","interface_id":"Ethernet64","name":"Ethernet64:3"},"value":[%d,"0"]},
+				{"metric":{"__name__":"srnet_gnmi_openconfig_qos_qos_interfaces_interface_pfc_pfc_priorities_pfc_priority_state_pause_frames_rx","source":"z9864f","interface_id":"Ethernet64","dot1p":"3"},"value":[%d,"%d"]}]}}`,
+				end.Unix(), drops, end.Unix(), end.Unix(), pauses)
+			return
+		}
 		m := re.FindStringSubmatch(q)
 		if m == nil {
 			t.Errorf("unexpected query %q", q)
@@ -105,7 +124,7 @@ func TestLegSwitchFromVictoriaMetrics(t *testing.T) {
 	if ls.Gbps < 97.9 || ls.Gbps > 98.1 {
 		t.Errorf("Gbps = %.3f, want 98 (735 GB over the 60 s between samples)", ls.Gbps)
 	}
-	if ls.Deltas["Ethernet64 in_discards"] != 7 || len(ls.Deltas) != 1 {
+	if ls.Deltas["Ethernet64 in_discards"] != 7 || ls.Deltas["Ethernet64 queue 0 dropped_pkts"] != 40 || ls.Deltas["Ethernet64 prio 3 pause_frames_rx"] != 5 || len(ls.Deltas) != 3 {
 		t.Errorf("deltas = %v", ls.Deltas)
 	}
 	if ls.Note != "" {
@@ -166,10 +185,10 @@ func TestReportsCarrySwitchAndCPU(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(csvOut.String()), "\n")
-	if !strings.HasSuffix(lines[0], ",switch_client_port,switch_server_port,switch_gbps,switch_deltas,cpu_client_avg_pct,cpu_client_peak_pct,cpu_server_avg_pct,cpu_server_peak_pct") {
+	if !strings.HasSuffix(lines[0], ",switch_client_port,switch_server_port,switch_gbps,switch_deltas,cpu_client_avg_pct,cpu_client_peak_pct,cpu_server_avg_pct,cpu_server_peak_pct,baseline_run,baseline_value,baseline_delta_pct") {
 		t.Errorf("csv header = %s", lines[0])
 	}
-	if !strings.HasSuffix(lines[1], ",sw Ethernet8,sw Ethernet64,97.86,Ethernet64 in_discards=7,12.3,40,5,9") {
+	if !strings.HasSuffix(lines[1], ",sw Ethernet8,sw Ethernet64,97.86,Ethernet64 in_discards=7,12.3,40,5,9,,,") {
 		t.Errorf("csv row = %s", lines[1])
 	}
 	WriteRunHTML(&htmlOut, r, "test")

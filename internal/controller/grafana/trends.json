@@ -1,0 +1,490 @@
+{
+ "uid": "srnet-trends",
+ "title": "SR-Net: Trends",
+ "tags": [
+  "srnet"
+ ],
+ "timezone": "browser",
+ "schemaVersion": 39,
+ "version": 1,
+ "refresh": "1m",
+ "time": {
+  "from": "now-30d",
+  "to": "now"
+ },
+ "editable": true,
+ "description": "Results across runs: one point per leg per finished run, with the baseline each leg was compared against. Widen the time range to see weeks; the Runs page's baselines decide the reference line.",
+ "templating": {
+  "list": [
+   {
+    "name": "test",
+    "label": "Test",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "srnet-vm"
+    },
+    "query": {
+     "query": "label_values(srnet_run_legs, test)",
+     "refId": "v"
+    },
+    "refresh": 2,
+    "sort": 1,
+    "includeAll": false,
+    "multi": false,
+    "current": {
+     "text": "write",
+     "value": "write"
+    },
+    "description": "Bandwidth tests draw Gbps; latency tests draw p99 \u00b5s."
+   },
+   {
+    "name": "client",
+    "label": "Client",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "srnet-vm"
+    },
+    "query": {
+     "query": "label_values({__name__=~\"srnet_result_(gbps|lat_p99_us)\"}, client)",
+     "refId": "v"
+    },
+    "refresh": 2,
+    "sort": 1,
+    "includeAll": true,
+    "multi": true,
+    "allValue": ".*",
+    "current": {
+     "text": "All",
+     "value": "$__all"
+    },
+    "description": "Client host(s) of the legs to draw."
+   },
+   {
+    "name": "server",
+    "label": "Server",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "srnet-vm"
+    },
+    "query": {
+     "query": "label_values({__name__=~\"srnet_result_(gbps|lat_p99_us)\"}, server)",
+     "refId": "v"
+    },
+    "refresh": 2,
+    "sort": 1,
+    "includeAll": true,
+    "multi": true,
+    "allValue": ".*",
+    "current": {
+     "text": "All",
+     "value": "$__all"
+    },
+    "description": "Server host(s) of the legs to draw."
+   }
+  ]
+ },
+ "panels": [
+  {
+   "type": "timeseries",
+   "title": "Tool Gbps per link, run by run",
+   "description": "One point per finished run. A link that drifts down shows here before anyone reads a run page. Pick a test at the top; latency tests use the p99 panel below.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 16,
+    "h": 10
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Gbps",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "pointSize": 6,
+      "showPoints": "always",
+      "fillOpacity": 0,
+      "spanNulls": true
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "calcs": [
+      "lastNotNull",
+      "min",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max by (client, server, msg_size) (srnet_result_gbps{test=~\"$test\",client=~\"$client\",server=~\"$server\"})",
+     "legendFormat": "{{client}} > {{server}} @{{msg_size}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Change against baseline (%)",
+   "description": "Each leg against the same leg of the baseline run it was compared with. Positive is faster (or lower p99); below the red line is a regression at the default 5% allowance.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 16,
+    "y": 0,
+    "w": 8,
+    "h": 10
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "pointSize": 6,
+      "showPoints": "always",
+      "fillOpacity": 0,
+      "spanNulls": true,
+      "thresholdsStyle": {
+       "mode": "line"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "red",
+        "value": null
+       },
+       {
+        "color": "green",
+        "value": -5
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "calcs": [
+      "lastNotNull",
+      "min",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max by (client, server, msg_size) (srnet_result_delta_pct{test=~\"$test\",client=~\"$client\",server=~\"$server\"})",
+     "legendFormat": "{{client}} > {{server}} @{{msg_size}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Baseline value the legs were compared with",
+   "description": "Gbps for bandwidth tests, \u00b5s p99 for latency tests. A step here means a new baseline was set.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 10,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "pointSize": 6,
+      "showPoints": "always",
+      "fillOpacity": 0,
+      "spanNulls": true
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "calcs": [
+      "lastNotNull",
+      "min",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max by (client, server, msg_size) (srnet_result_baseline_value{test=~\"$test\",client=~\"$client\",server=~\"$server\"})",
+     "legendFormat": "{{client}} > {{server}} @{{msg_size}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "p99 latency per link (latency tests)",
+   "description": "Lower is better.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 10,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "\u00b5s",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "pointSize": 6,
+      "showPoints": "always",
+      "fillOpacity": 0,
+      "spanNulls": true
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "calcs": [
+      "lastNotNull",
+      "min",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max by (client, server, msg_size) (srnet_result_lat_p99_us{test=~\"$test\",client=~\"$client\",server=~\"$server\"})",
+     "legendFormat": "{{client}} > {{server}} @{{msg_size}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Run aggregate (tool Gbps)",
+   "description": "Every finished bandwidth run of the selected test.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 18,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Gbps",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "pointSize": 6,
+      "showPoints": "always",
+      "fillOpacity": 0,
+      "spanNulls": true
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "calcs": [
+      "lastNotNull",
+      "min",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max by (run_id, name) (srnet_run_gbps{test=~\"$test\"})",
+     "legendFormat": "run {{run_id}} {{name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Error counters grown per leg",
+   "description": "Sum of the RDMA error counters that grew on both ends during the leg. On send tests the RNR retries and teardown flushes are normal; on write and read anything above 0 is worth a look.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 18,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "pointSize": 6,
+      "showPoints": "always",
+      "fillOpacity": 0,
+      "spanNulls": true
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "calcs": [
+      "lastNotNull",
+      "min",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max by (client, server, msg_size) (srnet_result_error_counters{test=~\"$test\",client=~\"$client\",server=~\"$server\"})",
+     "legendFormat": "{{client}} > {{server}} @{{msg_size}}"
+    }
+   ]
+  },
+  {
+   "type": "table",
+   "title": "Latest result per link",
+   "description": "The newest finished run's figure for every link seen in the time range.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 26,
+    "w": 24,
+    "h": 10
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Gbps",
+     "custom": {
+      "align": "auto"
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Value"
+      },
+      "properties": [
+       {
+        "id": "displayName",
+        "value": "Tool Gbps"
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "sortBy": [
+     {
+      "displayName": "client",
+      "desc": false
+     }
+    ]
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "last_over_time(srnet_result_gbps{test=~\"$test\",client=~\"$client\",server=~\"$server\"}[$__range])",
+     "format": "table",
+     "instant": true
+    }
+   ],
+   "transformations": [
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true,
+       "__name__": true,
+       "bidir": true,
+       "client_ip": true,
+       "server_ip": true
+      },
+      "indexByName": {
+       "client": 0,
+       "server": 1,
+       "fabric": 2,
+       "msg_size": 3,
+       "run_id": 4,
+       "verdict": 5,
+       "Value": 6
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

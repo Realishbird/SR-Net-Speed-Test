@@ -182,6 +182,11 @@ func (o *Orchestrator) legSwitch(ar *activeRun, p *legPlan, from, to time.Time) 
 				deltas[side.port+" "+c] = float64(int64(v + 0.5))
 			}
 		}
+		if sw.GNMIUser != "" {
+			for k, v := range o.metrics.qosDeltas(ctx, sw, side.port, from, to) {
+				deltas[k] = v
+			}
+		}
 	}
 	if len(deltas) > 0 {
 		ls.Deltas = deltas

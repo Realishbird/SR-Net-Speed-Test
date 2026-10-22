@@ -15,6 +15,7 @@ const (
 	ToolReadLat  = "ib_read_lat"
 	ToolSendLat  = "ib_send_lat"
 	ToolIperf3   = "iperf3"
+	ToolNCCL     = "srnet-nccl" // the agent's bundled NCCL collective benchmark (PyTorch)
 )
 
 // Test names in a RunSpec and the tool each one runs.
@@ -22,7 +23,12 @@ var Tests = map[string]string{
 	"write": ToolWriteBW, "read": ToolReadBW, "send": ToolSendBW,
 	"write_lat": ToolWriteLat, "read_lat": ToolReadLat, "send_lat": ToolSendLat,
 	"tcp": ToolIperf3, "udp": ToolIperf3,
+	"nccl_allreduce": ToolNCCL, "nccl_allgather": ToolNCCL,
 }
+
+// IsCollective reports whether a test is a GPU collective over every host at
+// once (NCCL) rather than a set of point-to-point legs.
+func IsCollective(test string) bool { return strings.HasPrefix(test, "nccl_") }
 
 // IsLatency reports whether a test measures latency rather than bandwidth.
 func IsLatency(test string) bool { return strings.HasSuffix(test, "_lat") }
@@ -57,21 +63,38 @@ type EnrollResponse struct {
 
 // Port is one RDMA port and the netdev behind it.
 type Port struct {
-	RdmaDev     string   `json:"rdma_dev"`
-	PortNum     int      `json:"port_num"`
-	Netdev      string   `json:"netdev"`
-	Addrs       []string `json:"addrs"` // CIDR form, e.g. 172.27.100.10/24
-	LinkLayer   string   `json:"link_layer"`
-	State       string   `json:"state"`
-	PhysState   string   `json:"phys_state"`
-	SpeedMbps   int      `json:"speed_mbps"`
-	MTU         int      `json:"mtu"`
-	Driver      string   `json:"driver"`
-	FWVersion   string   `json:"fw_version"`
-	Transceiver string   `json:"transceiver"`
-	NUMANode    int      `json:"numa_node"`
-	LLDPSwitch  string   `json:"lldp_switch,omitempty"` // neighbour chassis name from lldpd
-	LLDPPort    string   `json:"lldp_port,omitempty"`   // neighbour port id
+	RdmaDev     string        `json:"rdma_dev"`
+	PortNum     int           `json:"port_num"`
+	Netdev      string        `json:"netdev"`
+	Addrs       []string      `json:"addrs"` // CIDR form, e.g. 172.27.100.10/24
+	LinkLayer   string        `json:"link_layer"`
+	State       string        `json:"state"`
+	PhysState   string        `json:"phys_state"`
+	SpeedMbps   int           `json:"speed_mbps"`
+	MTU         int           `json:"mtu"`
+	Driver      string        `json:"driver"`
+	FWVersion   string        `json:"fw_version"`
+	Transceiver string        `json:"transceiver"`
+	NUMANode    int           `json:"numa_node"`
+	LLDPSwitch  string        `json:"lldp_switch,omitempty"` // neighbour chassis name from lldpd
+	LLDPPort    string        `json:"lldp_port,omitempty"`   // neighbour port id
+	Settings    *PortSettings `json:"settings,omitempty"`    // host-side RoCE settings, for the fabric check
+}
+
+// PortSettings is how the host has the port set up for RoCE: what the
+// fabric check compares with the fabric profile and the switch port.
+// Empty strings mean the agent could not read that setting.
+type PortSettings struct {
+	RoCEMode string `json:"roce_mode,omitempty"` // "v2" when a RoCE v2 GID exists, "v1" when only v1
+	Trust    string `json:"trust,omitempty"`     // dscp or pcp (what the NIC maps traffic to priorities by)
+	PFC      string `json:"pfc,omitempty"`       // priorities with PFC on, e.g. "3" or "3,4"; "none" when read and all off
+	DSCPPrio string `json:"dscp_prio,omitempty"` // DSCP to priority map in use, e.g. "26:3,48:6"
+	ECNNp    string `json:"ecn_np,omitempty"`    // priorities with ECN notification point (CNP sender) on
+	ECNRp    string `json:"ecn_rp,omitempty"`    // priorities with ECN reaction point (rate limiter) on
+	CNPDSCP  int    `json:"cnp_dscp,omitempty"`  // DSCP the NIC marks CNPs with (-1 unknown)
+	CNPPrio  int    `json:"cnp_prio,omitempty"`  // 802.1p priority of CNPs (-1 unknown)
+	TOS      int    `json:"tos,omitempty"`       // default RoCE traffic class (TOS) of the RDMA device, -1 unknown
+	Source   string `json:"source,omitempty"`    // which tools answered: dcb, mlnx_qos, sysfs
 }
 
 type Inventory struct {
@@ -110,6 +133,14 @@ type Task struct {
 	Protocol    string    `json:"protocol,omitempty"` // iperf3: tcp or udp
 	StartAt     time.Time `json:"start_at,omitempty"`
 
+	// Collective (NCCL) tasks: every host runs one rank; rank 0 is the
+	// server task and hosts the rendezvous on TCPPort.
+	Rank       int    `json:"rank,omitempty"`
+	WorldSize  int    `json:"world_size,omitempty"`
+	MasterIP   string `json:"master_ip,omitempty"`
+	Collective string `json:"collective,omitempty"` // allreduce | allgather
+	Sizes      []int  `json:"sizes,omitempty"`      // bytes per step, each measured in turn
+
 	// Update tasks.
 	Version string `json:"version,omitempty"`
 	URLPath string `json:"url_path,omitempty"` // controller path serving the binary
@@ -143,24 +174,25 @@ type Event struct {
 
 // LegResult is what one side of a leg reports when its benchmark process ends.
 type LegResult struct {
-	TaskID      string           `json:"task_id"`
-	RunID       int64            `json:"run_id"`
-	LegID       int64            `json:"leg_id"`
-	Kind        string           `json:"kind"`
-	Command     []string         `json:"command"`
-	ExitCode    int              `json:"exit_code"`
-	AvgGbps     float64          `json:"avg_gbps"`
-	PeakGbps    float64          `json:"peak_gbps"`
-	MsgRateMpps float64          `json:"msg_rate_mpps"`
-	Latency     *Latency         `json:"latency,omitempty"`
-	Retransmits int64            `json:"retransmits,omitempty"` // iperf3 TCP
-	LossPct     float64          `json:"loss_pct,omitempty"`    // iperf3 UDP
-	JitterMs    float64          `json:"jitter_ms,omitempty"`   // iperf3 UDP
-	Output      string           `json:"output"`
-	Error       string           `json:"error,omitempty"`
-	ErrorDeltas map[string]int64 `json:"error_deltas,omitempty"`
-	StartedAt   time.Time        `json:"started_at"`
-	EndedAt     time.Time        `json:"ended_at"`
+	TaskID      string             `json:"task_id"`
+	RunID       int64              `json:"run_id"`
+	LegID       int64              `json:"leg_id"`
+	Kind        string             `json:"kind"`
+	Command     []string           `json:"command"`
+	ExitCode    int                `json:"exit_code"`
+	AvgGbps     float64            `json:"avg_gbps"`
+	PeakGbps    float64            `json:"peak_gbps"`
+	MsgRateMpps float64            `json:"msg_rate_mpps"`
+	Latency     *Latency           `json:"latency,omitempty"`
+	Retransmits int64              `json:"retransmits,omitempty"` // iperf3 TCP
+	LossPct     float64            `json:"loss_pct,omitempty"`    // iperf3 UDP
+	JitterMs    float64            `json:"jitter_ms,omitempty"`   // iperf3 UDP
+	Points      map[string]float64 `json:"points,omitempty"`      // collective: bus bandwidth (Gbps) per message size in bytes
+	Output      string             `json:"output"`
+	Error       string             `json:"error,omitempty"`
+	ErrorDeltas map[string]int64   `json:"error_deltas,omitempty"`
+	StartedAt   time.Time          `json:"started_at"`
+	EndedAt     time.Time          `json:"ended_at"`
 }
 
 // Sample is one telemetry reading. RdmaDev is empty for host-level values.
@@ -263,6 +295,7 @@ type RunSpec struct {
 	PassPct     float64   `json:"pass_pct"`
 	MaxLatP99Us float64   `json:"max_lat_p99_us,omitempty"` // latency tests fail above this when set
 	MaxLossPct  float64   `json:"max_loss_pct,omitempty"`   // udp tests fail above this (default 1)
+	RegressPct  float64   `json:"regress_pct,omitempty"`    // warn when a leg is this much worse than its baseline (default 5)
 }
 
 type LegSpec struct {
@@ -274,8 +307,9 @@ type Run struct {
 	ID        int64      `json:"id"`
 	Name      string     `json:"name"`
 	Spec      RunSpec    `json:"spec"`
-	Status    string     `json:"status"`  // queued | running | done | failed | canceled
-	Verdict   string     `json:"verdict"` // pass | warn | fail | ""
+	Status    string     `json:"status"`   // queued | running | done | failed | canceled
+	Verdict   string     `json:"verdict"`  // pass | warn | fail | ""
+	Baseline  bool       `json:"baseline"` // marked as the reference for runs of the same shape
 	Error     string     `json:"error,omitempty"`
 	CreatedAt time.Time  `json:"created_at"`
 	StartedAt *time.Time `json:"started_at,omitempty"`
@@ -289,31 +323,47 @@ type RunSummary struct {
 	CounterGbps float64            `json:"counter_gbps"`
 	ByFabric    map[string]float64 `json:"by_fabric,omitempty"`
 	LiveGbps    float64            `json:"live_gbps,omitempty"`
+	// Comparison with the newest baseline run of the same shape, when one exists.
+	BaselineRunID int64    `json:"baseline_run_id,omitempty"`
+	BaselineGbps  float64  `json:"baseline_gbps,omitempty"` // the baseline's aggregate over the legs matched here
+	DeltaPct      float64  `json:"delta_pct,omitempty"`     // aggregate change against the baseline, in percent (+ is faster)
+	Regressed     int      `json:"regressed,omitempty"`     // legs that fell behind their baseline by more than the allowance
+	FabricIssues  []string `json:"fabric_issues,omitempty"` // fabric check findings on the run's cables when it started
+	// Workload-shaped figures (Phase 6). Fairness is the slowest leg's rate
+	// over the fastest among the legs of the last stage, 1 = perfectly fair;
+	// Congestion sums the counters that show the fabric pushing back:
+	// ECN-marked packets, CNPs sent and handled, switch queue drops and PFC
+	// pauses on the legs' ports.
+	Fairness   float64          `json:"fairness,omitempty"`
+	Congestion map[string]int64 `json:"congestion,omitempty"`
 }
 
 type Leg struct {
-	ID           int64            `json:"id"`
-	Index        int              `json:"index"`
-	Stage        int              `json:"stage"`              // sequential stage this leg ran in
-	MsgSize      int              `json:"msg_size,omitempty"` // set per leg in a size sweep
-	ClientHost   string           `json:"client_host"`
-	ClientIP     string           `json:"client_ip"`
-	ServerHost   string           `json:"server_host"`
-	ServerIP     string           `json:"server_ip"`
-	Fabric       string           `json:"fabric"`
-	ExpectedGbps float64          `json:"expected_gbps"`
-	ToolGbps     float64          `json:"tool_gbps"`
-	CounterGbps  float64          `json:"counter_gbps"`
-	LiveGbps     float64          `json:"live_gbps"`
-	Latency      *Latency         `json:"latency,omitempty"`
-	Retransmits  int64            `json:"retransmits,omitempty"`
-	LossPct      float64          `json:"loss_pct,omitempty"`
-	JitterMs     float64          `json:"jitter_ms,omitempty"`
-	ErrorDeltas  map[string]int64 `json:"error_deltas,omitempty"`
-	Switch       *LegSwitch       `json:"switch,omitempty"` // switch ports and counters, when LLDP and switch telemetry exist
-	CPU          *LegCPU          `json:"cpu,omitempty"`    // host CPU during the test, when the agents reported it
-	Verdict      string           `json:"verdict"`
-	Note         string           `json:"note,omitempty"`
+	ID           int64              `json:"id"`
+	Index        int                `json:"index"`
+	Stage        int                `json:"stage"`              // sequential stage this leg ran in
+	MsgSize      int                `json:"msg_size,omitempty"` // set per leg in a size sweep
+	ClientHost   string             `json:"client_host"`
+	ClientIP     string             `json:"client_ip"`
+	ServerHost   string             `json:"server_host"`
+	ServerIP     string             `json:"server_ip"`
+	Fabric       string             `json:"fabric"`
+	ExpectedGbps float64            `json:"expected_gbps"`
+	SharedPort   string             `json:"shared_port,omitempty"` // "<host> <ip> x<n>": a port this leg shares with n-1 other legs of its stage, which caps its expected rate to a fair share
+	ToolGbps     float64            `json:"tool_gbps"`
+	CounterGbps  float64            `json:"counter_gbps"`
+	LiveGbps     float64            `json:"live_gbps"`
+	Latency      *Latency           `json:"latency,omitempty"`
+	Points       map[string]float64 `json:"points,omitempty"` // collective: bus bandwidth per size; ToolGbps is the largest size's
+	Retransmits  int64              `json:"retransmits,omitempty"`
+	LossPct      float64            `json:"loss_pct,omitempty"`
+	JitterMs     float64            `json:"jitter_ms,omitempty"`
+	ErrorDeltas  map[string]int64   `json:"error_deltas,omitempty"`
+	Switch       *LegSwitch         `json:"switch,omitempty"`   // switch ports and counters, when LLDP and switch telemetry exist
+	CPU          *LegCPU            `json:"cpu,omitempty"`      // host CPU during the test, when the agents reported it
+	Baseline     *LegBaseline       `json:"baseline,omitempty"` // the same leg in the baseline run, when one matched
+	Verdict      string             `json:"verdict"`
+	Note         string             `json:"note,omitempty"`
 }
 
 // Release is an agent build mirrored on the controller.
@@ -534,6 +584,76 @@ type LegSwitch struct {
 	Gbps       float64            `json:"gbps"`             // average rate along the data flow, from the switch's octet counters
 	Deltas     map[string]float64 `json:"deltas,omitempty"` // "<port> <counter>": growth during the test, only when > 0
 	Note       string             `json:"note,omitempty"`
+}
+
+// LegBaseline compares a leg with the same leg (same client, server and
+// message size) of the newest baseline run of the run's shape. Value is the
+// baseline's figure: Gbps for bandwidth tests, p99 µs for latency tests.
+type LegBaseline struct {
+	RunID     int64   `json:"run_id"`
+	Value     float64 `json:"value"`
+	DeltaPct  float64 `json:"delta_pct"` // this leg against the baseline, in percent of the baseline (+ is faster, or lower latency)
+	Regressed bool    `json:"regressed"` // worse than the baseline by more than the run's allowance
+}
+
+// BaselineRequest is the body of POST /api/v1/runs/{id}/baseline.
+type BaselineRequest struct {
+	Baseline bool `json:"baseline"`
+}
+
+// FabricProfile says how a fabric is meant to be set up (Phase 5). The
+// fabric check compares every cable of the fabric (host port, switch port)
+// with it. -1 in a number means "not checked"; an empty string the same.
+type FabricProfile struct {
+	Fabric      string     `json:"fabric"`
+	Mode        string     `json:"mode"`         // lossless (PFC and ECN expected, drops are a fault) | lossy (PFC off expected, drops allowed) | "" (consistency only)
+	SwitchMTU   int        `json:"switch_mtu"`   // switch port MTU at least this (9100)
+	HostMTU     int        `json:"host_mtu"`     // host netdev MTU at least this (9000; RDMA MTU 4096 needs more than 4200)
+	SpeedMbps   int        `json:"speed_mbps"`   // link speed on both ends (100000)
+	VLAN        string     `json:"vlan"`         // switch VLAN the ports must be in ("100"); empty = the fabric name
+	PFCPriority int        `json:"pfc_priority"` // priority with PFC on, on the switch and the host (3); -1 = PFC off expected
+	ECNQueue    int        `json:"ecn_queue"`    // switch queue with ECN marking (3); -1 = not checked
+	RoCEDSCP    int        `json:"roce_dscp"`    // DSCP the switch maps to the RoCE queue (26); -1 = not checked
+	CNPDSCP     int        `json:"cnp_dscp"`     // DSCP CNPs are sent with (48); -1 = not checked
+	RoCEMode    string     `json:"roce_mode"`    // v2
+	Trust       string     `json:"trust"`        // host NIC trust mode: dscp or pcp
+	HostECN     bool       `json:"host_ecn"`     // host NIC congestion control (ECN np and rp) on the PFC priority
+	UpdatedAt   *time.Time `json:"updated_at,omitempty"`
+}
+
+// FabricCheck is the fabric check page: every cable the controller knows,
+// each setting on both ends against the fabric's profile.
+type FabricCheck struct {
+	At       time.Time       `json:"at"`
+	Warning  string          `json:"warning,omitempty"`
+	Profiles []FabricProfile `json:"profiles"`
+	Cables   []CableCheck    `json:"cables"`
+	Issues   int             `json:"issues"` // cables with at least one failed check
+}
+
+type CableCheck struct {
+	Host       string             `json:"host"`
+	Netdev     string             `json:"netdev"`
+	Label      string             `json:"label,omitempty"`
+	IP         string             `json:"ip,omitempty"`
+	Fabric     string             `json:"fabric"`
+	Switch     string             `json:"switch,omitempty"`
+	SwitchPort string             `json:"switch_port,omitempty"`
+	OK         bool               `json:"ok"`
+	Checks     []SettingCheck     `json:"checks"`
+	Counters   map[string]float64 `json:"counters,omitempty"` // switch queue drops, ECN marks, pause frames (lifetime)
+}
+
+// SettingCheck is one setting compared across the profile, the switch port
+// and the host port. State is ok, bad, unknown (a side could not be read)
+// or skip (the profile does not check it).
+type SettingCheck struct {
+	Name   string `json:"name"`
+	Want   string `json:"want,omitempty"`
+	Switch string `json:"switch,omitempty"`
+	Host   string `json:"host,omitempty"`
+	State  string `json:"state"`
+	Note   string `json:"note,omitempty"`
 }
 
 // LegCPU is the CPU use of both hosts during the leg, in percent.

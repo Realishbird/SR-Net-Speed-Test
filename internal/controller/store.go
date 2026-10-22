@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS legs (
 	server_result  JSONB
 );
 CREATE INDEX IF NOT EXISTS legs_run_idx ON legs (run_id);
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS baseline BOOLEAN NOT NULL DEFAULT false;
 CREATE TABLE IF NOT EXISTS audit (
 	id     BIGSERIAL PRIMARY KEY,
 	at     TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -84,7 +85,7 @@ func OpenStore(ctx context.Context, url string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(ctx, schema+schema3); err != nil {
+	if _, err := db.Exec(ctx, schema+schema3+schemaFabric); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
@@ -311,7 +312,7 @@ func (s *Store) SaveLeg(ctx context.Context, l api.Leg, client, server *api.LegR
 }
 
 func (s *Store) Runs(ctx context.Context, limit int) ([]api.Run, error) {
-	rows, err := s.db.Query(ctx, `SELECT id, name, spec, status, verdict, error, summary, created_at, started_at, ended_at
+	rows, err := s.db.Query(ctx, `SELECT id, name, spec, status, verdict, baseline, error, summary, created_at, started_at, ended_at
 		FROM runs ORDER BY id DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
@@ -329,7 +330,7 @@ func (s *Store) Runs(ctx context.Context, limit int) ([]api.Run, error) {
 }
 
 func (s *Store) Run(ctx context.Context, id int64) (api.Run, error) {
-	r, err := scanRun(s.db.QueryRow(ctx, `SELECT id, name, spec, status, verdict, error, summary, created_at, started_at, ended_at
+	r, err := scanRun(s.db.QueryRow(ctx, `SELECT id, name, spec, status, verdict, baseline, error, summary, created_at, started_at, ended_at
 		FROM runs WHERE id=$1`, id))
 	if err != nil {
 		return r, err
@@ -356,8 +357,59 @@ func (s *Store) Run(ctx context.Context, id int64) (api.Run, error) {
 func scanRun(row pgx.Row) (api.Run, error) {
 	var r api.Run
 	var spec, sum []byte
-	err := row.Scan(&r.ID, &r.Name, &spec, &r.Status, &r.Verdict, &r.Error, &sum, &r.CreatedAt, &r.StartedAt, &r.EndedAt)
+	err := row.Scan(&r.ID, &r.Name, &spec, &r.Status, &r.Verdict, &r.Baseline, &r.Error, &sum, &r.CreatedAt, &r.StartedAt, &r.EndedAt)
 	json.Unmarshal(spec, &r.Spec)
 	json.Unmarshal(sum, &r.Summary)
 	return r, err
+}
+
+// SetBaseline marks or unmarks a finished run as the baseline for runs of
+// its shape. Only a run that completed can be a baseline.
+func (s *Store) SetBaseline(ctx context.Context, id int64, on bool) error {
+	tag, err := s.db.Exec(ctx, `UPDATE runs SET baseline=$2 WHERE id=$1 AND (status='done' OR NOT $2)`, id, on)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		var status string
+		if err := s.db.QueryRow(ctx, `SELECT status FROM runs WHERE id=$1`, id).Scan(&status); err != nil {
+			return err
+		}
+		return &userError{fmt.Errorf("run %d is %s; only a run that finished can be a baseline", id, status)}
+	}
+	return nil
+}
+
+// BaselineFor returns the newest baseline run, with its legs, for a run of
+// the given test whose spec matches on the options that change the numbers.
+// Runs created after `before` are ignored so a comparison never looks forward.
+func (s *Store) BaselineFor(ctx context.Context, spec api.RunSpec, before int64) (api.Run, bool, error) {
+	rows, err := s.db.Query(ctx, `SELECT id, spec FROM runs WHERE baseline AND status='done' AND id<$1 AND spec->>'test'=$2
+		ORDER BY id DESC LIMIT 50`, before, spec.Test)
+	if err != nil {
+		return api.Run{}, false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var raw []byte
+		if err := rows.Scan(&id, &raw); err != nil {
+			return api.Run{}, false, err
+		}
+		var bs api.RunSpec
+		json.Unmarshal(raw, &bs)
+		if sameShape(spec, bs) {
+			rows.Close()
+			r, err := s.Run(ctx, id)
+			return r, err == nil, err
+		}
+	}
+	return api.Run{}, false, rows.Err()
+}
+
+// SaveRunSummary rewrites a finished run's summary (baseline comparison).
+func (s *Store) SaveRunSummary(ctx context.Context, id int64, sum api.RunSummary) error {
+	b, _ := json.Marshal(sum)
+	_, err := s.db.Exec(ctx, `UPDATE runs SET summary=$2 WHERE id=$1`, id, b)
+	return err
 }

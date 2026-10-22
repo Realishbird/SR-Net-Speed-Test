@@ -70,6 +70,9 @@ func BuildCommand(t api.Task) ([]string, error) {
 		}
 		return args, nil
 
+	case api.ToolNCCL:
+		return ncclCommand(t, ncclScriptPath)
+
 	case api.ToolWriteBW, api.ToolReadBW, api.ToolSendBW, api.ToolWriteLat, api.ToolReadLat, api.ToolSendLat:
 	default:
 		return nil, fmt.Errorf("unsupported tool %q", t.Tool)
@@ -171,6 +174,12 @@ func (r *Runner) run(parent context.Context, t api.Task) {
 		r.Report(api.Event{TaskID: t.ID, RunID: t.RunID, LegID: t.LegID, Type: api.EventFailed, Message: err.Error()})
 		r.Result(res)
 	}
+	if t.Tool == api.ToolNCCL {
+		if _, err := ensureNCCLScript(); err != nil {
+			fail(err)
+			return
+		}
+	}
 	args, err := BuildCommand(t)
 	if err != nil {
 		fail(err)
@@ -240,6 +249,13 @@ func (r *Runner) run(parent context.Context, t api.Task) {
 	}
 	parsedOK := true
 	switch {
+	case t.Tool == api.ToolNCCL:
+		nr := ParseNCCL(out.String())
+		res.AvgGbps, res.PeakGbps, res.Points = nr.LastGbps, nr.PeakGbps, nr.Points
+		parsedOK = nr.OK
+		if nr.Error != "" && err == nil {
+			err = errors.New(nr.Error)
+		}
 	case t.Tool == api.ToolIperf3:
 		ir, ok := ParseIperf3(out.String())
 		res.AvgGbps, res.Retransmits, res.LossPct, res.JitterMs = ir.Gbps, ir.Retransmits, ir.LossPct, ir.JitterMs
@@ -270,7 +286,7 @@ func (r *Runner) run(parent context.Context, t api.Task) {
 		res.Error = "timed out or canceled"
 	} else if err != nil {
 		res.Error = err.Error()
-	} else if !parsedOK && (t.Kind == api.TaskClient || t.Tool == api.ToolIperf3) {
+	} else if !parsedOK && (t.Kind == api.TaskClient || t.Tool == api.ToolIperf3 || t.Tool == api.ToolNCCL) {
 		res.Error = "no result in tool output"
 	}
 	if res.Error != "" {

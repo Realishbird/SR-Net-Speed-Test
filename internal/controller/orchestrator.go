@@ -46,11 +46,13 @@ type legPlan struct {
 }
 
 type activeRun struct {
-	id     int64
-	spec   api.RunSpec
-	plans  []*legPlan // every leg, in order
-	stages [][]*legPlan
-	cancel context.CancelFunc
+	id      int64
+	spec    api.RunSpec
+	plans   []*legPlan // every leg, in order
+	stages  [][]*legPlan
+	cancel  context.CancelFunc
+	summary api.RunSummary // filled by score, extended by applyBaseline
+	fabric  []string       // fabric check findings on the run's cables at start
 }
 
 // Orchestrator turns run specs into agent tasks and collects the results.
@@ -64,6 +66,9 @@ type Orchestrator struct {
 	// lldp completes host ports' switch neighbours from the switch side.
 	// Nil when the server has not wired it (tests).
 	lldp func(ctx context.Context, hosts []hostRec)
+	// fabric lists the fabric check's findings on the ports a run uses, for
+	// its summary. Nil when the server has not wired it (tests).
+	fabric func(ctx context.Context, portIDs map[int64]bool) []string
 
 	mu       sync.Mutex
 	portLock map[int64]int64        // port id -> run id
@@ -103,7 +108,7 @@ func applyDefaults(s *api.RunSpec) error {
 		s.Test = "write"
 	}
 	if _, ok := api.Tests[s.Test]; !ok {
-		return fmt.Errorf("unknown test %q (write, read, send, write_lat, read_lat, send_lat, tcp, udp)", s.Test)
+		return fmt.Errorf("unknown test %q (write, read, send, write_lat, read_lat, send_lat, tcp, udp, nccl_allreduce, nccl_allgather)", s.Test)
 	}
 	if s.DurationSec == 0 {
 		s.DurationSec = 60
@@ -116,6 +121,8 @@ func applyDefaults(s *api.RunSpec) error {
 			s.MsgSize = 8192
 		case s.Test == "tcp":
 			s.MsgSize = 131072
+		case api.IsCollective(s.Test):
+			s.MsgSize = 64 << 20 // 64 MiB: large enough for NCCL's ring to reach line rate
 		default:
 			s.MsgSize = 65536
 		}
@@ -138,11 +145,23 @@ func applyDefaults(s *api.RunSpec) error {
 	if s.MaxLossPct == 0 {
 		s.MaxLossPct = 1
 	}
+	if s.RegressPct == 0 {
+		s.RegressPct = 5
+	}
+	if s.RegressPct < 0 || s.RegressPct > 100 {
+		return errors.New("regression allowance must be between 0 and 100 percent")
+	}
 	if s.DurationSec < 5 || s.DurationSec > 24*3600 {
 		return errors.New("duration must be between 5 s and 24 h")
 	}
-	if s.Bidir && (api.IsLatency(s.Test) || s.Test == "udp") {
+	if s.Bidir && (api.IsLatency(s.Test) || s.Test == "udp" || api.IsCollective(s.Test)) {
 		return errors.New("bidirectional applies to bandwidth tests only")
+	}
+	if api.IsCollective(s.Test) {
+		s.Serial, s.Pairs, s.Mesh, s.Legs = false, false, false, nil // every rank takes part at once
+		if len(s.Sizes) > 16 {
+			return errors.New("a collective sweep takes at most 16 sizes")
+		}
 	}
 	for _, sz := range s.Sizes {
 		if sz < 1 || sz > 1<<30 {
@@ -264,6 +283,9 @@ func pairPorts(c, s target) (endpoint, endpoint, error) {
 // plan expands a spec into legs: explicit legs, fan-out (one client), fan-in
 // (one server), or disjoint pairs.
 func plan(hosts []hostRec, spec api.RunSpec) ([]*legPlan, error) {
+	if api.IsCollective(spec.Test) {
+		return planCollective(hosts, spec)
+	}
 	type pair struct{ c, s target }
 	var pairs []pair
 	one := func(sel string) (target, error) {
@@ -362,9 +384,6 @@ func plan(hosts []hostRec, spec api.RunSpec) ([]*legPlan, error) {
 		if se.ExpectedGbps > 0 && (exp == 0 || se.ExpectedGbps < exp) {
 			exp = se.ExpectedGbps
 		}
-		if spec.Bidir {
-			exp *= 2 // bidirectional rates add both directions, so line rate is counted twice
-		}
 		base = append(base, &legPlan{
 			client: ce, server: se,
 			leg: api.Leg{ClientHost: ce.Host, ClientIP: ce.IP, ServerHost: se.Host, ServerIP: se.IP, Fabric: fabric, ExpectedGbps: exp},
@@ -394,7 +413,117 @@ func plan(hosts []hostRec, spec api.RunSpec) ([]*legPlan, error) {
 	if len(plans) > 512 {
 		return nil, fmt.Errorf("%d legs is too many for one run (max 512)", len(plans))
 	}
+	fairShare(plans, spec.Bidir)
 	return plans, nil
+}
+
+// planCollective lays out an NCCL collective: every selected host is one
+// rank, the first is rank 0 and hosts the rendezvous, and each other rank is
+// a leg "rank i > rank 0" so the run keeps the usual per-host rows. All ranks
+// must share one fabric (one subnet), because NCCL's ring runs over every
+// host at once. The expected figure is the bus bandwidth NCCL's own tests
+// report, which a ring over equal links tops out at the slowest link's rate.
+// A size sweep runs inside the one process, so there is a single stage.
+func planCollective(hosts []hostRec, spec api.RunSpec) ([]*legPlan, error) {
+	sels := spec.Hosts
+	if len(sels) == 0 {
+		sels = append(append([]string{}, spec.Clients...), spec.Servers...)
+	}
+	var ranks []target
+	seen := map[int64]bool{}
+	for _, sel := range sels {
+		ts, err := resolveSelector(hosts, sel)
+		if err != nil {
+			return nil, err
+		}
+		for _, t := range ts {
+			if !seen[t.host.ID] {
+				seen[t.host.ID] = true
+				ranks = append(ranks, t)
+			}
+		}
+	}
+	if len(ranks) < 2 {
+		return nil, errors.New("a collective needs at least two hosts (one GPU each)")
+	}
+	if len(ranks) > 512 {
+		return nil, fmt.Errorf("%d hosts is too many for one collective (max 512)", len(ranks))
+	}
+	var plans []*legPlan
+	var master endpoint
+	exp := 0.0
+	for i, t := range ranks[1:] {
+		ce, se, err := pairPorts(t, ranks[0])
+		if err != nil {
+			return nil, fmt.Errorf("rank %d: %w", i+1, err)
+		}
+		if i == 0 {
+			master = se
+		} else if se.PortID != master.PortID {
+			return nil, fmt.Errorf("rank %d (%s) reaches %s on %s, other ranks on %s: every host of a collective must sit on one fabric", i+1, ce.Host, se.Host, se.IP, master.IP)
+		}
+		fabric := se.Fabric
+		if fabric == "" {
+			fabric = ce.Fabric
+		}
+		for _, e := range []endpoint{ce, se} {
+			if e.ExpectedGbps > 0 && (exp == 0 || e.ExpectedGbps < exp) {
+				exp = e.ExpectedGbps
+			}
+		}
+		plans = append(plans, &legPlan{client: ce, server: se, leg: api.Leg{
+			Index: i, ClientHost: ce.Host, ClientIP: ce.IP, ServerHost: se.Host, ServerIP: se.IP, Fabric: fabric, MsgSize: spec.MsgSize}})
+	}
+	for _, p := range plans {
+		p.leg.ExpectedGbps = exp
+	}
+	return plans, nil
+}
+
+// fairShare caps each leg's expected rate by the ports it shares. A port
+// used by n legs of the same stage can give each of them at most 1/n of
+// its line rate: an incast of eight 100G hosts into one 100G port expects
+// 12.5 Gbps per leg, a fan-out from a 400G port to four 100G hosts still
+// expects 100 each. Bidirectional rates add both directions, so line rate
+// counts twice; that is applied last.
+func fairShare(plans []*legPlan, bidir bool) {
+	type use struct {
+		n    int
+		rate float64
+		name string
+	}
+	byStage := map[int]map[int64]*use{}
+	for _, p := range plans {
+		m := byStage[p.stage]
+		if m == nil {
+			m = map[int64]*use{}
+			byStage[p.stage] = m
+		}
+		for _, e := range []endpoint{p.client, p.server} {
+			u := m[e.PortID]
+			if u == nil {
+				u = &use{rate: e.ExpectedGbps, name: e.Host + " " + e.IP}
+				m[e.PortID] = u
+			}
+			u.n++
+		}
+	}
+	for _, p := range plans {
+		for _, e := range []endpoint{p.client, p.server} {
+			u := byStage[p.stage][e.PortID]
+			if u == nil || u.n < 2 || u.rate <= 0 {
+				continue
+			}
+			share := u.rate / float64(u.n)
+			if p.leg.ExpectedGbps == 0 || share < p.leg.ExpectedGbps {
+				p.leg.ExpectedGbps = share
+				p.leg.SharedPort = fmt.Sprintf("%s x%d", u.name, u.n)
+			}
+		}
+		if bidir {
+			p.leg.ExpectedGbps *= 2
+		}
+	}
 }
 
 func stagesOf(plans []*legPlan) [][]*legPlan {
@@ -457,11 +586,22 @@ func (o *Orchestrator) Start(ctx context.Context, spec api.RunSpec) (int64, erro
 		o.portLock[p.client.PortID] = runID
 		o.portLock[p.server.PortID] = runID
 		p.tcpPort = o.allocTCP(p.server.AgentID)
+		if api.IsCollective(spec.Test) && i > 0 {
+			o.tcpPorts[p.server.AgentID][p.tcpPort] = false
+			p.tcpPort = plans[0].tcpPort // every rank meets at rank 0's one port
+		}
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
 	ar := &activeRun{id: runID, spec: spec, plans: plans, stages: stagesOf(plans), cancel: cancel}
 	o.active[runID] = ar
 	o.mu.Unlock()
+	if o.fabric != nil {
+		ids := map[int64]bool{}
+		for _, p := range plans {
+			ids[p.client.PortID], ids[p.server.PortID] = true, true
+		}
+		ar.fabric = o.fabric(ctx, ids)
+	}
 
 	o.store.Audit(ctx, "run.start", map[string]any{"run_id": runID, "spec": spec})
 	go o.execute(runCtx, ar)
@@ -560,13 +700,20 @@ func (o *Orchestrator) execute(ctx context.Context, ar *activeRun) {
 	}
 	o.sendCancels(ar) // stops any stragglers; a no-op on agents with nothing running
 	sum, verdict := o.score(ar)
+	ar.summary = sum
+	ar.summary.FabricIssues = ar.fabric
 	if status != "done" {
 		verdict = "fail"
+	} else {
+		verdict = o.applyBaseline(bg, ar, verdict)
 	}
 	for _, p := range ar.plans {
 		o.store.SaveLeg(bg, p.leg, p.clientRes, p.serverRes)
 	}
-	o.store.FinishRun(bg, ar.id, status, verdict, errMsg, sum)
+	o.store.FinishRun(bg, ar.id, status, verdict, errMsg, ar.summary)
+	if status == "done" {
+		o.publishResult(bg, ar.id)
+	}
 	log.Printf("run %d %s: %s, %.1f Gbps aggregate", ar.id, status, verdict, sum.ToolGbps)
 }
 
@@ -574,6 +721,9 @@ func (o *Orchestrator) execute(ctx context.Context, ar *activeRun) {
 // and waits for their results. Legs that never report keep nil results.
 func (o *Orchestrator) runStage(ctx context.Context, ar *activeRun, plans []*legPlan) error {
 	spec := ar.spec
+	if api.IsCollective(spec.Test) {
+		return o.runCollective(ctx, ar, plans)
+	}
 	inbox := make(chan msg, len(plans)*8)
 	byTask := map[string]*legPlan{}
 	var taskIDs []string
@@ -672,6 +822,109 @@ func (o *Orchestrator) runStage(ctx context.Context, ar *activeRun, plans []*leg
 	return err
 }
 
+// runCollective runs one NCCL collective over every rank. Rank 0 is started
+// as the server task (its process opens the rendezvous at once and waits up
+// to two minutes for the others), the other ranks start together as clients
+// once rank 0 reports ready. All ranks report the same collective-wide
+// figures, so rank 0's result becomes the server result of every leg.
+func (o *Orchestrator) runCollective(ctx context.Context, ar *activeRun, plans []*legPlan) error {
+	spec := ar.spec
+	inbox := make(chan msg, (len(plans)+1)*8)
+	byTask := map[string]*legPlan{}
+	var taskIDs []string
+	defer func() { o.hub.forget(taskIDs...) }()
+
+	master := plans[0].server
+	sizes := spec.Sizes
+	if len(sizes) == 0 {
+		sizes = []int{spec.MsgSize}
+	}
+	base := api.Task{RunID: ar.id, Tool: api.ToolNCCL, DurationSec: spec.DurationSec, MsgSize: spec.MsgSize, TOS: spec.TOS, MTU: spec.MTU,
+		TCPPort: plans[0].tcpPort, MasterIP: master.IP, WorldSize: len(plans) + 1, Collective: strings.TrimPrefix(spec.Test, "nccl_"), Sizes: sizes}
+
+	t0 := base
+	t0.ID, t0.Kind, t0.LegID, t0.Rank = newID(), api.TaskServer, plans[0].leg.ID, 0
+	t0.RdmaDev, t0.PortNum, t0.Netdev, t0.LocalIP, t0.PeerIP = master.RdmaDev, master.PortNum, master.Netdev, master.IP, master.IP
+	for _, p := range plans {
+		p.serverTask = t0
+	}
+	byTask[t0.ID] = plans[0]
+	taskIDs = append(taskIDs, t0.ID)
+	o.hub.send(master.AgentID, t0, inbox)
+	readyBy := time.After(30 * time.Second)
+	for ready := false; !ready; {
+		select {
+		case <-ctx.Done():
+			o.sendCancels(ar)
+			return ctx.Err()
+		case <-readyBy:
+			o.sendCancels(ar)
+			return errors.New("rank 0 did not report ready within 30 s")
+		case m := <-inbox:
+			if m.event != nil && m.event.Type == api.EventServerReady {
+				ready = true
+			}
+			if (m.event != nil && m.event.Type == api.EventFailed) || m.result != nil {
+				msg := "rank 0 exited early"
+				if m.event != nil {
+					msg = m.event.Message
+				} else if m.result.Error != "" {
+					msg = m.result.Error
+				}
+				o.sendCancels(ar)
+				return fmt.Errorf("rank 0 on %s: %s", master.Host, msg)
+			}
+		}
+	}
+
+	startAt := time.Now().Add(3 * time.Second)
+	for i, p := range plans {
+		p.startAt = startAt
+		t := base
+		t.ID, t.Kind, t.LegID, t.StartAt, t.Rank = newID(), api.TaskClient, p.leg.ID, startAt, i+1
+		t.RdmaDev, t.PortNum, t.Netdev, t.LocalIP, t.PeerIP = p.client.RdmaDev, p.client.PortNum, p.client.Netdev, p.client.IP, master.IP
+		p.clientTask = t
+		byTask[t.ID] = p
+		taskIDs = append(taskIDs, t.ID)
+		o.hub.send(p.client.AgentID, t, inbox)
+	}
+
+	deadline := time.After(time.Until(startAt) + time.Duration(spec.DurationSec)*time.Second + 150*time.Second)
+	var grace <-chan time.Time
+	var err error
+	for !allDone(plans) {
+		select {
+		case <-ctx.Done():
+			if err == nil {
+				err = ctx.Err()
+				o.sendCancels(ar)
+				grace = time.After(15 * time.Second)
+			}
+			ctx = context.Background()
+		case <-deadline:
+			o.sendCancels(ar)
+			grace = time.After(0)
+		case <-grace:
+			return err
+		case m := <-inbox:
+			if m.result == nil {
+				continue
+			}
+			if m.taskID == t0.ID {
+				for _, p := range plans {
+					p.serverRes = m.result
+				}
+			} else if p := byTask[m.taskID]; p != nil {
+				p.clientRes = m.result
+			}
+			if grace == nil && allClientsDone(plans) {
+				grace = time.After(15 * time.Second)
+			}
+		}
+	}
+	return err
+}
+
 func allDone(ps []*legPlan) bool {
 	for _, p := range ps {
 		if p.clientRes == nil || p.serverRes == nil {
@@ -717,6 +970,12 @@ func counterSide(ar *activeRun, p *legPlan) (portID int64, dir counterDir, nic, 
 	if ar.spec.Bidir {
 		serverDir, clientDir = dirBoth, dirBoth
 	}
+	if api.IsCollective(ar.spec.Test) {
+		// A ring sends each rank's share onward: what a rank transmits over
+		// the collective is its bus bandwidth, so the client port's tx rate
+		// is the figure to hold against NCCL's own.
+		return p.client.PortID, dirTx, nic, true
+	}
 	if uses[p.server.PortID] == 1 {
 		return p.server.PortID, serverDir, nic, true
 	}
@@ -726,11 +985,19 @@ func counterSide(ar *activeRun, p *legPlan) (portID int64, dir counterDir, nic, 
 	return 0, dirRx, nic, false
 }
 
+// congestionKeys are the host counters that show the fabric pushing back:
+// ECN marks received, CNPs sent (notification point) and handled (reaction
+// point). They are reported, never a fault; a lossless fabric is expected to
+// produce them under load.
+var congestionKeys = map[string]string{"np_ecn_marked_roce_packets": "ecn marked", "np_cnp_sent": "cnp sent", "rp_cnp_handled": "cnp handled"}
+
 func (o *Orchestrator) score(ar *activeRun) (api.RunSummary, string) {
-	sum := api.RunSummary{ByFabric: map[string]float64{}}
+	sum := api.RunSummary{ByFabric: map[string]float64{}, Congestion: map[string]int64{}}
 	rank := map[string]int{"pass": 0, "warn": 1, "fail": 2}
 	worst := "pass"
 	lat := api.IsLatency(ar.spec.Test)
+	collective := api.IsCollective(ar.spec.Test)
+	minRate, maxRate := -1.0, 0.0
 	for _, p := range ar.plans {
 		l := &p.leg
 		l.ErrorDeltas = map[string]int64{}
@@ -743,14 +1010,19 @@ func (o *Orchestrator) score(ar *activeRun) (api.RunSummary, string) {
 			}
 		}
 		if c := p.clientRes; c != nil {
-			l.ToolGbps, l.Latency, l.Retransmits, l.LossPct, l.JitterMs = c.AvgGbps, c.Latency, c.Retransmits, c.LossPct, c.JitterMs
+			l.ToolGbps, l.Latency, l.Retransmits, l.LossPct, l.JitterMs, l.Points = c.AvgGbps, c.Latency, c.Retransmits, c.LossPct, c.JitterMs, c.Points
 		}
 		if l.ToolGbps == 0 && p.serverRes != nil {
-			l.ToolGbps = p.serverRes.AvgGbps
+			l.ToolGbps, l.Points = p.serverRes.AvgGbps, p.serverRes.Points
 		}
 		if !lat && !p.startAt.IsZero() && p.clientRes != nil && p.clientRes.Error == "" {
 			from := p.startAt.Add(2 * time.Second)
 			to := p.startAt.Add(time.Duration(ar.spec.DurationSec-1) * time.Second)
+			if n := len(ar.spec.Sizes); collective && n > 1 {
+				// A collective sweep runs every size in one process; the tool
+				// figure is the largest size's, so count that slice alone.
+				from = p.startAt.Add(time.Duration(float64(ar.spec.DurationSec)*float64(n-1)/float64(n))*time.Second + 2*time.Second)
+			}
 			if id, dir, nic, ok := counterSide(ar, p); ok {
 				l.CounterGbps = o.metrics.counterGbps(id, from, to, dir, nic)
 			} else {
@@ -817,7 +1089,58 @@ func (o *Orchestrator) score(ar *activeRun) (api.RunSummary, string) {
 				f = "unassigned"
 			}
 			sum.ByFabric[f] += l.ToolGbps
+			if !lat && l.ToolGbps > 0 {
+				if minRate < 0 || l.ToolGbps < minRate {
+					minRate = l.ToolGbps
+				}
+				maxRate = max(maxRate, l.ToolGbps)
+			}
 		}
+		for k, name := range congestionKeys {
+			if v := l.ErrorDeltas[k]; v > 0 {
+				sum.Congestion[name] += v
+			}
+		}
+		if l.Switch != nil {
+			for k, v := range l.Switch.Deltas {
+				switch {
+				case strings.Contains(k, "dropped_pkts") || strings.Contains(k, "discards"):
+					sum.Congestion["switch drops"] += int64(v)
+				case strings.Contains(k, "pause_frames"):
+					sum.Congestion["switch pauses"] += int64(v)
+				case strings.Contains(k, "ecn_marked"):
+					sum.Congestion["switch ecn marked"] += int64(v)
+				}
+			}
+		}
+	}
+	if maxRate > 0 && minRate >= 0 && len(ar.stages[len(ar.stages)-1]) > 1 && !collective {
+		sum.Fairness = minRate / maxRate
+	}
+	if collective {
+		// Every rank reports the same collective-wide bus bandwidth; the
+		// run's figure is that, not a sum over ranks.
+		sum.ToolGbps, sum.CounterGbps = 0, 0
+		for f := range sum.ByFabric {
+			delete(sum.ByFabric, f)
+		}
+		for _, p := range ar.plans {
+			if p.leg.ToolGbps > sum.ToolGbps {
+				sum.ToolGbps = p.leg.ToolGbps
+			}
+			sum.CounterGbps += p.leg.CounterGbps
+		}
+		if len(ar.plans) > 0 {
+			sum.CounterGbps /= float64(len(ar.plans))
+			f := ar.plans[0].leg.Fabric
+			if f == "" {
+				f = "unassigned"
+			}
+			sum.ByFabric[f] = sum.ToolGbps
+		}
+	}
+	if len(sum.Congestion) == 0 {
+		sum.Congestion = nil
 	}
 	return sum, worst
 }

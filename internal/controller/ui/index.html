@@ -95,6 +95,9 @@ button:disabled { opacity:.5; cursor:default; }
 .badge.warn, .badge.skipped, .badge.canceled { color:var(--warn); background:color-mix(in srgb, var(--warn) 14%, transparent); }
 .badge.fail, .badge.failed, .badge.open, .badge.down { color:var(--fail); background:color-mix(in srgb, var(--fail) 14%, transparent); }
 .badge.running, .badge.queued, .badge.updating, .badge.pending, .badge.info { color:var(--info); background:color-mix(in srgb, var(--info) 14%, transparent); }
+.chk { display:inline-block; padding:1px 7px; border-radius:6px; font-size:12px; margin:1px 0; border:1px solid var(--line); }
+.chk.ok { color:var(--pass); } .chk.bad { color:var(--fail); border-color:color-mix(in srgb, var(--fail) 50%, var(--line)); font-weight:600; } .chk.unknown { color:var(--muted); } .chk.skip { color:var(--muted); opacity:.6; }
+.delta-good { color:var(--pass); font-variant-numeric:tabular-nums; } .delta-flat { color:var(--muted); font-variant-numeric:tabular-nums; } .delta-bad { color:var(--warn); font-weight:600; font-variant-numeric:tabular-nums; }
 .badge.muted { color:var(--muted); background:var(--hover); }
 .dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--fail); box-shadow:0 0 0 3px color-mix(in srgb, var(--fail) 18%, transparent); }
 .dot.on { background:var(--pass); box-shadow:0 0 0 3px color-mix(in srgb, var(--pass) 18%, transparent); }
@@ -145,6 +148,7 @@ button.chip:hover { border-color:var(--accent); }
   <a href="#overview" data-page="overview"><svg viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span class="t">Overview</span></a>
   <a href="#hosts" data-page="hosts"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><path d="M7 7h.01M7 17h.01"/></svg><span class="t">Hosts</span></a>
   <a href="#topology" data-page="topology"><svg viewBox="0 0 24 24"><rect x="8" y="3" width="8" height="5" rx="1"/><rect x="2" y="16" width="6" height="5" rx="1"/><rect x="9" y="16" width="6" height="5" rx="1"/><rect x="16" y="16" width="6" height="5" rx="1"/><path d="M12 8v4M5 16v-4h14v4M12 12v4"/></svg><span class="t">Topology</span></a>
+  <a href="#fabric" data-page="fabric"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/><path d="M9 4l-2 3 2 3M15 14l2 3-2 3"/></svg><span class="t">Fabric</span><span class="badge warn" id="fabric-count" style="display:none"></span></a>
   <a href="#runs" data-page="runs"><svg viewBox="0 0 24 24"><path d="M4 19V5M4 15l5-5 4 4 7-8"/></svg><span class="t">Runs</span></a>
   <a href="#new" data-page="new"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg><span class="t">New run</span></a>
   <a href="#suites" data-page="suites"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/></svg><span class="t">Suites</span></a>
@@ -255,6 +259,7 @@ function route() {
   if (h.startsWith('#run/')) return go(t => pageRun(t, +h.slice(5)));
   if (h === '#hosts') return go(pageHosts);
   if (h === '#topology') return go(pageTopology);
+  if (h === '#fabric') return go(pageFabric);
   if (h === '#runs') return go(pageRuns);
   if (h === '#new') return go(pageNew);
   if (h === '#suites') return go(pageSuites);
@@ -325,7 +330,7 @@ async function pageHosts(token) {
             <td ${rs} class="muted">${esc(h.hostname)}</td>
             <td ${rs}><input class="cell" value="${esc((h.tags || []).join(', '))}" placeholder="tag, tag" onchange="patch('/hosts/${h.id}',{tags:list(this.value)})"></td>
             <td ${rs}><input class="cell" style="width:90px" value="${esc(h.site)}" onchange="patch('/hosts/${h.id}',{site:this.value})"></td>
-            <td ${rs} class="muted">${esc(h.agent_version)}<br><span class="mono">${esc(h.arch)}</span></td>`;
+            <td ${rs} class="muted" title="${esc(Object.entries(h.tools || {}).map(([k, v]) => k + ' ' + v).join(', ') || 'no tool versions reported yet')}">${esc(h.agent_version)}<br><span class="mono">${esc(h.arch)}</span>${h.tools?.torch ? `<br><span class="mono" title="PyTorch ${esc(h.tools.torch)}, CUDA ${esc(h.tools.cuda)}${h.tools.nccl ? ', NCCL ' + esc(h.tools.nccl) : ''}: this host can take part in NCCL collective tests">gpu${h.tools.cuda === 'True' ? '' : ' (no CUDA)'}</span>` : ''}</td>`;
         }
         if (!p) { html += '<td colspan="9" class="muted">no RDMA ports found</td></tr>'; return; }
         const sw = p.lldp_switch || p.lldp_port ? `${esc(p.lldp_switch)} <span class="muted">${esc(p.lldp_port)}</span>` : '<span class="muted">-</span>';
@@ -430,7 +435,7 @@ async function pageTopology(token) {
   if (!mount(token, `<div class="page-head"><h1>Topology</h1><span class="spacer"></span><span class="sub" id="tp-legs"></span><span class="sub" id="tp-upd"></span></div>
     <p class="help">Drawn from each host's LLDP neighbour and the switch's own port counters. Line width follows the live rate; the legs of a run in progress glow. Switch ports and the fabric column come from the switch itself (its LLDP and VLAN tables, polled every minute) or from the host's lldpd; "no LLDP" means neither has seen a neighbour on that port yet.</p>
     <div class="card topo" style="padding:10px 10px 4px" id="tp-svg"></div><div id="tp-warn"></div>
-    <div class="card"><h2>Switch ports in use</h2><div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th>Switch</th><th>Port</th><th>Link</th><th>Host port</th><th>Fabric</th><th class="num">In Gbps</th><th class="num">Out Gbps</th><th class="num">Discards in / out</th><th class="num">Errors in / out</th><th class="num">FCS</th></tr></thead><tbody id="tp-ports"></tbody></table></div></div>
+    <div class="card"><h2>Switch ports in use</h2><div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th>Switch</th><th>Port</th><th>Link</th><th>Host</th><th>Host port</th><th>IP</th><th>Fabric</th><th class="num">In Gbps</th><th class="num">Out Gbps</th><th class="num">Discards in / out</th><th class="num">Errors in / out</th><th class="num">FCS</th></tr></thead><tbody id="tp-ports"></tbody></table></div></div>
     <div class="card"><h2>Hosts under test</h2><div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th></th><th>Host</th><th class="num">CPU</th><th class="num">Load</th><th class="num">Memory</th><th>Ports</th><th>Switch ports</th><th class="num">TX / RX Gbps</th></tr></thead><tbody id="tp-hosts"></tbody></table></div></div>`)) return;
   const refresh = async () => {
     const t = await api('GET', '/topology');
@@ -442,10 +447,10 @@ async function pageTopology(token) {
       const m = byPort[(s.name + '/' + p.name).toLowerCase()];
       const bad = (p.in_discards || 0) + (p.out_discards || 0) + (p.in_errors || 0) + (p.out_errors || 0) + (p.fcs_errors || 0) > 0;
       return `<tr><td>${esc(s.name)}</td><td class="mono">${esc(p.name)}</td><td>${p.up == null ? '<span class="muted">?</span>' : badge(p.up ? 'up' : 'down', p.up ? 'pass' : 'fail')}${p.speed_mbps ? ` <span class="muted">${p.speed_mbps / 1000}G</span>` : ''}</td>
-        <td>${m ? `<b>${esc(m.h.name)}</b> <span class="muted">${esc(m.p.label || m.p.netdev)}${m.p.ip ? ' ' + m.p.ip : ''}</span>` : '<span class="muted">-</span>'}</td><td>${p.vlan ? `${esc(p.vlan)}${m?.p.fabric && m.p.fabric !== p.vlan ? ` <span class="badge fail" title="The host port's fabric label does not match the VLAN the switch has this port in">host says ${esc(m.p.fabric)}</span>` : ''}` : esc(m?.p.fabric || '')}</td>
+        <td>${m ? `<b>${esc(m.h.name)}</b>` : '<span class="muted">-</span>'}</td><td class="mono">${m ? esc(m.p.label || m.p.netdev) : ''}</td><td class="mono">${m?.p.ip ? esc(m.p.ip) : ''}</td><td>${p.vlan ? `${esc(p.vlan)}${m?.p.fabric && m.p.fabric !== p.vlan ? ` <span class="badge fail" title="The host port's fabric label does not match the VLAN the switch has this port in">host says ${esc(m.p.fabric)}</span>` : ''}` : esc(m?.p.fabric || '')}</td>
         <td class="num">${fmt(p.rx_gbps)}</td><td class="num">${fmt(p.tx_gbps)}</td><td class="num" style="color:${bad ? 'var(--warn)' : 'inherit'}">${fmt(p.in_discards, 0)} / ${fmt(p.out_discards, 0)}</td><td class="num" style="color:${bad ? 'var(--warn)' : 'inherit'}">${fmt(p.in_errors, 0)} / ${fmt(p.out_errors, 0)}</td><td class="num">${fmt(p.fcs_errors, 0)}</td></tr>`;
     }));
-    set('tp-ports', rows.join('') || `<tr><td colspan="10" class="empty">${t.switches.length ? 'No switch port is mapped to a host yet and none carries traffic. The mapping appears once hosts report LLDP neighbours.' : 'No switch configured.'}</td></tr>`);
+    set('tp-ports', rows.join('') || `<tr><td colspan="12" class="empty">${t.switches.length ? 'No switch port is mapped to a host yet and none carries traffic. The mapping appears once hosts report LLDP neighbours.' : 'No switch configured.'}</td></tr>`);
     set('tp-hosts', t.hosts.map(h => {
       const st = h.stats, tx = h.ports.reduce((a, p) => a + (p.tx_gbps || 0), 0), rx = h.ports.reduce((a, p) => a + (p.rx_gbps || 0), 0);
       const cpu = st ? st.cpu_pct : null;
@@ -462,38 +467,110 @@ async function pageTopology(token) {
   await refresh(); setRefresh(refresh, 3000);
 }
 
+/* ---------- fabric check ---------- */
+const fabricFields = [
+  ['mode', 'Mode', 'select', 'lossless = PFC and ECN expected, drops are a fault; lossy = PFC off expected, drops allowed; blank = consistency only'],
+  ['switch_mtu', 'Switch MTU at least', 'number', ''], ['host_mtu', 'Host MTU at least', 'number', ''], ['speed_mbps', 'Speed Mbps (0 = any)', 'number', ''],
+  ['vlan', 'VLAN (blank = fabric name)', 'text', ''], ['pfc_priority', 'PFC priority (-1 = off)', 'number', ''], ['ecn_queue', 'ECN queue (-1 = unchecked)', 'number', ''],
+  ['roce_dscp', 'RoCE DSCP (-1 = unchecked)', 'number', ''], ['cnp_dscp', 'CNP DSCP (-1 = unchecked)', 'number', ''], ['roce_mode', 'RoCE mode', 'text', ''], ['trust', 'Host trust (dscp, pcp, blank)', 'text', ''],
+];
+async function pageFabric(token) {
+  if (!mount(token, `<div class="page-head"><h1>Fabric check</h1><span id="fb-sum"></span><span class="spacer"></span><span class="sub" id="fb-upd"></span></div>
+    <p class="help">Every cable the controller knows, with each setting on the switch side (read over gNMI once a minute: MTU, speed, FEC, VLAN, PFC, QoS map, queue drops, ECN marks, pause frames) and the host side (reported by the agent: MTU, RoCE mode, PFC, trust, DSCP map, ECN) against the fabric's profile. Without a profile only consistency is checked: both ends agree on speed and PFC, the VLAN matches the fabric, the link is up, and the MTUs carry a 4096-byte RDMA MTU. A failing cable opens a <span class="mono">fabric_mismatch</span> alert, and a run that starts on it carries the findings in its summary.</p>
+    <div id="fb-warn"></div>
+    <div class="card"><h2>Fabric profiles</h2><div id="fb-profiles"></div></div>
+    <div class="tbl"><table><thead><tr><th>Fabric</th><th>Host</th><th>Port</th><th>Switch port</th><th>State</th><th>Checks</th><th>Switch counters</th></tr></thead><tbody id="fb-cables"></tbody></table></div>`)) return;
+  const refresh = async () => {
+    const fc = await api('GET', '/fabric-check');
+    window._fabricProfiles = fc.profiles;
+    set('fb-warn', fc.warning ? `<div class="card" style="border-color:var(--warn);color:var(--warn)">${esc(fc.warning)}</div>` : '');
+    set('fb-sum', fc.cables.length ? (fc.issues ? badge(`${fc.issues} of ${fc.cables.length} cables need attention`, 'fail') : badge(`${fc.cables.length} cables ok`, 'pass')) : '');
+    const fabrics = [...new Set([...fc.profiles.map(p => p.fabric), ...fc.cables.map(c => c.fabric).filter(Boolean)])].sort();
+    set('fb-profiles', (fabrics.length ? fabrics.map(f => { const p = fc.profiles.find(x => x.fabric === f);
+      return `<div class="row" style="margin-bottom:8px"><b style="width:90px">Fabric ${esc(f)}</b><span class="sub" style="width:260px">${p ? `${esc(p.mode || 'consistency only')} · PFC ${p.pfc_priority >= 0 ? 'priority ' + p.pfc_priority : 'off'} · ECN ${p.ecn_queue >= 0 ? 'queue ' + p.ecn_queue : 'unchecked'} · MTU ≥ ${p.switch_mtu}/${p.host_mtu}` : 'no profile: consistency checks only'}</span>
+        <button class="sm" onclick="editFabric('${esc(f)}')">${p ? 'Edit' : 'Set profile'}</button>${p ? ` <button class="sm danger" onclick="delFabric('${esc(f)}')">Remove</button>` : ''}</div>`; }).join('') : '<span class="muted">No fabrics yet: label host ports with a fabric on the Hosts page, or let the switch VLANs name them.</span>')
+      + `<p class="help" style="margin:8px 0 0">A profile starts from a preset: <b>lossless RoCE</b> (DSCP 26 to queue 3, PFC on priority 3, ECN on queue 3, CNPs on DSCP 48, host trust dscp with ECN on) or <b>lossy</b> (PFC off, no QoS map, drops allowed). Edit any field afterwards.</p>`);
+    set('fb-cables', fc.cables.length ? fc.cables.map(c => {
+      const checks = c.checks.map(k => `<span class="chk ${k.state}" title="${esc([k.want ? 'want: ' + k.want : '', k.switch ? 'switch: ' + k.switch : '', k.host ? 'host: ' + k.host : '', k.note].filter(Boolean).join('\n'))}">${esc(k.name)}${k.state === 'ok' ? '' : k.state === 'bad' ? ' ✕' : ' ?'}</span>`).join(' ');
+      const notes = c.checks.filter(k => k.state === 'bad').map(k => `<div class="muted" style="font-size:12px">${esc(k.name)}: ${esc(k.note)}</div>`).join('');
+      const ctr = Object.entries(c.counters || {}).filter(([k, v]) => v > 0 || k.startsWith('pause')).map(([k, v]) => `${esc(k)} ${fmt(v, 0)}`).join(', ');
+      return `<tr><td>${esc(c.fabric || '-')}</td><td>${esc(c.host)}</td><td><span class="mono">${esc(c.netdev)}</span>${c.label ? ` <span class="muted">${esc(c.label)}</span>` : ''}${c.ip ? ` <span class="muted mono">${esc(c.ip)}</span>` : ''}</td>
+        <td class="mono">${c.switch_port ? esc(c.switch + ' ' + c.switch_port) : '<span class="muted">-</span>'}</td><td>${badge(c.ok ? 'ok' : 'mismatch', c.ok ? 'pass' : 'fail')}</td><td class="wrap">${checks}${notes}</td><td class="muted wrap" style="font-size:12px">${ctr || '-'}</td></tr>`;
+    }).join('') : `<tr><td colspan="7" class="empty">No cabled ports yet.</td></tr>`);
+    set('fb-upd', 'checked ' + new Date(fc.at).toLocaleTimeString());
+  };
+  await refresh(); setRefresh(refresh, 15000);
+}
+async function editFabric(fabric) {
+  const presets = await api('GET', '/fabrics/presets');
+  const cur = (window._fabricProfiles || []).find(p => p.fabric === fabric) || { ...presets.lossy, fabric, mode: '' };
+  const field = ([k, label, type, help], v) => type === 'select'
+    ? `<label title="${esc(help)}">${esc(label)} <select name="${k}"><option value="" ${!v ? 'selected' : ''}>consistency only</option><option value="lossless" ${v === 'lossless' ? 'selected' : ''}>lossless</option><option value="lossy" ${v === 'lossy' ? 'selected' : ''}>lossy</option></select></label>`
+    : `<label>${esc(label)} <input name="${k}" type="${type}" value="${esc(v ?? '')}" style="width:${type === 'number' ? 90 : 120}px"></label>`;
+  const render = p => fabricFields.map(f => field(f, p[f[0]])).join('') + `<label class="inline"><input type="checkbox" name="host_ecn" ${p.host_ecn ? 'checked' : ''}> Host ECN (np and rp) on the PFC priority</label>`;
+  modal({ title: `Fabric ${fabric} profile`, body: `<div class="row" style="margin-bottom:10px"><button type="button" class="sm" onclick="fabricPreset('lossless')">Lossless RoCE preset</button><button type="button" class="sm" onclick="fabricPreset('lossy')">Lossy preset</button></div><form id="fb-form" class="row" onsubmit="return false">${render(cur)}</form>`,
+    actions: [{ label: 'Cancel' }, { label: 'Save', cls: 'primary', close: false, run: async () => {
+      const f = new FormData($('#fb-form')), g = k => f.get(k);
+      const p = { fabric, mode: g('mode'), switch_mtu: +g('switch_mtu'), host_mtu: +g('host_mtu'), speed_mbps: +g('speed_mbps'), vlan: g('vlan').trim(), pfc_priority: +g('pfc_priority'), ecn_queue: +g('ecn_queue'),
+        roce_dscp: +g('roce_dscp'), cnp_dscp: +g('cnp_dscp'), roce_mode: g('roce_mode').trim(), trust: g('trust').trim(), host_ecn: !!g('host_ecn') };
+      try { await api('PUT', '/fabrics/' + encodeURIComponent(fabric), p); toast('Profile saved; the check re-runs now', 'pass'); closeModal(); refreshFn?.(); } catch (e) { fail(e); }
+    } }] });
+  window._fabricPresets = presets; window._fabricRender = render;
+}
+function fabricPreset(mode) { const f = $('#fb-form'); if (f) f.innerHTML = window._fabricRender({ ...window._fabricPresets[mode], fabric: '' }); }
+function delFabric(fabric) { confirmBox('Remove profile', `Remove the profile of fabric ${fabric}? Its cables go back to consistency checks only.`, 'Remove', async () => { await api('DELETE', '/fabrics/' + encodeURIComponent(fabric)); refreshFn?.(); }); }
+
 /* ---------- runs ---------- */
 async function pageRuns(token) {
   if (!mount(token, `<div class="page-head"><h1>Runs</h1><span class="spacer"></span><a href="#new"><button class="primary">New run</button></a></div>
-    <div class="tbl"><table><thead><tr><th>ID</th><th>Name</th><th>Test</th><th>Topology</th><th>Status</th><th>Verdict</th><th class="num">Tool Gbps</th><th class="num">Counter Gbps</th><th>Started</th></tr></thead><tbody id="runs"></tbody></table></div>`)) return;
+    <div class="tbl"><table><thead><tr><th>ID</th><th>Name</th><th>Test</th><th>Topology</th><th>Status</th><th>Verdict</th><th class="num">Tool Gbps</th><th class="num">Counter Gbps</th><th class="num" title="Aggregate against the newest baseline run of the same shape">vs baseline</th><th>Started</th></tr></thead><tbody id="runs"></tbody></table></div>`)) return;
   const refresh = async () => {
     const runs = await api('GET', '/runs');
     set('runs', runs.length ? runs.map(r => `<tr><td><a href="#run/${r.id}">${r.id}</a></td><td><a href="#run/${r.id}">${esc(r.name)}</a></td><td>${esc(r.spec.test)}</td><td class="muted">${topoName(r.spec)}</td>
-      <td>${badge(r.status)}</td><td>${badge(r.verdict)}</td><td class="num">${fmt(r.status === 'running' ? r.summary.live_gbps : r.summary.tool_gbps)}</td><td class="num">${fmt(r.summary.counter_gbps)}</td><td class="muted" title="${when(r.started_at)}">${ago(r.started_at) || '-'}</td></tr>`).join('')
-      : `<tr><td colspan="9" class="empty">No runs yet.</td></tr>`);
+      <td>${badge(r.status)}</td><td>${badge(r.verdict)}</td><td class="num">${fmt(r.status === 'running' ? r.summary.live_gbps : r.summary.tool_gbps)}</td><td class="num">${fmt(r.summary.counter_gbps)}</td><td class="num">${baselineCell(r)}</td><td class="muted" title="${when(r.started_at)}">${ago(r.started_at) || '-'}</td></tr>`).join('')
+      : `<tr><td colspan="10" class="empty">No runs yet.</td></tr>`);
   };
   await refresh(); setRefresh(refresh, 5000);
 }
 function topoName(s) { return s.mesh ? 'mesh' : s.legs?.length ? 'legs' : s.pairs ? 'pairs' : s.serial ? 'serial' : 'fan'; }
+// baselineCell: the run's own baseline mark, or its aggregate against the baseline it was compared with.
+function baselineCell(r) {
+  if (r.baseline) return '<span class="badge info" title="Runs of the same shape are compared with this run">baseline</span>';
+  const b = r.summary || {};
+  if (!b.baseline_run_id) return '<span class="muted">-</span>';
+  return `${deltaPct(b.delta_pct, b.regressed > 0)} <span class="muted">vs <a href="#run/${b.baseline_run_id}">${b.baseline_run_id}</a></span>`;
+}
+function deltaPct(d, bad) { return `<span class="${bad ? 'delta-bad' : d >= 0 ? 'delta-good' : 'delta-flat'}">${d >= 0 ? '+' : ''}${fmt(d, 1)}%</span>`; }
 
 async function pageRun(token, id) {
   let r; try { r = await api('GET', '/runs/' + id); } catch (e) { mount(token, `<div class="page-head"><h1>Run ${id}</h1></div><div class="card">${esc(e.message)}</div>`); return; }
-  const s = r.spec, lat = s.test.endsWith('_lat');
+  const s = r.spec, lat = s.test.endsWith('_lat'), coll = isCollective(s.test);
   const head = lat ? '<th class="num">Min µs</th><th class="num">Typical µs</th><th class="num">Avg µs</th><th class="num">P99 µs</th><th class="num">P99.9 µs</th><th class="num">Max µs</th>'
-    : `<th class="num">Expected</th><th class="num" id="th-gbps">Gbps</th><th class="num">Counter Gbps</th>${s.test === 'tcp' ? '<th class="num">Retransmits</th>' : s.test === 'udp' ? '<th class="num">Loss %</th><th class="num">Jitter ms</th>' : ''}`;
+    : `<th class="num">Expected</th><th class="num" id="th-gbps">Gbps</th><th class="num" title="${coll ? 'What this rank transmitted during the collective, from its NIC counters' : 'From the NIC counters of the port the leg alone used'}">Counter Gbps</th>${s.test === 'tcp' ? '<th class="num">Retransmits</th>' : s.test === 'udp' ? '<th class="num">Loss %</th><th class="num">Jitter ms</th>' : ''}`;
+  const headBl = `<th class="num" title="The same leg in the baseline run, and this leg's change against it">Baseline</th>`;
   const headSw = `<th title="Switch ports the leg crossed, from LLDP">Switch path</th>${lat ? '' : '<th class="num" title="Rate the switch counted on the server-side port during the test">Switch Gbps</th>'}<th class="num" title="Average (peak) CPU use on the client / server during the test">CPU %</th>`;
   if (!mount(token, `<div class="page-head"><h1>Run ${r.id}: ${esc(r.name)}</h1><span id="run-badges"></span><span class="spacer"></span><span id="run-actions"></span></div>
     <div id="run-error"></div>
     <div class="tiles" id="run-tiles"></div>
+    <div id="sweep"></div>
     <div class="card"><div class="kv">
-      <b>Test</b><span>${esc(s.test)} · ${s.duration_sec} s · message size ${s.msg_size}${s.sizes?.length ? ' (sweep ' + s.sizes.join(', ') + ')' : ''} · ${s.qps} QP${s.qps === 1 ? '' : 's'}${s.streams > 1 ? ' · ' + s.streams + ' streams' : ''}${s.bidir ? ' · bidirectional (rates add both directions)' : ''}${s.serial ? ' · serial' : ''}${s.mesh ? ' · full mesh' : ''}</span>
-      <b>Thresholds</b><span>${s.pass_pct}% of line rate${s.max_lat_p99_us ? ' · p99 ≤ ' + s.max_lat_p99_us + ' µs' : ''}${s.test === 'udp' ? ' · loss ≤ ' + s.max_loss_pct + '%' : ''}</span>
+      <b>Test</b><span>${esc(tests[s.test] || s.test)}${coll ? ' · ' + ((r.legs || []).length + 1) + ' ranks, one GPU each' : ''} · ${s.duration_sec} s · message size ${s.msg_size}${s.sizes?.length ? ' (sweep ' + s.sizes.join(', ') + ')' : ''}${coll ? '' : ' · ' + s.qps + ' QP'}${coll || s.qps === 1 ? '' : 's'}${s.streams > 1 ? ' · ' + s.streams + ' streams' : ''}${s.bidir ? ' · bidirectional (rates add both directions)' : ''}${s.serial ? ' · serial' : ''}${s.mesh ? ' · full mesh' : ''}</span>
+      <b>Thresholds</b><span>${s.pass_pct}% of line rate${s.max_lat_p99_us ? ' · p99 ≤ ' + s.max_lat_p99_us + ' µs' : ''}${s.test === 'udp' ? ' · loss ≤ ' + s.max_loss_pct + '%' : ''} · warn ${s.regress_pct || 5}% behind baseline</span>
+      <b>Baseline</b><span id="run-baseline"></span>
+      <b>Fabric</b><span id="run-fabric"></span>
       <b>When</b><span id="run-when"></span></div></div>
-    <div class="tbl"><table><thead><tr><th>#</th><th>Client</th><th>Server</th><th>Fabric</th><th class="num">Size</th>${head}${headSw}<th>Error counters</th><th>Verdict</th><th>Note</th></tr></thead><tbody id="legs"></tbody></table></div>`)) return;
+    <div class="tbl"><table><thead><tr><th>#</th><th>Client</th><th>Server</th><th>Fabric</th><th class="num">Size</th>${head}${headBl}${headSw}<th>Error counters</th><th>Verdict</th><th>Note</th></tr></thead><tbody id="legs"></tbody></table></div>`)) return;
   const paint = r => {
     const live = r.status === 'running' || r.status === 'queued';
-    set('run-badges', `${badge(r.status)} ${badge(r.verdict)} ${live ? '<span class="live">live</span>' : ''}`);
+    set('run-badges', `${badge(r.status)} ${badge(r.verdict)} ${live ? '<span class="live">live</span>' : ''}${r.baseline ? ' <span class="badge info">baseline</span>' : ''}`);
+    const b = r.summary || {};
+    set('run-baseline', r.baseline ? 'this run is the reference for runs of the same shape (test, direction, QPs, MTU)'
+      : b.baseline_run_id ? `compared with <a href="#run/${b.baseline_run_id}">run ${b.baseline_run_id}</a>: ${deltaPct(b.delta_pct, b.regressed > 0)}${lat ? ' (p99, lower is better)' : ` (${fmt(b.baseline_gbps)} Gbps there)`}${b.regressed ? `, ${b.regressed} leg${b.regressed === 1 ? '' : 's'} regressed` : ''}`
+      : r.status === 'done' ? 'no baseline run of this shape yet; mark this run or another finished one with "Set as baseline"' : '-');
+    const fi = b.fabric_issues || [];
+    set('run-fabric', fi.length ? `<span class="delta-bad">${fi.length} finding${fi.length === 1 ? '' : 's'} on the run's cables when it started</span> (<a href="#fabric">Fabric check</a>): ${esc(fi.join('; '))}` : r.status === 'queued' ? '-' : 'cables matched their fabric profiles when the run started');
     set('run-actions', `${live ? `<button class="danger" onclick="cancelRun(${r.id})">Cancel run</button> ` : ''}
+      ${r.status === 'done' ? `<button onclick="setBaseline(${r.id}, ${!r.baseline})" title="${r.baseline ? 'Stop using this run as the reference' : 'Compare later runs of the same shape with this one'}">${r.baseline ? 'Unset baseline' : 'Set as baseline'}</button>` : ''}
       <button onclick='sessionStorage.setItem("spec", ${JSON.stringify(JSON.stringify(s))}); location.hash="#new"'>Run again</button>
       <button onclick='sessionStorage.setItem("suitespec", ${JSON.stringify(JSON.stringify(s))}); location.hash="#suites"'>Add to a suite</button>
       ${!live ? `<a href="/api/v1/runs/${r.id}/report.csv"><button>CSV</button></a> <a href="/api/v1/runs/${r.id}/report.html" target="_blank"><button>Report</button></a>` : ''}
@@ -501,17 +578,21 @@ async function pageRun(token, id) {
     set('run-error', r.error ? `<div class="card" style="border-color:var(--fail);color:var(--fail)">${esc(r.error)}</div>` : '');
     const fab = Object.entries(r.summary.by_fabric || {}).map(([f, g]) => `<div class="tile"><div class="k">Fabric ${esc(f)}</div><div class="v">${fmt(g)}<small>Gbps</small></div></div>`).join('');
     set('run-tiles', lat ? `<div class="tile"><div class="k">Legs</div><div class="v">${(r.legs || []).length}</div></div>${fab}`
-      : `<div class="tile"><div class="k">${live ? 'Live aggregate' : 'Aggregate (tool)'}</div><div class="v">${fmt(live ? r.summary.live_gbps : r.summary.tool_gbps)}<small>Gbps</small></div></div>
-         ${!live ? `<div class="tile"><div class="k">Aggregate (NIC counters)</div><div class="v">${fmt(r.summary.counter_gbps)}<small>Gbps</small></div></div>` : ''}${fab}
-         <div class="tile"><div class="k">Legs</div><div class="v">${(r.legs || []).length}</div></div>`);
+      : `<div class="tile" title="${coll ? 'Bus bandwidth at the largest size, as nccl-tests reports it: the rate every link carries' : ''}"><div class="k">${live ? 'Live aggregate' : coll ? 'Bus bandwidth' : 'Aggregate (tool)'}</div><div class="v">${fmt(live ? r.summary.live_gbps : r.summary.tool_gbps)}<small>Gbps</small></div></div>
+         ${!live ? `<div class="tile"><div class="k">${coll ? 'Per rank (NIC counters)' : 'Aggregate (NIC counters)'}</div><div class="v">${fmt(r.summary.counter_gbps)}<small>Gbps</small></div></div>` : ''}${fab}
+         <div class="tile"><div class="k">${coll ? 'Ranks' : 'Legs'}</div><div class="v">${(r.legs || []).length + (coll ? 1 : 0)}</div></div>
+         ${r.summary.fairness ? `<div class="tile" title="Slowest leg over fastest leg in the last stage; 1 = every leg got the same share"><div class="k">Fairness</div><div class="v">${fmt(r.summary.fairness, 2)}</div></div>` : ''}
+         ${r.summary.congestion ? `<div class="tile" title="Counters that show the fabric pushing back during the run: ECN marks, CNPs, switch queue drops and PFC pauses on the legs' ports"><div class="k">Congestion</div><div class="v" style="font-size:14px;font-weight:500;line-height:1.5">${Object.entries(r.summary.congestion).map(([k, v]) => `${esc(k)} ${fmt(v, 0)}`).join('<br>')}</div></div>` : ''}`);
+    set('sweep', sweepChart(r));
     set('run-when', `${when(r.started_at) || 'queued'}${r.ended_at ? ' to ' + new Date(r.ended_at).toLocaleTimeString() : ''}`);
-    const th = $('#th-gbps'); if (th) th.textContent = live ? 'Live Gbps' : 'Tool Gbps';
+    const th = $('#th-gbps'); if (th) th.textContent = live ? 'Live Gbps' : coll ? 'Bus Gbps' : 'Tool Gbps';
     set('legs', (r.legs || []).map(l => {
       const errs = Object.entries(l.error_deltas || {}).map(([k, v]) => `${k} +${v}`).concat(Object.entries(l.switch?.deltas || {}).map(([k, v]) => `switch ${k} +${v}`)).join(', ');
       const sw = l.switch, cpu = l.cpu;
       const swPath = sw ? `<span class="mono">${esc(sw.client_port || '?')}</span> <span class="muted">&gt;</span> <span class="mono">${esc(sw.server_port || '?')}</span>` : '<span class="muted">-</span>';
       const swCell = `<td class="wrap">${swPath}</td>${lat ? '' : `<td class="num">${sw && sw.gbps ? fmt(sw.gbps) : '<span class="muted">-</span>'}</td>`}<td class="num" title="${cpu ? `client avg ${fmt(cpu.client_avg, 0)}% peak ${fmt(cpu.client_peak, 0)}% · server avg ${fmt(cpu.server_avg, 0)}% peak ${fmt(cpu.server_peak, 0)}%` : ''}">${cpu ? `${fmt(cpu.client_avg, 0)} <span class="muted">(${fmt(cpu.client_peak, 0)})</span> / ${fmt(cpu.server_avg, 0)} <span class="muted">(${fmt(cpu.server_peak, 0)})</span>` : '<span class="muted">-</span>'}</td>`;
-      const note = [l.note, sw?.note].filter(Boolean).join('; ');
+      const note = [coll ? `rank ${l.index + 1} to rank 0` : '', l.note, sw?.note, l.shared_port ? `fair share of ${l.shared_port.replace(/ x(\d+)$/, ' shared by $1 legs')}` : ''].filter(Boolean).join('; ');
+      const bl = l.baseline, blCell = `<td class="num">${bl ? `${fmt(bl.value, lat ? 2 : 1)} ${deltaPct(bl.delta_pct, bl.regressed)}` : '<span class="muted">-</span>'}</td>`;
       let row = `<tr><td>${l.index + 1}</td><td>${esc(l.client_host)} <span class="muted mono">${esc(l.client_ip)}</span></td><td>${esc(l.server_host)} <span class="muted mono">${esc(l.server_ip)}</span></td><td>${esc(l.fabric)}</td><td class="num">${l.msg_size || ''}</td>`;
       if (lat) { const t = l.latency || {}; row += `<td class="num">${fmt(t.min_us, 2)}</td><td class="num">${fmt(t.typical_us, 2)}</td><td class="num">${fmt(t.avg_us, 2)}</td><td class="num">${fmt(t.p99_us, 2)}</td><td class="num">${fmt(t.p999_us, 2)}</td><td class="num">${fmt(t.max_us, 2)}</td>`; }
       else {
@@ -520,11 +601,61 @@ async function pageRun(token, id) {
         if (s.test === 'tcp') row += `<td class="num">${l.retransmits || 0}</td>`;
         if (s.test === 'udp') row += `<td class="num">${fmt(l.loss_pct, 2)}</td><td class="num">${fmt(l.jitter_ms, 3)}</td>`;
       }
-      return row + swCell + `<td class="muted">${esc(errs)}</td><td>${badge(l.verdict)}</td><td class="muted wrap">${esc(note)}</td></tr>`;
-    }).join('') || `<tr><td colspan="17" class="empty">No legs.</td></tr>`);
+      return row + blCell + swCell + `<td class="muted">${esc(errs)}</td><td>${badge(l.verdict)}</td><td class="muted wrap">${esc(note)}</td></tr>`;
+    }).join('') || `<tr><td colspan="18" class="empty">No legs.</td></tr>`);
     return live;
   };
   if (paint(r)) setRefresh(async () => { const r = await api('GET', '/runs/' + id); if (!paint(r)) setRefresh(null); }, 2000);
+}
+// sweepChart draws a message-size sweep: one line per leg, Gbps over size
+// (log scale), with the expected rate as a dashed reference and a hover
+// readout. Only for bandwidth runs with more than one size.
+const seriesPalette = { light: ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948'], dark: ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767'] };
+function seriesColor(i) {
+  const dark = document.documentElement.dataset.theme === 'dark' || (!document.documentElement.dataset.theme && matchMedia('(prefers-color-scheme: dark)').matches);
+  const pal = seriesPalette[dark ? 'dark' : 'light']; return i < pal.length ? pal[i] : 'var(--muted)';
+}
+function sweepChart(r) {
+  const sizes = r.spec.sizes || [];
+  if (sizes.length < 2 || r.spec.test.endsWith('_lat') || !(r.legs || []).length) return '';
+  const legs = {}; // "client>server" -> {size: gbps}
+  let expected = 0;
+  if (isCollective(r.spec.test)) {
+    // Every rank reports the same collective-wide figures: one series.
+    const pts = (r.legs.find(l => l.points) || {}).points || {};
+    legs['bus bandwidth'] = Object.fromEntries(Object.entries(pts).map(([k, v]) => [+k, v]));
+    expected = Math.max(0, ...r.legs.map(l => l.expected_gbps || 0));
+  } else for (const l of r.legs) { const k = `${l.client_host} > ${l.server_host}`; (legs[k] = legs[k] || {})[l.msg_size] = l.tool_gbps; expected = Math.max(expected, l.expected_gbps || 0); }
+  const names = Object.keys(legs), xs = [...sizes].sort((a, b) => a - b);
+  const W = 760, H = 260, L = 52, R = 16, T = 14, B = 34, pw = W - L - R, ph = H - T - B;
+  const ymax = Math.max(expected, ...names.flatMap(n => Object.values(legs[n]))) * 1.08 || 1;
+  const x = sz => L + pw * (Math.log2(sz) - Math.log2(xs[0])) / Math.max(1e-9, Math.log2(xs[xs.length - 1]) - Math.log2(xs[0]));
+  const y = g => T + ph - ph * g / ymax;
+  const fmtSize = sz => sz >= 1048576 ? (sz / 1048576) + ' MiB' : sz >= 1024 ? (sz / 1024) + ' KiB' : sz + ' B';
+  const ticks = [0, 0.25, 0.5, 0.75, 1].map(f => f * ymax);
+  const grid = ticks.map(t => `<line x1="${L}" x2="${W - R}" y1="${y(t)}" y2="${y(t)}" stroke="var(--line)" stroke-width="1"/><text x="${L - 6}" y="${y(t) + 4}" text-anchor="end" font-size="11" fill="var(--muted)">${fmt(t, 0)}</text>`).join('');
+  const xt = xs.map(sz => `<text x="${x(sz)}" y="${H - B + 16}" text-anchor="middle" font-size="11" fill="var(--muted)">${fmtSize(sz)}</text>`).join('');
+  const exp = expected ? `<line x1="${L}" x2="${W - R}" y1="${y(expected)}" y2="${y(expected)}" stroke="var(--muted)" stroke-dasharray="4 4" stroke-width="1"/><text x="${W - R}" y="${y(expected) - 4}" text-anchor="end" font-size="11" fill="var(--muted)">expected ${fmt(expected, 0)} Gbps</text>` : '';
+  const lines = names.map((n, i) => { const pts = xs.filter(sz => legs[n][sz] != null).map(sz => `${x(sz)},${y(legs[n][sz])}`);
+    return `<polyline points="${pts.join(' ')}" fill="none" stroke="${seriesColor(i)}" stroke-width="2" stroke-linejoin="round"/>` + xs.filter(sz => legs[n][sz] != null).map(sz => `<circle cx="${x(sz)}" cy="${y(legs[n][sz])}" r="4" fill="${seriesColor(i)}" stroke="var(--surface)" stroke-width="2"/>`).join(''); }).join('');
+  const legend = names.map((n, i) => `<span class="sub" style="display:inline-flex;align-items:center;gap:6px;margin-right:14px"><i style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${seriesColor(i)}"></i>${esc(n)}</span>`).join('');
+  const data = esc(JSON.stringify({ xs, names, legs }));
+  return `<div class="card"><h2>Message size sweep</h2><div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">
+    <svg viewBox="0 0 ${W} ${H}" width="${W}" style="max-width:100%;height:auto" data-sweep="${data}" onmousemove="sweepHover(event,this)" onmouseleave="sweepHover(null,this)">
+      ${grid}${xt}${exp}${lines}<g id="sweep-cursor"></g><text x="${L}" y="${T - 2}" font-size="11" fill="var(--muted)">${names.length === 1 && names[0] === 'bus bandwidth' ? 'Bus bandwidth, Gbps' : 'Gbps per leg'}</text></svg>
+    <div style="min-width:160px"><div>${legend}</div><div id="sweep-read" class="muted" style="font-size:12px;margin-top:10px">Hover a size for the figures.</div></div></div></div>`;
+}
+function sweepHover(ev, svg) {
+  const g = svg.querySelector('#sweep-cursor'), read = $('#sweep-read');
+  if (!ev) { g.innerHTML = ''; if (read) read.textContent = 'Hover a size for the figures.'; return; }
+  const d = JSON.parse(svg.dataset.sweep), pt = svg.createSVGPoint(); pt.x = ev.clientX; pt.y = ev.clientY;
+  const p = pt.matrixTransform(svg.getScreenCTM().inverse());
+  const W = 760, L = 52, R = 16, pw = W - L - R, lo = Math.log2(d.xs[0]), hi = Math.log2(d.xs[d.xs.length - 1]);
+  const lx = lo + (p.x - L) / pw * (hi - lo);
+  const sz = d.xs.reduce((a, b) => Math.abs(Math.log2(b) - lx) < Math.abs(Math.log2(a) - lx) ? b : a);
+  const x = L + pw * (Math.log2(sz) - lo) / Math.max(1e-9, hi - lo);
+  g.innerHTML = `<line x1="${x}" x2="${x}" y1="14" y2="226" stroke="var(--muted)" stroke-width="1" stroke-dasharray="2 3"/>`;
+  if (read) read.innerHTML = `<b>${sz} B</b><br>` + d.names.map((n, i) => `<span style="color:${seriesColor(i)}">●</span> ${esc(n)}: ${fmt(d.legs[n][sz])} Gbps`).join('<br>');
 }
 // grafanaRunURL opens the Live run dashboard on this run, from 30 s before it
 // started to 30 s after it ended (or now, while it runs).
@@ -533,10 +664,14 @@ function grafanaRunURL(r) {
   const from = new Date(r.started_at).getTime() - 30000, to = r.ended_at ? new Date(r.ended_at).getTime() + 30000 : 'now';
   return `${base}/d/srnet-live-run?var-run_id=${r.id}&from=${from}&to=${to}`;
 }
+async function setBaseline(id, on) {
+  try { await api('POST', `/runs/${id}/baseline`, { baseline: on }); toast(on ? `Run ${id} is now the baseline for runs of its shape` : `Run ${id} is no longer a baseline`, 'pass'); refreshFn?.(); route(); } catch (e) { fail(e); }
+}
 function cancelRun(id) { confirmBox('Cancel run', `Stop run ${id} on every host now?`, 'Cancel run', async () => { await api('POST', `/runs/${id}/cancel`); toast('Cancel sent', 'warn'); }); }
 
 /* ---------- new run ---------- */
-const tests = { write: 'RDMA write bandwidth', read: 'RDMA read bandwidth', send: 'RDMA send bandwidth', write_lat: 'RDMA write latency', read_lat: 'RDMA read latency', send_lat: 'RDMA send latency', tcp: 'TCP (iperf3)', udp: 'UDP (iperf3)' };
+const tests = { write: 'RDMA write bandwidth', read: 'RDMA read bandwidth', send: 'RDMA send bandwidth', write_lat: 'RDMA write latency', read_lat: 'RDMA read latency', send_lat: 'RDMA send latency', tcp: 'TCP (iperf3)', udp: 'UDP (iperf3)', nccl_allreduce: 'NCCL all-reduce (GPU collective)', nccl_allgather: 'NCCL all-gather (GPU collective)' };
+const isCollective = t => (t || '').startsWith('nccl_');
 async function pageNew(token) {
   const hosts = await api('GET', '/hosts');
   const prev = JSON.parse(sessionStorage.getItem('spec') || 'null'); sessionStorage.removeItem('spec');
@@ -548,7 +683,7 @@ async function pageNew(token) {
   <form id="f" onsubmit="return startRun(event)">
     <div class="card"><h2>What</h2><div class="row">
       <label>Name <input name="name" value="${v('name')}" placeholder="optional" style="width:220px"></label>
-      <label>Test <select name="test">${Object.entries(tests).map(([k, t]) => `<option value="${k}" ${prev?.test === k ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+      <label>Test <select name="test" onchange="testChange(this.value)">${Object.entries(tests).map(([k, t]) => `<option value="${k}" ${prev?.test === k ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
       <label>Topology <select name="topo" onchange="topoChange(this.value)">
         <option value="cs" ${topo === 'cs' ? 'selected' : ''}>Clients to servers (fan-out / fan-in)</option>
         <option value="pairs" ${topo === 'pairs' ? 'selected' : ''}>Pairs (client i to server i)</option>
@@ -557,13 +692,13 @@ async function pageNew(token) {
     <div class="card"><h2>Who</h2>
       <div class="row" id="t-cs"><div class="field">Clients ${picker('clients', prev?.clients, 'host, tag:client, IP or port label', 340)}</div>
         <div class="field">Servers ${picker('servers', prev?.servers, 'host, tag:server, IP or port label', 340)}</div></div>
-      <div class="row" id="t-mesh" style="display:none"><div class="field">Hosts ${picker('hosts', prev?.hosts, 'every ordered pair among these', 520)}</div></div>
+      <div class="row" id="t-mesh" style="display:none"><div class="field"><span id="hosts-label">Hosts</span> ${picker('hosts', prev?.hosts, 'every ordered pair among these', 520)}</div></div>
       <div class="row" id="t-legs" style="display:none"><label>Legs <input name="legs" style="width:520px" value="${esc((prev?.legs || []).map(l => l.client + '>' + l.server).join(', '))}" placeholder="client>server, client>server"></label></div>
       <p class="help" style="margin:10px 0 0">Selectors are host names, <span class="mono">tag:&lt;tag&gt;</span>, RDMA IPs or port labels. Legs are paired by shared subnet. Pick from the list, or type and press Enter; add as many as you like. ${hosts.length ? 'Click to add: ' + [...names, ...tags].map(n => `<button type="button" class="chip" data-v="${esc(n)}" onclick="pickAdd(null, this.dataset.v)">${esc(n)}</button>`).join(' ') : 'No hosts enrolled yet.'}</p></div>
     <div class="card"><h2>How</h2><div class="row">
       <label>Duration (s) <input name="duration_sec" type="number" min="5" value="${v('duration_sec', 60)}" style="width:90px"></label>
       <label>Message size <input name="msg_size" type="number" min="1" value="${v('msg_size') || ''}" placeholder="per test" style="width:110px"></label>
-      <label>Sweep sizes <input name="sizes" value="${esc((prev?.sizes || []).join(', '))}" placeholder="4096, 65536, 1048576" style="width:180px"></label>
+      <label>Sweep sizes <span style="display:flex;gap:4px"><input name="sizes" value="${esc((prev?.sizes || []).join(', '))}" placeholder="4096, 65536, 1048576" style="width:180px"><button type="button" class="sm" id="sweep-btn" title="256 B to 1 MiB, one stage per size: shows where a link reaches line rate" onclick="this.form.sizes.value=isCollective(this.form.test.value)?'1048576, 8388608, 67108864, 268435456':'256, 1024, 4096, 16384, 65536, 262144, 1048576'">Size sweep</button></span></label>
       <label>QPs <input name="qps" type="number" min="1" value="${v('qps', 1)}" style="width:70px"></label>
       <label>Streams (iperf3) <input name="streams" type="number" min="1" value="${v('streams', 1)}" style="width:70px"></label>
       <label class="inline"><input name="bidir" type="checkbox" ${prev?.bidir ? 'checked' : ''}> Bidirectional</label>
@@ -571,10 +706,23 @@ async function pageNew(token) {
     <div class="card"><h2>Pass criteria</h2><div class="row">
       <label>Pass at % of line rate <input name="pass_pct" type="number" min="1" max="100" value="${v('pass_pct', 90)}" style="width:80px"></label>
       <label>Max p99 µs (latency tests) <input name="max_lat_p99_us" type="number" step="0.01" value="${prev?.max_lat_p99_us || ''}" placeholder="report only" style="width:120px"></label>
-      <label>Max loss % (UDP) <input name="max_loss_pct" type="number" step="0.1" value="${v('max_loss_pct', 1)}" style="width:80px"></label></div></div>
-    <div class="row"><button class="primary" type="submit" id="start">Start run</button><span class="sub">Servers start first; all clients start together 3 s later.</span></div>
+      <label>Max loss % (UDP) <input name="max_loss_pct" type="number" step="0.1" value="${v('max_loss_pct', 1)}" style="width:80px"></label>
+      <label title="A leg this far behind the same leg of the newest baseline run warns">Warn % behind baseline <input name="regress_pct" type="number" min="0" max="100" step="0.5" value="${v('regress_pct', 5)}" style="width:80px"></label></div></div>
+    <div class="row"><button class="primary" type="submit" id="start">Start run</button><span class="sub" id="start-help">Servers start first; all clients start together 3 s later.</span></div>
   </form>`)) return;
-  topoChange(topo);
+  topoChange(topo); testChange(prev?.test || 'write');
+}
+// testChange adapts the form to the test: a collective takes a list of hosts
+// (ranks) instead of clients and servers, and its sweep sizes are far larger.
+function testChange(t) {
+  const c = isCollective(t), f = $('#f');
+  f.topo.disabled = c;
+  if (c) { $('#t-cs').style.display = 'none'; $('#t-legs').style.display = 'none'; $('#t-mesh').style.display = ''; }
+  else topoChange(f.topo.value);
+  set('hosts-label', c ? 'Hosts (ranks; the first hosts the rendezvous)' : 'Hosts');
+  $('#sweep-btn').title = c ? '1 MiB to 256 MiB in one process: shows where the collective reaches line rate' : '256 B to 1 MiB, one stage per size: shows where a link reaches line rate';
+  f.msg_size.placeholder = c ? '64 MiB' : 'per test';
+  $('#start-help').textContent = c ? 'Rank 0 starts first; the other ranks join 3 s later. Every host needs PyTorch with CUDA.' : 'Servers start first; all clients start together 3 s later.';
 }
 // picker: a multi-value selector. Chips hold the chosen values, the text box
 // (with the host/tag datalist) adds more, and a hidden input carries the
@@ -609,10 +757,11 @@ async function startRun(ev) {
   document.querySelectorAll('.picker').forEach(pickFlush);
   const f = new FormData(ev.target), g = k => f.get(k);
   const spec = { name: g('name'), test: g('test'), duration_sec: +g('duration_sec'), msg_size: +g('msg_size') || 0, qps: +g('qps'), streams: +g('streams'),
-    pass_pct: +g('pass_pct'), max_lat_p99_us: +g('max_lat_p99_us') || 0, max_loss_pct: +g('max_loss_pct') || 0, bidir: !!g('bidir'), serial: !!g('serial'),
+    pass_pct: +g('pass_pct'), max_lat_p99_us: +g('max_lat_p99_us') || 0, max_loss_pct: +g('max_loss_pct') || 0, regress_pct: +g('regress_pct') || 0, bidir: !!g('bidir'), serial: !!g('serial'),
     sizes: list(g('sizes')).map(Number).filter(Boolean) };
   const topo = g('topo');
-  if (topo === 'mesh') { spec.mesh = true; spec.hosts = list(g('hosts')); }
+  if (isCollective(spec.test)) spec.hosts = list(g('hosts'));
+  else if (topo === 'mesh') { spec.mesh = true; spec.hosts = list(g('hosts')); }
   else if (topo === 'legs') spec.legs = list(g('legs')).map(l => { const [c, s] = l.split('>'); return { client: (c || '').trim(), server: (s || '').trim() }; });
   else { spec.clients = list(g('clients')); spec.servers = list(g('servers')); spec.pairs = topo === 'pairs'; }
   const b = $('#start'); b.disabled = true;
@@ -622,8 +771,8 @@ async function startRun(ev) {
 
 /* ---------- suites and schedules ---------- */
 async function pageSuites(token) {
-  if (!mount(token, `<div class="page-head"><h1>Suites</h1><span class="spacer"></span><button class="primary" onclick="editSuite()">New suite</button></div>
-    <p class="help">A suite is an ordered list of runs executed back to back, for repeatable acceptance tests. Open a finished run and choose "Add to a suite" to copy its settings.</p>
+  if (!mount(token, `<div class="page-head"><h1>Suites</h1><span class="spacer"></span><button onclick="nightlySuite()" title="A write, send and read run to the same hosts, scheduled every night and compared with the baselines">Nightly acceptance</button> <button class="primary" onclick="editSuite()">New suite</button></div>
+    <p class="help">A suite is an ordered list of runs executed back to back, for repeatable acceptance tests. Open a finished run and choose "Add to a suite" to copy its settings. Every run in a suite is compared with the newest baseline of its shape, so a nightly suite catches a link that slows down without anyone reading numbers.</p>
     <div class="tbl"><table><thead><tr><th>Suite</th><th>Runs</th><th></th></tr></thead><tbody id="suites"></tbody></table></div>
     <div class="page-head" style="margin-top:8px"><h1 style="font-size:18px">Schedules</h1><span class="spacer"></span><button onclick="editSchedule()">New schedule</button></div>
     <div class="tbl"><table><thead><tr><th>Name</th><th>Suite</th><th>Cron</th><th>Enabled</th><th>Last run</th><th>Next run</th><th></th></tr></thead><tbody id="schedules"></tbody></table></div>
@@ -648,6 +797,42 @@ async function pageSuites(token) {
     if (added) { sessionStorage.removeItem('suitespec'); editSuite(0, [JSON.parse(added)]); }
   };
   await refresh(); setRefresh(refresh, 5000);
+}
+// nightlySuite creates the acceptance suite the plan's Phase 3 gate asks for:
+// a write, a send and a read fan-out between the chosen hosts, plus a
+// schedule that runs it every night.
+async function nightlySuite() {
+  const hosts = await api('GET', '/hosts');
+  const names = hosts.map(h => h.name), tags = [...new Set(hosts.flatMap(h => h.tags || []))].map(t => 'tag:' + t);
+  const opts = [...names, ...tags].map(n => `<option value="${esc(n)}">`).join('');
+  modal({ title: 'Nightly acceptance suite', body: `<datalist id="sel">${opts}</datalist>
+    <div class="row"><label>Suite name <input id="ns-name" value="Nightly acceptance" style="width:220px"></label>
+      <label>Runs at (cron, local time) <input id="ns-cron" value="0 2 * * *" class="mono" style="width:140px"></label>
+      <label>Duration per run (s) <input id="ns-dur" type="number" min="5" value="60" style="width:90px"></label></div>
+    <div class="row" style="margin-top:10px"><div class="field">Clients ${picker('ns-clients', [], 'host, tag:client, IP or port label', 300)}</div>
+      <div class="field">Servers ${picker('ns-servers', [], 'host, tag:server, IP or port label', 300)}</div></div>
+    <div class="row" style="margin-top:10px"><label class="inline"><input type="checkbox" id="ns-write" checked> RDMA write</label>
+      <label class="inline"><input type="checkbox" id="ns-send" checked> RDMA send</label>
+      <label class="inline"><input type="checkbox" id="ns-read" checked> RDMA read</label>
+      <label class="inline"><input type="checkbox" id="ns-lat"> write latency</label></div>
+    <p class="help" style="margin-top:12px">One client to many servers is a fan-out; the same hosts the other way round is a fan-in. Each run passes at 90% of line rate and warns 5% behind its baseline. Mark the first clean night's runs as baselines from their run pages.</p>`,
+    actions: [{ label: 'Cancel' }, { label: 'Create suite and schedule', cls: 'primary', close: false, run: async () => {
+      document.querySelectorAll('#modal .picker').forEach(pickFlush);
+      const clients = list($('#modal input[name=ns-clients]').value), servers = list($('#modal input[name=ns-servers]').value);
+      if (!clients.length || !servers.length) return fail('Pick at least one client and one server');
+      const dur = +$('#ns-dur').value || 60, mk = (test, name) => ({ name, test, clients, servers, duration_sec: dur, pass_pct: 90, regress_pct: 5 });
+      const specs = [];
+      if ($('#ns-write').checked) specs.push(mk('write', 'write'));
+      if ($('#ns-send').checked) specs.push(mk('send', 'send'));
+      if ($('#ns-read').checked) specs.push(mk('read', 'read'));
+      if ($('#ns-lat').checked) specs.push(mk('write_lat', 'write latency'));
+      if (!specs.length) return fail('Tick at least one test');
+      try {
+        const su = await api('POST', '/suites', { name: $('#ns-name').value, specs });
+        await api('POST', '/schedules', { name: $('#ns-name').value, suite_id: su.id, cron: $('#ns-cron').value, enabled: true });
+        toast('Nightly suite and schedule created', 'pass'); closeModal(); refreshFn?.();
+      } catch (e) { fail(e); }
+    } }] });
 }
 function editSuite(id, extraSpecs) {
   const su = (window._suites || []).find(s => s.id === id) || { id: 0, name: '', specs: [] };
@@ -772,7 +957,7 @@ function delSwitch(name) { confirmBox('Remove switch', `Stop collecting from "${
 async function pageAlerts(token) {
   if (!mount(token, `<div class="page-head"><h1>Alerts</h1><span class="spacer"></span><label class="row inline sub"><input type="checkbox" id="all" onchange="refreshFn()"> include resolved</label>
       <button class="danger" id="clear-all" onclick="clearAlerts()">Clear all</button></div>
-    <p class="help">Opened by the controller for agents that stop reporting, ports with an address that leave ACTIVE, error counters that grow while no test runs (counters that grow during a run belong to that run's result), hot transceivers, failed runs and failed updates. They close themselves when the condition clears, idle-error alerts after 15 minutes without further growth; "Clear" resolves one by hand (an alert whose cause is still present comes back on the next check).</p>
+    <p class="help">Opened by the controller for agents that stop reporting, ports with an address that leave ACTIVE, error counters that grow while no test runs (counters that grow during a run belong to that run's result), hot transceivers, cables whose settings differ from their fabric profile (see Fabric check), failed runs and failed updates. They close themselves when the condition clears, idle-error alerts after 15 minutes without further growth; "Clear" resolves one by hand (an alert whose cause is still present comes back on the next check).</p>
     <div class="tbl"><table><thead><tr><th>State</th><th>Kind</th><th>Host</th><th>Port</th><th>Message</th><th>Opened</th><th>Resolved</th><th></th></tr></thead><tbody id="alerts"></tbody></table></div>`)) return;
   const refresh = async () => {
     const all = $('#all')?.checked;
@@ -795,7 +980,8 @@ function clearAlerts() {
 
 /* ---------- global ---------- */
 async function alertBadge() {
-  try { const n = (await api('GET', '/alerts')).length; const b = $('#alert-count'); b.textContent = n; b.style.display = n ? '' : 'none'; } catch {}
+  try { const alerts = await api('GET', '/alerts'); const n = alerts.length; const b = $('#alert-count'); b.textContent = n; b.style.display = n ? '' : 'none';
+    const f = alerts.filter(a => a.kind === 'fabric_mismatch').length, fb = $('#fabric-count'); fb.textContent = f; fb.style.display = f ? '' : 'none'; } catch {}
 }
 api('GET', '/status').then(s => { $('#ver').textContent = 'controller ' + s.version; $('#grafana').href = s.grafana_url || ('http://' + location.hostname + ':3000'); }).catch(() => {});
 alertBadge(); setInterval(() => { if (!document.hidden) alertBadge(); }, 30000);
