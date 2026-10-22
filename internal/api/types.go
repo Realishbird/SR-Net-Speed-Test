@@ -15,6 +15,7 @@ const (
 	ToolReadLat  = "ib_read_lat"
 	ToolSendLat  = "ib_send_lat"
 	ToolIperf3   = "iperf3"
+	ToolNCCL     = "srnet-nccl" // the agent's bundled NCCL collective benchmark (PyTorch)
 )
 
 // Test names in a RunSpec and the tool each one runs.
@@ -22,7 +23,12 @@ var Tests = map[string]string{
 	"write": ToolWriteBW, "read": ToolReadBW, "send": ToolSendBW,
 	"write_lat": ToolWriteLat, "read_lat": ToolReadLat, "send_lat": ToolSendLat,
 	"tcp": ToolIperf3, "udp": ToolIperf3,
+	"nccl_allreduce": ToolNCCL, "nccl_allgather": ToolNCCL,
 }
+
+// IsCollective reports whether a test is a GPU collective over every host at
+// once (NCCL) rather than a set of point-to-point legs.
+func IsCollective(test string) bool { return strings.HasPrefix(test, "nccl_") }
 
 // IsLatency reports whether a test measures latency rather than bandwidth.
 func IsLatency(test string) bool { return strings.HasSuffix(test, "_lat") }
@@ -127,6 +133,14 @@ type Task struct {
 	Protocol    string    `json:"protocol,omitempty"` // iperf3: tcp or udp
 	StartAt     time.Time `json:"start_at,omitempty"`
 
+	// Collective (NCCL) tasks: every host runs one rank; rank 0 is the
+	// server task and hosts the rendezvous on TCPPort.
+	Rank       int    `json:"rank,omitempty"`
+	WorldSize  int    `json:"world_size,omitempty"`
+	MasterIP   string `json:"master_ip,omitempty"`
+	Collective string `json:"collective,omitempty"` // allreduce | allgather
+	Sizes      []int  `json:"sizes,omitempty"`      // bytes per step, each measured in turn
+
 	// Update tasks.
 	Version string `json:"version,omitempty"`
 	URLPath string `json:"url_path,omitempty"` // controller path serving the binary
@@ -160,24 +174,25 @@ type Event struct {
 
 // LegResult is what one side of a leg reports when its benchmark process ends.
 type LegResult struct {
-	TaskID      string           `json:"task_id"`
-	RunID       int64            `json:"run_id"`
-	LegID       int64            `json:"leg_id"`
-	Kind        string           `json:"kind"`
-	Command     []string         `json:"command"`
-	ExitCode    int              `json:"exit_code"`
-	AvgGbps     float64          `json:"avg_gbps"`
-	PeakGbps    float64          `json:"peak_gbps"`
-	MsgRateMpps float64          `json:"msg_rate_mpps"`
-	Latency     *Latency         `json:"latency,omitempty"`
-	Retransmits int64            `json:"retransmits,omitempty"` // iperf3 TCP
-	LossPct     float64          `json:"loss_pct,omitempty"`    // iperf3 UDP
-	JitterMs    float64          `json:"jitter_ms,omitempty"`   // iperf3 UDP
-	Output      string           `json:"output"`
-	Error       string           `json:"error,omitempty"`
-	ErrorDeltas map[string]int64 `json:"error_deltas,omitempty"`
-	StartedAt   time.Time        `json:"started_at"`
-	EndedAt     time.Time        `json:"ended_at"`
+	TaskID      string             `json:"task_id"`
+	RunID       int64              `json:"run_id"`
+	LegID       int64              `json:"leg_id"`
+	Kind        string             `json:"kind"`
+	Command     []string           `json:"command"`
+	ExitCode    int                `json:"exit_code"`
+	AvgGbps     float64            `json:"avg_gbps"`
+	PeakGbps    float64            `json:"peak_gbps"`
+	MsgRateMpps float64            `json:"msg_rate_mpps"`
+	Latency     *Latency           `json:"latency,omitempty"`
+	Retransmits int64              `json:"retransmits,omitempty"` // iperf3 TCP
+	LossPct     float64            `json:"loss_pct,omitempty"`    // iperf3 UDP
+	JitterMs    float64            `json:"jitter_ms,omitempty"`   // iperf3 UDP
+	Points      map[string]float64 `json:"points,omitempty"`      // collective: bus bandwidth (Gbps) per message size in bytes
+	Output      string             `json:"output"`
+	Error       string             `json:"error,omitempty"`
+	ErrorDeltas map[string]int64   `json:"error_deltas,omitempty"`
+	StartedAt   time.Time          `json:"started_at"`
+	EndedAt     time.Time          `json:"ended_at"`
 }
 
 // Sample is one telemetry reading. RdmaDev is empty for host-level values.
@@ -314,32 +329,41 @@ type RunSummary struct {
 	DeltaPct      float64  `json:"delta_pct,omitempty"`     // aggregate change against the baseline, in percent (+ is faster)
 	Regressed     int      `json:"regressed,omitempty"`     // legs that fell behind their baseline by more than the allowance
 	FabricIssues  []string `json:"fabric_issues,omitempty"` // fabric check findings on the run's cables when it started
+	// Workload-shaped figures (Phase 6). Fairness is the slowest leg's rate
+	// over the fastest among the legs of the last stage, 1 = perfectly fair;
+	// Congestion sums the counters that show the fabric pushing back:
+	// ECN-marked packets, CNPs sent and handled, switch queue drops and PFC
+	// pauses on the legs' ports.
+	Fairness   float64          `json:"fairness,omitempty"`
+	Congestion map[string]int64 `json:"congestion,omitempty"`
 }
 
 type Leg struct {
-	ID           int64            `json:"id"`
-	Index        int              `json:"index"`
-	Stage        int              `json:"stage"`              // sequential stage this leg ran in
-	MsgSize      int              `json:"msg_size,omitempty"` // set per leg in a size sweep
-	ClientHost   string           `json:"client_host"`
-	ClientIP     string           `json:"client_ip"`
-	ServerHost   string           `json:"server_host"`
-	ServerIP     string           `json:"server_ip"`
-	Fabric       string           `json:"fabric"`
-	ExpectedGbps float64          `json:"expected_gbps"`
-	ToolGbps     float64          `json:"tool_gbps"`
-	CounterGbps  float64          `json:"counter_gbps"`
-	LiveGbps     float64          `json:"live_gbps"`
-	Latency      *Latency         `json:"latency,omitempty"`
-	Retransmits  int64            `json:"retransmits,omitempty"`
-	LossPct      float64          `json:"loss_pct,omitempty"`
-	JitterMs     float64          `json:"jitter_ms,omitempty"`
-	ErrorDeltas  map[string]int64 `json:"error_deltas,omitempty"`
-	Switch       *LegSwitch       `json:"switch,omitempty"`   // switch ports and counters, when LLDP and switch telemetry exist
-	CPU          *LegCPU          `json:"cpu,omitempty"`      // host CPU during the test, when the agents reported it
-	Baseline     *LegBaseline     `json:"baseline,omitempty"` // the same leg in the baseline run, when one matched
-	Verdict      string           `json:"verdict"`
-	Note         string           `json:"note,omitempty"`
+	ID           int64              `json:"id"`
+	Index        int                `json:"index"`
+	Stage        int                `json:"stage"`              // sequential stage this leg ran in
+	MsgSize      int                `json:"msg_size,omitempty"` // set per leg in a size sweep
+	ClientHost   string             `json:"client_host"`
+	ClientIP     string             `json:"client_ip"`
+	ServerHost   string             `json:"server_host"`
+	ServerIP     string             `json:"server_ip"`
+	Fabric       string             `json:"fabric"`
+	ExpectedGbps float64            `json:"expected_gbps"`
+	SharedPort   string             `json:"shared_port,omitempty"` // "<host> <ip> x<n>": a port this leg shares with n-1 other legs of its stage, which caps its expected rate to a fair share
+	ToolGbps     float64            `json:"tool_gbps"`
+	CounterGbps  float64            `json:"counter_gbps"`
+	LiveGbps     float64            `json:"live_gbps"`
+	Latency      *Latency           `json:"latency,omitempty"`
+	Points       map[string]float64 `json:"points,omitempty"` // collective: bus bandwidth per size; ToolGbps is the largest size's
+	Retransmits  int64              `json:"retransmits,omitempty"`
+	LossPct      float64            `json:"loss_pct,omitempty"`
+	JitterMs     float64            `json:"jitter_ms,omitempty"`
+	ErrorDeltas  map[string]int64   `json:"error_deltas,omitempty"`
+	Switch       *LegSwitch         `json:"switch,omitempty"`   // switch ports and counters, when LLDP and switch telemetry exist
+	CPU          *LegCPU            `json:"cpu,omitempty"`      // host CPU during the test, when the agents reported it
+	Baseline     *LegBaseline       `json:"baseline,omitempty"` // the same leg in the baseline run, when one matched
+	Verdict      string             `json:"verdict"`
+	Note         string             `json:"note,omitempty"`
 }
 
 // Release is an agent build mirrored on the controller.

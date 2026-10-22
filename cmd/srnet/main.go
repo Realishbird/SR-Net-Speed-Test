@@ -114,7 +114,8 @@ func usage() {
   token                         print an agent install command (good for 10 hosts for an hour)
   run [flags]                   start a test (see run --help): fan-out, fan-in, --pairs, --mesh, --legs,
                                 --serial (link matrix), --sizes (sweep); tests: write read send
-                                write_lat read_lat send_lat tcp udp
+                                write_lat read_lat send_lat tcp udp nccl_allreduce nccl_allgather
+                                (collectives take --hosts: every host is one rank, the first is rank 0)
   runs                          list recent runs
   show <run id>                 show a run's result
   watch <run id>                follow a run live until it ends
@@ -299,13 +300,14 @@ func (c *cli) token(ctx context.Context) error {
 func (c *cli) run(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	var spec api.RunSpec
-	var clients, servers, legs, mesh, sizes string
+	var clients, servers, legs, mesh, hosts, sizes string
 	fs.StringVar(&spec.Name, "name", "", "run name")
-	fs.StringVar(&spec.Test, "test", "write", "write, read, send, write_lat, read_lat, send_lat, tcp, udp")
+	fs.StringVar(&spec.Test, "test", "write", "write, read, send, write_lat, read_lat, send_lat, tcp, udp, nccl_allreduce, nccl_allgather")
 	fs.StringVar(&clients, "clients", "", "client selectors, comma-separated: host name, tag:<tag>, RDMA IP or port label")
 	fs.StringVar(&servers, "servers", "", "server selectors, comma-separated")
 	fs.StringVar(&legs, "legs", "", "explicit legs client>server, comma-separated")
 	fs.StringVar(&mesh, "mesh", "", "full mesh among these selectors (every ordered pair)")
+	fs.StringVar(&hosts, "hosts", "", "collective (nccl_*): the hosts taking part, one GPU rank each; the first hosts the rendezvous")
 	fs.BoolVar(&spec.Pairs, "pairs", false, "pair clients[i] with servers[i]")
 	fs.BoolVar(&spec.Serial, "serial", false, "run legs one at a time (link matrix)")
 	fs.StringVar(&sizes, "sizes", "", "sweep: repeat every leg at each message size, comma-separated")
@@ -325,6 +327,9 @@ func (c *cli) run(ctx context.Context, args []string) error {
 	spec.Clients, spec.Servers = splitList(clients), splitList(servers)
 	if mesh != "" {
 		spec.Mesh, spec.Hosts = true, splitList(mesh)
+	}
+	if hosts != "" {
+		spec.Hosts = splitList(hosts)
 	}
 	for _, sz := range splitList(sizes) {
 		n, err := strconv.Atoi(sz)

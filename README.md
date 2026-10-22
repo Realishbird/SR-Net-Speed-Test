@@ -71,6 +71,7 @@ srnet run --sizes 4096,65536,1048576 --clients "Dell 770AP" --servers tag:server
 srnet run --test write_lat --legs "Dell 770AP>Dell Spark 1" --max-p99-us 5        # latency, fail above 5 µs p99
 srnet run --test tcp --streams 8 --clients "Dell 770AP" --servers "Dell Spark 1"  # iperf3 TCP
 srnet run --test udp --max-loss-pct 0.5 --clients "Dell 770AP" --servers "Dell Spark 1"
+srnet run --test nccl_allreduce --hosts tag:spark --sizes 1048576,67108864,268435456 # GPU collective over every Spark
 srnet runs; srnet show 12; srnet watch 12; srnet cancel 12
 ```
 
@@ -80,6 +81,7 @@ srnet runs; srnet show 12; srnet watch 12; srnet cancel 12
 | `write_lat`, `read_lat`, `send_lat` | `ib_*_lat` | min, typical, avg, p99, p99.9, max in µs |
 | `tcp` | `iperf3` (`--streams N`) | Gbps, retransmits |
 | `udp` | `iperf3 -u` | Gbps, loss %, jitter |
+| `nccl_allreduce`, `nccl_allgather` | the agent's bundled PyTorch benchmark, one GPU rank per host | bus bandwidth (as nccl-tests reports it) at the largest size, per size with `--sizes` |
 
 For each leg the controller picks the client and server ports that share a subnet, checks both are `ACTIVE`, starts every server, then starts every client at one shared time so aggregate load is simultaneous. Verdicts: `fail` below `--pass-pct` (default 90 %) of the expected line rate, above `--max-p99-us`, or above `--max-loss-pct`; `warn` when error counters such as `out_of_sequence` grew or TCP retransmitted.
 
@@ -99,6 +101,14 @@ Grafana is provisioned with VictoriaMetrics as its data source and four dashboar
 ## Baselines and regression
 
 Open a finished run and click **Set as baseline** (or `srnet baseline <id>`). Every later run of the same shape (test, direction, QPs, MTU) is compared leg by leg with the newest baseline: the run page and the CSV and HTML reports show the baseline figure and the change in percent, and a leg that falls more than the run's allowance behind (default 5%, `regress_pct` in the spec, "Warn % behind baseline" on the New run form) warns with a note naming the baseline run. Latency tests compare p99, lower is better. A leg matches when its client, server and message size match, so a single-link run is compared with the matching leg of a baseline fan-out. Each finished leg is also written to VictoriaMetrics as `srnet_result_*` series for the Trends dashboard. The **Nightly acceptance** button on the Suites page creates a write, send and read suite between chosen hosts and schedules it, which is the acceptance suite the plan's Phase 3 gate asks for.
+
+## Workload-shaped tests
+
+The Phase 6 tests put the fabric under the load real jobs produce rather than one stream per link:
+
+- **Incast and fan-out.** A port used by several legs of the same stage can give each only its fair share, so the expected rate is capped by the shared port (eight 100G Sparks into one 100G port expect 12.5 Gbps each, a 400G port feeding four 100G hosts still expects 100) and the leg note names the shared port. The run summary carries **fairness**, the slowest leg over the fastest in the last stage (1 means every leg got the same share), and **congestion**, the ECN marks and CNPs the hosts counted plus the queue drops and PFC pauses that grew on the legs' switch ports.
+- **Size sweep.** The "Size sweep" button on the New run form fills 256 B to 1 MiB (one stage per size), and a run with several sizes draws a chart of Gbps over message size with the expected rate as a reference, so the size at which a link reaches line rate is visible at a glance.
+- **NCCL collectives.** `nccl_allreduce` and `nccl_allgather` run every selected host as one GPU rank through a small PyTorch benchmark the agent carries (`internal/agent/nccl_bench.py`); the first host runs rank 0 and hosts the rendezvous on its RDMA address, the others join 3 s later, so no MPI, SSH or shared filesystem is needed. The run reports bus bandwidth the way nccl-tests does, for each size of a sweep in one process, and passes when the largest size reaches `--pass-pct` of the slowest link's rate. Hosts need PyTorch with CUDA (DGX OS ships it; the Hosts page shows the `torch`, `cuda` and `nccl` versions once the agent finds them), and a host without it fails the run with a note saying so.
 
 ## Fabric check
 

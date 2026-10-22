@@ -196,7 +196,7 @@ func memTotal() uint64 {
 
 func toolVersions(ctx context.Context) map[string]string {
 	tools := map[string]string{}
-	for _, t := range []string{api.ToolWriteBW, api.ToolReadBW, api.ToolSendBW, api.ToolWriteLat, api.ToolIperf3, "ethtool", "lldpctl"} {
+	for _, t := range []string{api.ToolWriteBW, api.ToolReadBW, api.ToolSendBW, api.ToolWriteLat, api.ToolIperf3, "ethtool", "lldpctl", "python3", "nvidia-smi", "dcb", "mlnx_qos"} {
 		if _, err := exec.LookPath(t); err == nil {
 			tools[t] = "installed"
 		}
@@ -209,6 +209,19 @@ func toolVersions(ctx context.Context) map[string]string {
 		for _, line := range strings.Split(string(out), "\n") {
 			if f := strings.Fields(line); len(f) == 2 {
 				tools[f[0]] = f[1]
+			}
+		}
+	}
+	// PyTorch with CUDA is what the NCCL collective tests need.
+	if _, ok := tools["python3"]; ok {
+		out, err := exec.CommandContext(ctx, "python3", "-c", "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.nccl.version() if torch.cuda.is_available() else '')").Output()
+		if err == nil {
+			if f := strings.Fields(string(out)); len(f) >= 2 {
+				tools["torch"] = f[0]
+				tools["cuda"] = f[1]
+				if len(f) > 2 {
+					tools["nccl"] = strings.Trim(f[2], "()")
+				}
 			}
 		}
 	}

@@ -330,7 +330,7 @@ async function pageHosts(token) {
             <td ${rs} class="muted">${esc(h.hostname)}</td>
             <td ${rs}><input class="cell" value="${esc((h.tags || []).join(', '))}" placeholder="tag, tag" onchange="patch('/hosts/${h.id}',{tags:list(this.value)})"></td>
             <td ${rs}><input class="cell" style="width:90px" value="${esc(h.site)}" onchange="patch('/hosts/${h.id}',{site:this.value})"></td>
-            <td ${rs} class="muted">${esc(h.agent_version)}<br><span class="mono">${esc(h.arch)}</span></td>`;
+            <td ${rs} class="muted" title="${esc(Object.entries(h.tools || {}).map(([k, v]) => k + ' ' + v).join(', ') || 'no tool versions reported yet')}">${esc(h.agent_version)}<br><span class="mono">${esc(h.arch)}</span>${h.tools?.torch ? `<br><span class="mono" title="PyTorch ${esc(h.tools.torch)}, CUDA ${esc(h.tools.cuda)}${h.tools.nccl ? ', NCCL ' + esc(h.tools.nccl) : ''}: this host can take part in NCCL collective tests">gpu${h.tools.cuda === 'True' ? '' : ' (no CUDA)'}</span>` : ''}</td>`;
         }
         if (!p) { html += '<td colspan="9" class="muted">no RDMA ports found</td></tr>'; return; }
         const sw = p.lldp_switch || p.lldp_port ? `${esc(p.lldp_switch)} <span class="muted">${esc(p.lldp_port)}</span>` : '<span class="muted">-</span>';
@@ -544,16 +544,17 @@ function deltaPct(d, bad) { return `<span class="${bad ? 'delta-bad' : d >= 0 ? 
 
 async function pageRun(token, id) {
   let r; try { r = await api('GET', '/runs/' + id); } catch (e) { mount(token, `<div class="page-head"><h1>Run ${id}</h1></div><div class="card">${esc(e.message)}</div>`); return; }
-  const s = r.spec, lat = s.test.endsWith('_lat');
+  const s = r.spec, lat = s.test.endsWith('_lat'), coll = isCollective(s.test);
   const head = lat ? '<th class="num">Min µs</th><th class="num">Typical µs</th><th class="num">Avg µs</th><th class="num">P99 µs</th><th class="num">P99.9 µs</th><th class="num">Max µs</th>'
-    : `<th class="num">Expected</th><th class="num" id="th-gbps">Gbps</th><th class="num">Counter Gbps</th>${s.test === 'tcp' ? '<th class="num">Retransmits</th>' : s.test === 'udp' ? '<th class="num">Loss %</th><th class="num">Jitter ms</th>' : ''}`;
+    : `<th class="num">Expected</th><th class="num" id="th-gbps">Gbps</th><th class="num" title="${coll ? 'What this rank transmitted during the collective, from its NIC counters' : 'From the NIC counters of the port the leg alone used'}">Counter Gbps</th>${s.test === 'tcp' ? '<th class="num">Retransmits</th>' : s.test === 'udp' ? '<th class="num">Loss %</th><th class="num">Jitter ms</th>' : ''}`;
   const headBl = `<th class="num" title="The same leg in the baseline run, and this leg's change against it">Baseline</th>`;
   const headSw = `<th title="Switch ports the leg crossed, from LLDP">Switch path</th>${lat ? '' : '<th class="num" title="Rate the switch counted on the server-side port during the test">Switch Gbps</th>'}<th class="num" title="Average (peak) CPU use on the client / server during the test">CPU %</th>`;
   if (!mount(token, `<div class="page-head"><h1>Run ${r.id}: ${esc(r.name)}</h1><span id="run-badges"></span><span class="spacer"></span><span id="run-actions"></span></div>
     <div id="run-error"></div>
     <div class="tiles" id="run-tiles"></div>
+    <div id="sweep"></div>
     <div class="card"><div class="kv">
-      <b>Test</b><span>${esc(s.test)} · ${s.duration_sec} s · message size ${s.msg_size}${s.sizes?.length ? ' (sweep ' + s.sizes.join(', ') + ')' : ''} · ${s.qps} QP${s.qps === 1 ? '' : 's'}${s.streams > 1 ? ' · ' + s.streams + ' streams' : ''}${s.bidir ? ' · bidirectional (rates add both directions)' : ''}${s.serial ? ' · serial' : ''}${s.mesh ? ' · full mesh' : ''}</span>
+      <b>Test</b><span>${esc(tests[s.test] || s.test)}${coll ? ' · ' + ((r.legs || []).length + 1) + ' ranks, one GPU each' : ''} · ${s.duration_sec} s · message size ${s.msg_size}${s.sizes?.length ? ' (sweep ' + s.sizes.join(', ') + ')' : ''}${coll ? '' : ' · ' + s.qps + ' QP'}${coll || s.qps === 1 ? '' : 's'}${s.streams > 1 ? ' · ' + s.streams + ' streams' : ''}${s.bidir ? ' · bidirectional (rates add both directions)' : ''}${s.serial ? ' · serial' : ''}${s.mesh ? ' · full mesh' : ''}</span>
       <b>Thresholds</b><span>${s.pass_pct}% of line rate${s.max_lat_p99_us ? ' · p99 ≤ ' + s.max_lat_p99_us + ' µs' : ''}${s.test === 'udp' ? ' · loss ≤ ' + s.max_loss_pct + '%' : ''} · warn ${s.regress_pct || 5}% behind baseline</span>
       <b>Baseline</b><span id="run-baseline"></span>
       <b>Fabric</b><span id="run-fabric"></span>
@@ -577,17 +578,20 @@ async function pageRun(token, id) {
     set('run-error', r.error ? `<div class="card" style="border-color:var(--fail);color:var(--fail)">${esc(r.error)}</div>` : '');
     const fab = Object.entries(r.summary.by_fabric || {}).map(([f, g]) => `<div class="tile"><div class="k">Fabric ${esc(f)}</div><div class="v">${fmt(g)}<small>Gbps</small></div></div>`).join('');
     set('run-tiles', lat ? `<div class="tile"><div class="k">Legs</div><div class="v">${(r.legs || []).length}</div></div>${fab}`
-      : `<div class="tile"><div class="k">${live ? 'Live aggregate' : 'Aggregate (tool)'}</div><div class="v">${fmt(live ? r.summary.live_gbps : r.summary.tool_gbps)}<small>Gbps</small></div></div>
-         ${!live ? `<div class="tile"><div class="k">Aggregate (NIC counters)</div><div class="v">${fmt(r.summary.counter_gbps)}<small>Gbps</small></div></div>` : ''}${fab}
-         <div class="tile"><div class="k">Legs</div><div class="v">${(r.legs || []).length}</div></div>`);
+      : `<div class="tile" title="${coll ? 'Bus bandwidth at the largest size, as nccl-tests reports it: the rate every link carries' : ''}"><div class="k">${live ? 'Live aggregate' : coll ? 'Bus bandwidth' : 'Aggregate (tool)'}</div><div class="v">${fmt(live ? r.summary.live_gbps : r.summary.tool_gbps)}<small>Gbps</small></div></div>
+         ${!live ? `<div class="tile"><div class="k">${coll ? 'Per rank (NIC counters)' : 'Aggregate (NIC counters)'}</div><div class="v">${fmt(r.summary.counter_gbps)}<small>Gbps</small></div></div>` : ''}${fab}
+         <div class="tile"><div class="k">${coll ? 'Ranks' : 'Legs'}</div><div class="v">${(r.legs || []).length + (coll ? 1 : 0)}</div></div>
+         ${r.summary.fairness ? `<div class="tile" title="Slowest leg over fastest leg in the last stage; 1 = every leg got the same share"><div class="k">Fairness</div><div class="v">${fmt(r.summary.fairness, 2)}</div></div>` : ''}
+         ${r.summary.congestion ? `<div class="tile" title="Counters that show the fabric pushing back during the run: ECN marks, CNPs, switch queue drops and PFC pauses on the legs' ports"><div class="k">Congestion</div><div class="v" style="font-size:14px;font-weight:500;line-height:1.5">${Object.entries(r.summary.congestion).map(([k, v]) => `${esc(k)} ${fmt(v, 0)}`).join('<br>')}</div></div>` : ''}`);
+    set('sweep', sweepChart(r));
     set('run-when', `${when(r.started_at) || 'queued'}${r.ended_at ? ' to ' + new Date(r.ended_at).toLocaleTimeString() : ''}`);
-    const th = $('#th-gbps'); if (th) th.textContent = live ? 'Live Gbps' : 'Tool Gbps';
+    const th = $('#th-gbps'); if (th) th.textContent = live ? 'Live Gbps' : coll ? 'Bus Gbps' : 'Tool Gbps';
     set('legs', (r.legs || []).map(l => {
       const errs = Object.entries(l.error_deltas || {}).map(([k, v]) => `${k} +${v}`).concat(Object.entries(l.switch?.deltas || {}).map(([k, v]) => `switch ${k} +${v}`)).join(', ');
       const sw = l.switch, cpu = l.cpu;
       const swPath = sw ? `<span class="mono">${esc(sw.client_port || '?')}</span> <span class="muted">&gt;</span> <span class="mono">${esc(sw.server_port || '?')}</span>` : '<span class="muted">-</span>';
       const swCell = `<td class="wrap">${swPath}</td>${lat ? '' : `<td class="num">${sw && sw.gbps ? fmt(sw.gbps) : '<span class="muted">-</span>'}</td>`}<td class="num" title="${cpu ? `client avg ${fmt(cpu.client_avg, 0)}% peak ${fmt(cpu.client_peak, 0)}% · server avg ${fmt(cpu.server_avg, 0)}% peak ${fmt(cpu.server_peak, 0)}%` : ''}">${cpu ? `${fmt(cpu.client_avg, 0)} <span class="muted">(${fmt(cpu.client_peak, 0)})</span> / ${fmt(cpu.server_avg, 0)} <span class="muted">(${fmt(cpu.server_peak, 0)})</span>` : '<span class="muted">-</span>'}</td>`;
-      const note = [l.note, sw?.note].filter(Boolean).join('; ');
+      const note = [coll ? `rank ${l.index + 1} to rank 0` : '', l.note, sw?.note, l.shared_port ? `fair share of ${l.shared_port.replace(/ x(\d+)$/, ' shared by $1 legs')}` : ''].filter(Boolean).join('; ');
       const bl = l.baseline, blCell = `<td class="num">${bl ? `${fmt(bl.value, lat ? 2 : 1)} ${deltaPct(bl.delta_pct, bl.regressed)}` : '<span class="muted">-</span>'}</td>`;
       let row = `<tr><td>${l.index + 1}</td><td>${esc(l.client_host)} <span class="muted mono">${esc(l.client_ip)}</span></td><td>${esc(l.server_host)} <span class="muted mono">${esc(l.server_ip)}</span></td><td>${esc(l.fabric)}</td><td class="num">${l.msg_size || ''}</td>`;
       if (lat) { const t = l.latency || {}; row += `<td class="num">${fmt(t.min_us, 2)}</td><td class="num">${fmt(t.typical_us, 2)}</td><td class="num">${fmt(t.avg_us, 2)}</td><td class="num">${fmt(t.p99_us, 2)}</td><td class="num">${fmt(t.p999_us, 2)}</td><td class="num">${fmt(t.max_us, 2)}</td>`; }
@@ -603,6 +607,56 @@ async function pageRun(token, id) {
   };
   if (paint(r)) setRefresh(async () => { const r = await api('GET', '/runs/' + id); if (!paint(r)) setRefresh(null); }, 2000);
 }
+// sweepChart draws a message-size sweep: one line per leg, Gbps over size
+// (log scale), with the expected rate as a dashed reference and a hover
+// readout. Only for bandwidth runs with more than one size.
+const seriesPalette = { light: ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948'], dark: ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767'] };
+function seriesColor(i) {
+  const dark = document.documentElement.dataset.theme === 'dark' || (!document.documentElement.dataset.theme && matchMedia('(prefers-color-scheme: dark)').matches);
+  const pal = seriesPalette[dark ? 'dark' : 'light']; return i < pal.length ? pal[i] : 'var(--muted)';
+}
+function sweepChart(r) {
+  const sizes = r.spec.sizes || [];
+  if (sizes.length < 2 || r.spec.test.endsWith('_lat') || !(r.legs || []).length) return '';
+  const legs = {}; // "client>server" -> {size: gbps}
+  let expected = 0;
+  if (isCollective(r.spec.test)) {
+    // Every rank reports the same collective-wide figures: one series.
+    const pts = (r.legs.find(l => l.points) || {}).points || {};
+    legs['bus bandwidth'] = Object.fromEntries(Object.entries(pts).map(([k, v]) => [+k, v]));
+    expected = Math.max(0, ...r.legs.map(l => l.expected_gbps || 0));
+  } else for (const l of r.legs) { const k = `${l.client_host} > ${l.server_host}`; (legs[k] = legs[k] || {})[l.msg_size] = l.tool_gbps; expected = Math.max(expected, l.expected_gbps || 0); }
+  const names = Object.keys(legs), xs = [...sizes].sort((a, b) => a - b);
+  const W = 760, H = 260, L = 52, R = 16, T = 14, B = 34, pw = W - L - R, ph = H - T - B;
+  const ymax = Math.max(expected, ...names.flatMap(n => Object.values(legs[n]))) * 1.08 || 1;
+  const x = sz => L + pw * (Math.log2(sz) - Math.log2(xs[0])) / Math.max(1e-9, Math.log2(xs[xs.length - 1]) - Math.log2(xs[0]));
+  const y = g => T + ph - ph * g / ymax;
+  const fmtSize = sz => sz >= 1048576 ? (sz / 1048576) + ' MiB' : sz >= 1024 ? (sz / 1024) + ' KiB' : sz + ' B';
+  const ticks = [0, 0.25, 0.5, 0.75, 1].map(f => f * ymax);
+  const grid = ticks.map(t => `<line x1="${L}" x2="${W - R}" y1="${y(t)}" y2="${y(t)}" stroke="var(--line)" stroke-width="1"/><text x="${L - 6}" y="${y(t) + 4}" text-anchor="end" font-size="11" fill="var(--muted)">${fmt(t, 0)}</text>`).join('');
+  const xt = xs.map(sz => `<text x="${x(sz)}" y="${H - B + 16}" text-anchor="middle" font-size="11" fill="var(--muted)">${fmtSize(sz)}</text>`).join('');
+  const exp = expected ? `<line x1="${L}" x2="${W - R}" y1="${y(expected)}" y2="${y(expected)}" stroke="var(--muted)" stroke-dasharray="4 4" stroke-width="1"/><text x="${W - R}" y="${y(expected) - 4}" text-anchor="end" font-size="11" fill="var(--muted)">expected ${fmt(expected, 0)} Gbps</text>` : '';
+  const lines = names.map((n, i) => { const pts = xs.filter(sz => legs[n][sz] != null).map(sz => `${x(sz)},${y(legs[n][sz])}`);
+    return `<polyline points="${pts.join(' ')}" fill="none" stroke="${seriesColor(i)}" stroke-width="2" stroke-linejoin="round"/>` + xs.filter(sz => legs[n][sz] != null).map(sz => `<circle cx="${x(sz)}" cy="${y(legs[n][sz])}" r="4" fill="${seriesColor(i)}" stroke="var(--surface)" stroke-width="2"/>`).join(''); }).join('');
+  const legend = names.map((n, i) => `<span class="sub" style="display:inline-flex;align-items:center;gap:6px;margin-right:14px"><i style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${seriesColor(i)}"></i>${esc(n)}</span>`).join('');
+  const data = esc(JSON.stringify({ xs, names, legs }));
+  return `<div class="card"><h2>Message size sweep</h2><div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">
+    <svg viewBox="0 0 ${W} ${H}" width="${W}" style="max-width:100%;height:auto" data-sweep="${data}" onmousemove="sweepHover(event,this)" onmouseleave="sweepHover(null,this)">
+      ${grid}${xt}${exp}${lines}<g id="sweep-cursor"></g><text x="${L}" y="${T - 2}" font-size="11" fill="var(--muted)">${names.length === 1 && names[0] === 'bus bandwidth' ? 'Bus bandwidth, Gbps' : 'Gbps per leg'}</text></svg>
+    <div style="min-width:160px"><div>${legend}</div><div id="sweep-read" class="muted" style="font-size:12px;margin-top:10px">Hover a size for the figures.</div></div></div></div>`;
+}
+function sweepHover(ev, svg) {
+  const g = svg.querySelector('#sweep-cursor'), read = $('#sweep-read');
+  if (!ev) { g.innerHTML = ''; if (read) read.textContent = 'Hover a size for the figures.'; return; }
+  const d = JSON.parse(svg.dataset.sweep), pt = svg.createSVGPoint(); pt.x = ev.clientX; pt.y = ev.clientY;
+  const p = pt.matrixTransform(svg.getScreenCTM().inverse());
+  const W = 760, L = 52, R = 16, pw = W - L - R, lo = Math.log2(d.xs[0]), hi = Math.log2(d.xs[d.xs.length - 1]);
+  const lx = lo + (p.x - L) / pw * (hi - lo);
+  const sz = d.xs.reduce((a, b) => Math.abs(Math.log2(b) - lx) < Math.abs(Math.log2(a) - lx) ? b : a);
+  const x = L + pw * (Math.log2(sz) - lo) / Math.max(1e-9, hi - lo);
+  g.innerHTML = `<line x1="${x}" x2="${x}" y1="14" y2="226" stroke="var(--muted)" stroke-width="1" stroke-dasharray="2 3"/>`;
+  if (read) read.innerHTML = `<b>${sz} B</b><br>` + d.names.map((n, i) => `<span style="color:${seriesColor(i)}">●</span> ${esc(n)}: ${fmt(d.legs[n][sz])} Gbps`).join('<br>');
+}
 // grafanaRunURL opens the Live run dashboard on this run, from 30 s before it
 // started to 30 s after it ended (or now, while it runs).
 function grafanaRunURL(r) {
@@ -616,7 +670,8 @@ async function setBaseline(id, on) {
 function cancelRun(id) { confirmBox('Cancel run', `Stop run ${id} on every host now?`, 'Cancel run', async () => { await api('POST', `/runs/${id}/cancel`); toast('Cancel sent', 'warn'); }); }
 
 /* ---------- new run ---------- */
-const tests = { write: 'RDMA write bandwidth', read: 'RDMA read bandwidth', send: 'RDMA send bandwidth', write_lat: 'RDMA write latency', read_lat: 'RDMA read latency', send_lat: 'RDMA send latency', tcp: 'TCP (iperf3)', udp: 'UDP (iperf3)' };
+const tests = { write: 'RDMA write bandwidth', read: 'RDMA read bandwidth', send: 'RDMA send bandwidth', write_lat: 'RDMA write latency', read_lat: 'RDMA read latency', send_lat: 'RDMA send latency', tcp: 'TCP (iperf3)', udp: 'UDP (iperf3)', nccl_allreduce: 'NCCL all-reduce (GPU collective)', nccl_allgather: 'NCCL all-gather (GPU collective)' };
+const isCollective = t => (t || '').startsWith('nccl_');
 async function pageNew(token) {
   const hosts = await api('GET', '/hosts');
   const prev = JSON.parse(sessionStorage.getItem('spec') || 'null'); sessionStorage.removeItem('spec');
@@ -628,7 +683,7 @@ async function pageNew(token) {
   <form id="f" onsubmit="return startRun(event)">
     <div class="card"><h2>What</h2><div class="row">
       <label>Name <input name="name" value="${v('name')}" placeholder="optional" style="width:220px"></label>
-      <label>Test <select name="test">${Object.entries(tests).map(([k, t]) => `<option value="${k}" ${prev?.test === k ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+      <label>Test <select name="test" onchange="testChange(this.value)">${Object.entries(tests).map(([k, t]) => `<option value="${k}" ${prev?.test === k ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
       <label>Topology <select name="topo" onchange="topoChange(this.value)">
         <option value="cs" ${topo === 'cs' ? 'selected' : ''}>Clients to servers (fan-out / fan-in)</option>
         <option value="pairs" ${topo === 'pairs' ? 'selected' : ''}>Pairs (client i to server i)</option>
@@ -637,13 +692,13 @@ async function pageNew(token) {
     <div class="card"><h2>Who</h2>
       <div class="row" id="t-cs"><div class="field">Clients ${picker('clients', prev?.clients, 'host, tag:client, IP or port label', 340)}</div>
         <div class="field">Servers ${picker('servers', prev?.servers, 'host, tag:server, IP or port label', 340)}</div></div>
-      <div class="row" id="t-mesh" style="display:none"><div class="field">Hosts ${picker('hosts', prev?.hosts, 'every ordered pair among these', 520)}</div></div>
+      <div class="row" id="t-mesh" style="display:none"><div class="field"><span id="hosts-label">Hosts</span> ${picker('hosts', prev?.hosts, 'every ordered pair among these', 520)}</div></div>
       <div class="row" id="t-legs" style="display:none"><label>Legs <input name="legs" style="width:520px" value="${esc((prev?.legs || []).map(l => l.client + '>' + l.server).join(', '))}" placeholder="client>server, client>server"></label></div>
       <p class="help" style="margin:10px 0 0">Selectors are host names, <span class="mono">tag:&lt;tag&gt;</span>, RDMA IPs or port labels. Legs are paired by shared subnet. Pick from the list, or type and press Enter; add as many as you like. ${hosts.length ? 'Click to add: ' + [...names, ...tags].map(n => `<button type="button" class="chip" data-v="${esc(n)}" onclick="pickAdd(null, this.dataset.v)">${esc(n)}</button>`).join(' ') : 'No hosts enrolled yet.'}</p></div>
     <div class="card"><h2>How</h2><div class="row">
       <label>Duration (s) <input name="duration_sec" type="number" min="5" value="${v('duration_sec', 60)}" style="width:90px"></label>
       <label>Message size <input name="msg_size" type="number" min="1" value="${v('msg_size') || ''}" placeholder="per test" style="width:110px"></label>
-      <label>Sweep sizes <input name="sizes" value="${esc((prev?.sizes || []).join(', '))}" placeholder="4096, 65536, 1048576" style="width:180px"></label>
+      <label>Sweep sizes <span style="display:flex;gap:4px"><input name="sizes" value="${esc((prev?.sizes || []).join(', '))}" placeholder="4096, 65536, 1048576" style="width:180px"><button type="button" class="sm" id="sweep-btn" title="256 B to 1 MiB, one stage per size: shows where a link reaches line rate" onclick="this.form.sizes.value=isCollective(this.form.test.value)?'1048576, 8388608, 67108864, 268435456':'256, 1024, 4096, 16384, 65536, 262144, 1048576'">Size sweep</button></span></label>
       <label>QPs <input name="qps" type="number" min="1" value="${v('qps', 1)}" style="width:70px"></label>
       <label>Streams (iperf3) <input name="streams" type="number" min="1" value="${v('streams', 1)}" style="width:70px"></label>
       <label class="inline"><input name="bidir" type="checkbox" ${prev?.bidir ? 'checked' : ''}> Bidirectional</label>
@@ -653,9 +708,21 @@ async function pageNew(token) {
       <label>Max p99 µs (latency tests) <input name="max_lat_p99_us" type="number" step="0.01" value="${prev?.max_lat_p99_us || ''}" placeholder="report only" style="width:120px"></label>
       <label>Max loss % (UDP) <input name="max_loss_pct" type="number" step="0.1" value="${v('max_loss_pct', 1)}" style="width:80px"></label>
       <label title="A leg this far behind the same leg of the newest baseline run warns">Warn % behind baseline <input name="regress_pct" type="number" min="0" max="100" step="0.5" value="${v('regress_pct', 5)}" style="width:80px"></label></div></div>
-    <div class="row"><button class="primary" type="submit" id="start">Start run</button><span class="sub">Servers start first; all clients start together 3 s later.</span></div>
+    <div class="row"><button class="primary" type="submit" id="start">Start run</button><span class="sub" id="start-help">Servers start first; all clients start together 3 s later.</span></div>
   </form>`)) return;
-  topoChange(topo);
+  topoChange(topo); testChange(prev?.test || 'write');
+}
+// testChange adapts the form to the test: a collective takes a list of hosts
+// (ranks) instead of clients and servers, and its sweep sizes are far larger.
+function testChange(t) {
+  const c = isCollective(t), f = $('#f');
+  f.topo.disabled = c;
+  if (c) { $('#t-cs').style.display = 'none'; $('#t-legs').style.display = 'none'; $('#t-mesh').style.display = ''; }
+  else topoChange(f.topo.value);
+  set('hosts-label', c ? 'Hosts (ranks; the first hosts the rendezvous)' : 'Hosts');
+  $('#sweep-btn').title = c ? '1 MiB to 256 MiB in one process: shows where the collective reaches line rate' : '256 B to 1 MiB, one stage per size: shows where a link reaches line rate';
+  f.msg_size.placeholder = c ? '64 MiB' : 'per test';
+  $('#start-help').textContent = c ? 'Rank 0 starts first; the other ranks join 3 s later. Every host needs PyTorch with CUDA.' : 'Servers start first; all clients start together 3 s later.';
 }
 // picker: a multi-value selector. Chips hold the chosen values, the text box
 // (with the host/tag datalist) adds more, and a hidden input carries the
@@ -693,7 +760,8 @@ async function startRun(ev) {
     pass_pct: +g('pass_pct'), max_lat_p99_us: +g('max_lat_p99_us') || 0, max_loss_pct: +g('max_loss_pct') || 0, regress_pct: +g('regress_pct') || 0, bidir: !!g('bidir'), serial: !!g('serial'),
     sizes: list(g('sizes')).map(Number).filter(Boolean) };
   const topo = g('topo');
-  if (topo === 'mesh') { spec.mesh = true; spec.hosts = list(g('hosts')); }
+  if (isCollective(spec.test)) spec.hosts = list(g('hosts'));
+  else if (topo === 'mesh') { spec.mesh = true; spec.hosts = list(g('hosts')); }
   else if (topo === 'legs') spec.legs = list(g('legs')).map(l => { const [c, s] = l.split('>'); return { client: (c || '').trim(), server: (s || '').trim() }; });
   else { spec.clients = list(g('clients')); spec.servers = list(g('servers')); spec.pairs = topo === 'pairs'; }
   const b = $('#start'); b.disabled = true;
