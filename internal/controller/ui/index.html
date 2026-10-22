@@ -723,16 +723,23 @@ function pcieCell(p) {
 // free link (a Spark's second PCIe half of the same cable).
 function pcieShareCell(h, p) {
   if (!p.pcie_shared) return '';
-  const move = p.pcie_move_to ? ` <button class="sm" onclick="pcieMove(${h.id},'${esc(p.netdev)}','${esc(p.pcie_move_to)}')" title="Move ${esc((p.addrs || []).join(', '))} and this port's label and fabric to ${esc(p.pcie_move_to)}: same cable and switch port, its own PCIe link">Move to ${esc(p.pcie_move_to)}</button>` : '';
+  const move = p.pcie_move_to ? ` <button class="sm" onclick="pcieMove(${h.id},'${esc(p.netdev)}','${esc(p.pcie_move_to)}','${esc((p.addrs || []).filter(a => !a.startsWith('fe80')).join(', '))}')" title="Move ${esc((p.addrs || []).join(', '))} and this port's label and fabric to ${esc(p.pcie_move_to)}: same cable and switch port, its own PCIe link">Move to ${esc(p.pcie_move_to)}</button>` : '';
   return `<br><span class="badge warn" title="${esc(p.pcie_shared)}">PCIe shared</span>${move}`;
 }
 // pcieMove moves a port's addresses to its twin in one netplan change
 // (rolled back unless the twin comes up with them and reaches a peer), then
 // carries the label, fabric and expected rate over.
-function pcieMove(hostID, from, to) {
+function pcieMove(hostID, from, to, addrs) {
   const body = preview => ({ from, to, timeout_sec: 120, preview });
-  const ov = modal({ title: `Move ${from} to ${to}`, wide: true, body: `<p>${esc(to)} is the same cable and switch port as ${esc(from)}, on the NIC's other PCIe link. Moving the address there gives this cable its own link instead of sharing one with the host's other port.</p>
-    <p class="help">One netplan change: ${esc(from)} keeps its MTU and no address, ${esc(to)} gets the address and MTU. Kept only if ${esc(to)} shows them with link up, a fabric peer answers a ping from it and the agent still reaches the controller; otherwise both ports go back as they were. Refused while a test runs on the host. The label, fabric and expected rate follow the address once it is kept.</p>
+  const a = `<span class="mono">${esc(addrs || 'the address')}</span>`, f = `<span class="mono">${esc(from)}</span>`, t = `<span class="mono">${esc(to)}</span>`;
+  const ov = modal({ title: 'Give this cable its own PCIe link', wide: true, body: `<p>Linux shows this cable under two names, ${f} and ${t}. They are the same cable and the same switch port; they differ only in which PCIe link inside the host carries the traffic to the CPU.</p>
+    <ul style="margin:8px 0 8px 18px;line-height:1.6">
+      <li><b>Now:</b> ${a} is on ${f}, whose PCIe link the host's other port also uses, so the two ports split one link.</li>
+      <li><b>After:</b> ${a} is on ${t}, whose PCIe link no other port uses, so each port gets a link of its own.</li>
+      <li><b>Unchanged:</b> the cable, the switch port and the IP address.</li>
+      <li><b>Safe:</b> kept only if ${t} comes up with the address, a fabric peer answers a ping from it and the agent still reaches the controller. Otherwise both names go back as they were by themselves. It will not run while a test uses this host.</li>
+      <li><b>Hosts page:</b> the label, fabric and expected rate move to ${t} with the address.</li>
+    </ul>
     <div id="np-out"></div><div id="np-jobs"></div>`,
     actions: [{ label: 'Copy netplan', close: false, run: async () => {
       try { const pv = await api('POST', `/hosts/${hostID}/netplan/move`, body(true)); set('np-out', `${pv.note ? `<p class="delta-bad">${esc(pv.note)}</p>` : ''}<p class="help">To apply by hand on the host (netplan try rolls back unless you press Enter), then remove the address from ${esc(from)} with ip addr del if it is still there:</p><pre id="np-cmds">${esc(pv.commands)}</pre><button class="sm" style="margin-top:6px" onclick="copyText($('#np-cmds').textContent,this)">Copy</button>`); } catch (e) { fail(e); }
