@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -94,7 +96,7 @@ func TestRemoveReleaseRoute(t *testing.T) {
 }
 
 func TestFastOIDs(t *testing.T) {
-	oids, back := fastOIDs([]snmpPort{{"1", "Ethernet0"}, {"5", "Ethernet4"}})
+	oids, back := fastOIDs([]snmpPort{{"1", "Ethernet0", 100000}, {"5", "Ethernet4", 100000}})
 	if len(oids) != 12 || len(back) != 12 {
 		t.Fatalf("%d oids", len(oids))
 	}
@@ -104,46 +106,134 @@ func TestFastOIDs(t *testing.T) {
 	c := newSNMPCollector(nil, newMetrics(""))
 	rows := map[string]map[string]any{"1": {"name": "Ethernet0", "in_octets": int64(1000), "out_octets": int64(0), "oper_status": int64(1)}}
 	now := time.Now()
-	c.render(SwitchConfig{Name: "sw"}, rows, now.Add(-2*time.Second))
+	c.render(SwitchConfig{Name: "sw"}, rows, now.Add(-2*time.Second), "walk")
 	rows["1"]["in_octets"] = int64(1000 + 250_000_000) // 1 Gbps over 2 s
-	lines, n := c.render(SwitchConfig{Name: "sw"}, rows, now)
+	lines, n := c.render(SwitchConfig{Name: "sw"}, rows, now, "walk")
 	if n != 1 || !strings.Contains(string(lines), `srnet_switch_rx_gbps{port="Ethernet0",switch="sw"} 1 `) {
 		t.Errorf("render:\n%s", lines)
 	}
 }
 
+// rxRate pulls the rx_gbps value out of rendered lines, or -1.
+func rxRate(lines []byte) float64 {
+	for _, l := range strings.Split(string(lines), "\n") {
+		if strings.HasPrefix(l, "srnet_switch_rx_gbps") {
+			f := strings.Fields(l)
+			v, _ := strconv.ParseFloat(f[1], 64)
+			return v
+		}
+	}
+	return -1
+}
+
+// TestSNMPFastRate models the Z9864F: the SNMP agent refreshes its counters
+// every 5 s, the fast poll reads every 2.1 s and a full walk lands in
+// between. The 2 s chart must show the real 80 Gbps, never thousands.
+func TestSNMPFastRate(t *testing.T) {
+	c := newSNMPCollector(nil, newMetrics(""))
+	sw := SwitchConfig{Name: "sw"}
+	base := time.Unix(1700000000, 0)
+	const bps = 80e9 / 8                // bytes per second while traffic runs
+	counter := func(at float64) int64 { // value the agent serves at time at
+		refreshed := math.Floor((at-0.7)/5)*5 + 0.7
+		if refreshed > 150 {
+			refreshed = 150 // traffic stops at 150 s
+		}
+		return int64(1e9 + refreshed*bps)
+	}
+	row := func(at float64, fast bool) map[string]map[string]any {
+		r := map[string]any{"name": "Ethernet120", "in_octets": counter(at), "out_octets": counter(at) / 2, "_at": base.Add(time.Duration(at * float64(time.Second)))}
+		if fast {
+			r["_mbps"] = int64(100000)
+		} else {
+			r["speed_mbps"] = int64(100000)
+		}
+		return map[string]map[string]any{"121": r}
+	}
+	var last float64
+	for at := 0.0; at < 200; at += 2.1 {
+		lines, _ := c.render(sw, row(at, true), base, "fast")
+		if v := rxRate(lines); v >= 0 {
+			if v > 100 {
+				t.Fatalf("t=%.1f: %g Gbps on a 100G port", at, v)
+			}
+			if at > 90 && at < 150 && math.Abs(v-80) > 80*0.04 {
+				t.Errorf("t=%.1f: %g Gbps, want 80", at, v)
+			}
+			last = v
+		}
+		if int(at*10)%30 == 0 { // a full walk every few polls, interleaved
+			lines, _ := c.render(sw, row(at+0.05, false), base, "walk")
+			if v := rxRate(lines); v > 100 {
+				t.Fatalf("walk t=%.1f: %g Gbps", at, v)
+			}
+		}
+	}
+	if last != 0 {
+		t.Errorf("idle port ends at %g Gbps, want 0", last)
+	}
+}
+
 func TestHealthParseAndLines(t *testing.T) {
-	raw := `[{"source":"z9864f","updates":[{"values":{
-	  "openconfig-platform:components":{"component":[
-	    {"name":"TEMP 2","state":{"name":"TEMP 2","temperature":{"current":35.5,"high":70,"critical-high":80}}},
-	    {"name":"FAN 1","state":{"oper-status":"openconfig-platform-types:ACTIVE"}},
-	    {"name":"PSU 2","state":{"oper-status":"INACTIVE"}}]},
+	// System nodes, as one Get of infra, cpus and memory returns them.
+	sys := `[{"source":"z9864f","updates":[{"Path":"openconfig-system:system","values":{
 	  "openconfig-system:cpus":{"cpu":[{"index":"ALL","state":{"total":{"instant":7}}}]},
 	  "openconfig-system:memory":{"state":{"physical":1000,"unused":400}},
 	  "openconfig-system-ext:infra":{"state":{"uptime":"3 days, 04:00:10","reboot-cause":"User issued 'reboot'"}}}}]}]`
+	// Components as the Z9864F answers them: the answer names the hardware,
+	// not the key that was asked for, and numbers come back as strings.
+	comps := `[{"source":"z9864f","updates":[
+	  {"Path":"openconfig-platform:components/component[name=TEMP 1]/state","values":{"openconfig-platform:state":{"name":"CPU Temp","temperature":{"critical-high-threshold":"97","current":"32","high-threshold":"95"}}}},
+	  {"Path":"openconfig-platform:components/component[name=FAN 1]/state","values":{"openconfig-platform:state":{"name":"FanTray1-Fan1","oper-status":"openconfig-platform-types:ACTIVE"}}},
+	  {"Path":"openconfig-platform:components/component[name=FAN 2]/state","values":{"openconfig-platform:state":{"name":"FanTray1-Fan2","oper-status":"openconfig-platform-types:INACTIVE"}}},
+	  {"Path":"openconfig-platform:components/component[name=PSU 2]/state","values":{"openconfig-platform:state":{"name":"PSU 2","oper-status":"openconfig-platform-types:ACTIVE"}}}]},
+	  {"source":"other","updates":[{"Path":"openconfig-platform:components/component[name=TEMP 9]/state","values":{"state":{"name":"Elsewhere","temperature":{"current":"50"}}}}]}]`
+	speed := `[{"source":"z9864f","updates":[{"Path":"openconfig-platform:components/component[name=FAN 1]/fan/state","values":{"openconfig-platform-fan:state":{"openconfig-platform-fan:speed":8442}}}]}]`
 	h := api.SwitchHealth{At: time.Unix(1700000000, 0)}
-	for _, vals := range gnmicUpdates([]byte(raw)) {
-		for _, v := range vals {
-			parseHealth(v, &h)
+	for _, u := range gnmicGetUpdates([]byte(sys)) {
+		parseHealth(u.Values, &h)
+	}
+	for _, u := range gnmicGetUpdates([]byte(comps)) {
+		if u.Source == "z9864f" {
+			parseComponent(componentKey(u.Path), u.Values, &h)
 		}
 	}
-	if len(h.Temps) != 1 || h.Temps[0].C != 35.5 || h.Temps[0].HighC != 70 || h.Temps[0].CriticalC != 80 {
+	for _, u := range gnmicGetUpdates([]byte(speed)) {
+		parseFanSpeed(componentKey(u.Path), u.Values, &h)
+	}
+	if len(h.Temps) != 1 || h.Temps[0].Name != "CPU Temp" || h.Temps[0].Component != "TEMP 1" || h.Temps[0].C != 32 || h.Temps[0].HighC != 95 || h.Temps[0].CriticalC != 97 {
 		t.Errorf("temps = %+v", h.Temps)
 	}
-	if len(h.Fans) != 1 || !h.Fans[0].OK || len(h.PSUs) != 1 || h.PSUs[0].OK {
-		t.Errorf("fans %+v psus %+v", h.Fans, h.PSUs)
+	if len(h.Fans) != 2 || h.Fans[0].Name != "FanTray1-Fan1" || !h.Fans[0].OK || h.Fans[0].RPM != 8442 || h.Fans[1].OK {
+		t.Errorf("fans = %+v", h.Fans)
+	}
+	if len(h.PSUs) != 1 || !h.PSUs[0].OK || h.PSUs[0].Component != "PSU 2" {
+		t.Errorf("psus = %+v", h.PSUs)
 	}
 	if h.CPUPct != 7 || h.MemPct != 60 || h.UptimeSec != 3*86400+4*3600+10 || !strings.Contains(h.LastReboot, "reboot") {
 		t.Errorf("cpu %v mem %v up %v reboot %q", h.CPUPct, h.MemPct, h.UptimeSec, h.LastReboot)
 	}
 	lines := string(healthLines("z9864F", h))
-	for _, want := range []string{`srnet_switch_temp_c{sensor="TEMP 2",switch="z9864F"} 35.5`, `srnet_switch_fan_ok{fan="FAN 1",switch="z9864F"} 1`, `srnet_switch_psu_ok{psu="PSU 2",switch="z9864F"} 0`, `srnet_switch_cpu_pct{switch="z9864F"} 7`, `srnet_switch_uptime_seconds{switch="z9864F"} 273610`} {
+	for _, want := range []string{
+		`srnet_switch_temp_c{component="TEMP 1",sensor="CPU Temp",switch="z9864F"} 32`,
+		`srnet_switch_temp_high_c{component="TEMP 1",sensor="CPU Temp",switch="z9864F"} 95`,
+		`srnet_switch_temp_crit_c{component="TEMP 1",sensor="CPU Temp",switch="z9864F"} 97`,
+		`srnet_switch_fan_ok{component="FAN 1",fan="FanTray1-Fan1",switch="z9864F"} 1`,
+		`srnet_switch_fan_ok{component="FAN 2",fan="FanTray1-Fan2",switch="z9864F"} 0`,
+		`srnet_switch_fan_rpm{component="FAN 1",fan="FanTray1-Fan1",switch="z9864F"} 8442`,
+		`srnet_switch_psu_ok{component="PSU 2",psu="PSU 2",switch="z9864F"} 1`,
+		`srnet_switch_cpu_pct{switch="z9864F"} 7`,
+		`srnet_switch_uptime_seconds{switch="z9864F"} 273610`,
+	} {
 		if !strings.Contains(lines, want) {
 			t.Errorf("missing %q in\n%s", want, lines)
 		}
 	}
 	if uptimeSeconds(float64(5e12)) != 5000 || uptimeSeconds("01:02:03") != 3723 {
 		t.Error("uptime parsing")
+	}
+	if !keyLess("FAN 2", "FAN 10") || keyLess("TEMP 1", "FAN 3") {
+		t.Error("keyLess")
 	}
 }
 
@@ -193,7 +283,7 @@ func TestRawExportCSV(t *testing.T) {
 		t.Errorf("snmp row = %v", rows[4])
 	}
 	hosts, switches := sc.matchers()
-	if !strings.Contains(hosts, `host!=""`) || len(switches) != 4 || !strings.Contains(switches[1], "interface_name=~") || !strings.Contains(switches[2], "interface_interface_id=~") || !strings.Contains(switches[0], `port=~"^(?:Ethernet0|Ethernet4)$"`) {
+	if !strings.Contains(hosts, `host!=""`) || len(switches) != 5 || !strings.Contains(switches[1], "interface_name=~") || !strings.Contains(switches[2], "interface_interface_id=~") || !strings.Contains(switches[3], "component_name=~") || !strings.Contains(switches[0], `port=~"^(?:Ethernet0|Ethernet4)$"`) {
 		t.Errorf("matchers: %s %v", hosts, switches)
 	}
 	var jl bytes.Buffer
@@ -254,7 +344,7 @@ func TestSwitchDashboardJSON(t *testing.T) {
 			Targets []struct{ Expr string }
 		} `json:"panels"`
 	}
-	if err := json.Unmarshal(b, &dash); err != nil || dash.UID != "srnet-switch" || len(dash.Templating.List) != 2 {
+	if err := json.Unmarshal(b, &dash); err != nil || dash.UID != "srnet-switch" || len(dash.Templating.List) != 3 {
 		t.Fatalf("dashboard: %v uid=%s vars=%d", err, dash.UID, len(dash.Templating.List))
 	}
 	for name, raw := range d {
@@ -268,6 +358,23 @@ func TestSwitchDashboardJSON(t *testing.T) {
 			for _, tg := range p.Targets {
 				if strings.Contains(tg.Expr, `__name__=~`) && (strings.Contains(tg.Expr, "rate(") || strings.Contains(tg.Expr, "increase(")) && !strings.Contains(tg.Expr, "keep_metric_names") {
 					t.Errorf("%s: multi-metric rate without keep_metric_names: %s", name, tg.Expr)
+				}
+				// keep_metric_names goes after the call's closing
+				// parenthesis; "x[2m] keep_metric_names)" is a syntax
+				// error that blanked every rate panel in v0.1.26.
+				for rest := tg.Expr; ; {
+					i := strings.Index(rest, "keep_metric_names")
+					if i < 0 {
+						break
+					}
+					if strings.TrimRight(rest[:i], " ")[len(strings.TrimRight(rest[:i], " "))-1] != ')' {
+						t.Errorf("%s: keep_metric_names not after a closing parenthesis: %s", name, tg.Expr)
+					}
+					rest = rest[i+1:]
+				}
+				// Optic series carry component_name, not name.
+				if strings.Contains(tg.Expr, "transceiver") && strings.Contains(tg.Expr, `,name=~`) {
+					t.Errorf("%s: transceiver query filters on name: %s", name, tg.Expr)
 				}
 			}
 		}
