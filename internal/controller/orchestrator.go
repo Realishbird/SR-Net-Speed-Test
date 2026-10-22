@@ -57,9 +57,10 @@ type activeRun struct {
 
 // Orchestrator turns run specs into agent tasks and collects the results.
 type Orchestrator struct {
-	store   *Store
-	hub     *hub
-	metrics *metrics
+	onFinish func(api.Run) // Phase 7: notifications when a run ends
+	store    *Store
+	hub      *hub
+	metrics  *metrics
 	// switches lists the configured switches, for per-leg switch counters.
 	// Nil when the server has not wired it (tests).
 	switches func() []SwitchConfig
@@ -546,6 +547,7 @@ func (o *Orchestrator) Start(ctx context.Context, spec api.RunSpec) (int64, erro
 	if err != nil {
 		return 0, err
 	}
+	hosts = approvedHosts(hosts)
 	if o.lldp != nil {
 		o.lldp(ctx, hosts)
 	}
@@ -609,6 +611,18 @@ func (o *Orchestrator) Start(ctx context.Context, spec api.RunSpec) (int64, erro
 }
 
 type userError struct{ error }
+
+// approvedHosts drops hosts still waiting for approval (Phase 8): they are
+// visible, but no test runs on them until an admin lets them in.
+func approvedHosts(hosts []hostRec) []hostRec {
+	out := hosts[:0:0]
+	for _, h := range hosts {
+		if h.Approved {
+			out = append(out, h)
+		}
+	}
+	return out
+}
 
 // hostBusy reports whether any active run uses a port on the agent.
 func (o *Orchestrator) hostBusy(agentID int64) bool {
@@ -715,6 +729,11 @@ func (o *Orchestrator) execute(ctx context.Context, ar *activeRun) {
 		o.publishResult(bg, ar.id)
 	}
 	log.Printf("run %d %s: %s, %.1f Gbps aggregate", ar.id, status, verdict, sum.ToolGbps)
+	if o.onFinish != nil {
+		if r, err := o.store.Run(bg, ar.id); err == nil {
+			o.onFinish(r)
+		}
+	}
 }
 
 // runStage starts the servers of one stage, then its clients at a shared time,

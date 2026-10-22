@@ -225,6 +225,7 @@ type Host struct {
 	AgentVersion string     `json:"agent_version"`
 	LastSeen     time.Time  `json:"last_seen"`
 	Online       bool       `json:"online"`
+	Approved     bool       `json:"approved"` // false: enrolled from a subnet without a token, waiting on the Hosts page
 	Ports        []HostPort `json:"ports"`
 }
 
@@ -399,8 +400,9 @@ type UpdateHostStatus struct {
 }
 
 type UpdateRequest struct {
-	Version string   `json:"version"`
-	Hosts   []string `json:"hosts,omitempty"` // selectors; empty = every host
+	Version  string   `json:"version"`
+	Hosts    []string `json:"hosts,omitempty"`    // selectors; empty = every host
+	Parallel int      `json:"parallel,omitempty"` // hosts updated at once; 0 = the Settings page value
 }
 
 // Suite is an ordered list of runs executed back to back.
@@ -501,8 +503,17 @@ type Topology struct {
 	At       time.Time    `json:"at"`
 	Warning  string       `json:"warning,omitempty"`
 	Switches []TopoSwitch `json:"switches"`
+	Links    []TopoLink   `json:"links"` // switch to switch
 	Hosts    []TopoHost   `json:"hosts"`
 	Runs     []TopoRun    `json:"runs"`
+}
+
+// TopoLink is a cable between two configured switches, from their LLDP tables.
+type TopoLink struct {
+	A     string `json:"a"`
+	APort string `json:"a_port"`
+	B     string `json:"b"`
+	BPort string `json:"b_port"`
 }
 
 type TopoSwitch struct {
@@ -662,4 +673,39 @@ type LegCPU struct {
 	ClientPeak float64 `json:"client_peak"`
 	ServerAvg  float64 `json:"server_avg"`
 	ServerPeak float64 `json:"server_peak"`
+}
+
+// Phase 7: access.
+
+// APIToken is a long-lived credential for scripts and CI (Bearer auth).
+// The token itself is shown once, when created; only its hash is kept.
+type APIToken struct {
+	ID        int64      `json:"id"`
+	Name      string     `json:"name"`
+	Role      string     `json:"role"` // admin | viewer
+	Prefix    string     `json:"prefix"`
+	CreatedAt time.Time  `json:"created_at"`
+	LastUsed  *time.Time `json:"last_used,omitempty"`
+	Token     string     `json:"token,omitempty"` // only in the create response
+}
+
+// Session is a signed-in SSO user.
+type Session struct {
+	ID        string    `json:"id"` // hash of the cookie, never the cookie
+	Subject   string    `json:"subject"`
+	Name      string    `json:"name"`
+	Email     string    `json:"email"`
+	Role      string    `json:"role"`
+	IP        string    `json:"ip"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+	LastSeen  time.Time `json:"last_seen"`
+	Current   bool      `json:"current,omitempty"`
+}
+
+// Whoami says who the caller is, on the status response.
+type Whoami struct {
+	Name string `json:"name"`
+	Role string `json:"role"` // admin | viewer
+	Via  string `json:"via"`  // password | token | sso
 }

@@ -20,6 +20,7 @@ type alerter struct {
 	store      *Store
 	hub        *hub
 	webhook    string
+	notifier   *notifier // Phase 7 channels; nil in tests
 	hotC       float64
 	offlineFor time.Duration
 
@@ -63,6 +64,7 @@ func (a *alerter) resolve(ctx context.Context, kind, host, port string) {
 }
 
 func (a *alerter) notify(state string, al api.Alert) {
+	a.notifier.alert(state, al)
 	if a.webhook == "" {
 		return
 	}

@@ -139,6 +139,7 @@ button.chip:hover { border-color:var(--accent); }
   nav a { padding:7px 10px; } nav a span.t { display:none; } nav .foot { display:none; }
   main { padding:18px 16px 50px; }
 }
+body.viewer nav a[data-page="new"], body.viewer nav a[data-page="settings"], body.viewer button.primary, body.viewer button.danger, body.viewer input.cell { pointer-events:none; opacity:.45 }
 </style>
 </head>
 <body>
@@ -155,8 +156,9 @@ button.chip:hover { border-color:var(--accent); }
   <a href="#fleet" data-page="fleet"><svg viewBox="0 0 24 24"><path d="M12 3v12M8 11l4 4 4-4"/><path d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg><span class="t">Fleet</span></a>
   <a href="#switches" data-page="switches"><svg viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="10" rx="2"/><path d="M6 11h.01M9 11h.01M12 11h.01M15 11h.01M18 11h.01M6 14h12"/></svg><span class="t">Switches</span></a>
   <a href="#alerts" data-page="alerts"><svg viewBox="0 0 24 24"><path d="M12 3l9.5 17h-19z"/><path d="M12 10v4M12 17h.01"/></svg><span class="t">Alerts</span><span class="badge fail" id="alert-count" style="display:none"></span></a>
+  <a href="#settings" data-page="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/></svg><span class="t">Settings</span></a>
   <a id="grafana" href="#" target="_blank"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 15l3-4 3 2 4-6"/></svg><span class="t">Grafana</span></a>
-  <div class="foot"><span id="clock"></span><button class="sm" onclick="changePassword()" title="Change the admin login password">Password</button><button class="sm" onclick="toggleTheme()">Toggle theme</button></div>
+  <div class="foot"><span id="clock"></span><span id="me" class="sub"></span><button class="sm" id="signout" style="display:none" onclick="signOut()">Sign out</button><button class="sm" id="pwbtn" onclick="changePassword()" title="Change the admin login password">Password</button><button class="sm" onclick="toggleTheme()">Toggle theme</button></div>
 </nav>
 <main id="view"></main>
 </div>
@@ -266,6 +268,7 @@ function route() {
   if (h === '#fleet') return go(pageFleet);
   if (h === '#switches') return go(pageSwitches);
   if (h === '#alerts') return go(pageAlerts);
+  if (h === '#settings') return go(pageSettings);
   return go(pageOverview);
 }
 // mount writes the shell only if the user is still on the page that asked for it
@@ -304,7 +307,8 @@ async function pageOverview(token) {
 
 /* ---------- hosts ---------- */
 async function pageHosts(token) {
-  if (!mount(token, `<div class="page-head"><h1>Hosts</h1><span class="spacer"></span>
+  if (!mount(token, `<div class="page-head"><h1>Hosts</h1><span class="sub" id="host-count"></span><span class="spacer"></span>
+      <input id="host-filter" placeholder="filter: name, tag, IP, fabric, label, pending, offline" style="width:300px" oninput="hostFilter=this.value;refreshFn?.()">
       <label class="sub">Import CSV <input type="file" id="csv" accept=".csv" style="display:none"></label><button onclick="$('#csv').click()">Import CSV</button>
       <button class="primary" onclick="installCommand()">Agent install command</button></div>
     <p class="help">Names, tags, labels and expected rates are editable in place; a change saves when you leave the field. CSV columns: host, name, tags, site, rack, ip, label, fabric, expected_gbps.</p>
@@ -315,7 +319,10 @@ async function pageHosts(token) {
     e.target.value = '';
   };
   const refresh = async () => {
-    const hosts = await api('GET', '/hosts');
+    const all = await api('GET', '/hosts');
+    const hosts = all.filter(h => hostMatchesFilter(h, hostFilter));
+    const pending = all.filter(h => !h.approved).length;
+    set('host-count', `${all.length} host${all.length === 1 ? '' : 's'}, ${all.filter(h => h.online).length} online${pending ? `, <span class="delta-bad">${pending} waiting for approval</span>` : ''}${hosts.length !== all.length ? `, ${hosts.length} shown` : ''}`);
     let html = '';
     for (const h of hosts) {
       // Configured ports (with an address) first; the uncabled and twin
@@ -326,7 +333,7 @@ async function pageHosts(token) {
         if (i === 0) {
           const rs = `rowspan="${ports.length}"`;
           html += `<td ${rs}><span class="dot ${h.online ? 'on' : ''}" title="${h.online ? 'online' : 'offline, last seen ' + ago(h.last_seen)}"></span></td>
-            <td ${rs}><input class="cell" value="${esc(h.name)}" onchange="patch('/hosts/${h.id}',{name:this.value})"></td>
+            <td ${rs}><input class="cell" value="${esc(h.name)}" onchange="patch('/hosts/${h.id}',{name:this.value})">${h.approved ? '' : `<div style="margin-top:4px"><span class="badge warn" title="Enrolled from an enrolment subnet without a token; no test runs on it until approved">pending</span> <button class="sm primary" onclick="api('POST','/hosts/${h.id}/approve').then(refreshFn,fail)">Approve</button> <button class="sm danger" onclick="confirmBox('Reject host','Remove ${esc(h.name)}? It can enrol again later.','Reject',async()=>{await api('DELETE','/hosts/${h.id}');refreshFn();})">Reject</button></div>`}</td>
             <td ${rs} class="muted">${esc(h.hostname)}</td>
             <td ${rs}><input class="cell" value="${esc((h.tags || []).join(', '))}" placeholder="tag, tag" onchange="patch('/hosts/${h.id}',{tags:list(this.value)})"></td>
             <td ${rs}><input class="cell" style="width:90px" value="${esc(h.site)}" onchange="patch('/hosts/${h.id}',{site:this.value})"></td>
@@ -345,18 +352,30 @@ async function pageHosts(token) {
           <td class="num">${fmt(p.tx_gbps)} / ${fmt(p.rx_gbps)}</td></tr>`;
       });
     }
-    set('hosts', html || `<tr><td colspan="15" class="empty">No hosts enrolled yet. Click "Agent install command" and run it on each test host.</td></tr>`);
+    set('hosts', html || `<tr><td colspan="15" class="empty">${all.length ? 'No host matches the filter.' : 'No hosts enrolled yet. Click "Agent install command" and run it on each test host.'}</td></tr>`);
   };
   await refresh(); setRefresh(refresh, 5000);
+}
+let hostFilter = '';
+// hostMatchesFilter: every word must match something about the host; the
+// words "pending" and "offline" select those states.
+function hostMatchesFilter(h, q) {
+  const words = (q || '').toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return true;
+  const hay = [h.name, h.hostname, h.site, h.rack, h.agent_version, ...(h.tags || []), ...h.ports.flatMap(p => [p.label, p.fabric, p.netdev, p.rdma_dev, p.lldp_switch, p.lldp_port, ...(p.addrs || [])])].join(' ').toLowerCase();
+  return words.every(w => (w === 'pending' && !h.approved) || (w === 'offline' && !h.online) || (w === 'online' && h.online) || hay.includes(w));
 }
 // After a save the table is refreshed only when nothing is being edited:
 // Tab moves focus to the next cell and a rebuild would drop it mid-typing.
 async function patch(path, u) { try { await api('PATCH', path, u); toast('Saved', 'pass', 1500); if (!busy()) refreshFn?.(); } catch (e) { fail(e); } }
 async function installCommand() {
   try {
-    const t = await api('POST', '/tokens');
-    modal({ title: 'Install an agent', body: `<p class="help">Run this as root on each Ubuntu or Debian test host. The same command works on up to ${t.hosts} hosts until ${new Date(t.expires_at).toLocaleTimeString()}; after that, open this dialog again for a fresh one.</p>
-      <pre id="cmd">${esc(t.install_command)}</pre>`, actions: [{ label: 'Copy command', cls: 'primary', close: false, run: function () { copyText(t.install_command, $('#modal footer button.primary')); } }, { label: 'Done' }] });
+    const t = await api('GET', '/install-commands');
+    const pick = (k, el) => { $('#cmd').textContent = t[k]; $('#cmd').dataset.k = k; document.querySelectorAll('#cmd-tabs button').forEach(b => b.classList.toggle('primary', b === el)); };
+    window.pickCmd = pick;
+    modal({ title: 'Install an agent', body: `<div class="row" id="cmd-tabs" style="margin-bottom:8px"><button class="sm primary" onclick="pickCmd('github',this)" title="Script and binaries from GitHub">With internet</button><button class="sm" onclick="pickCmd('offline',this)" title="Script and binaries served by this controller; needs a mirrored release on the Fleet page">Air-gapped${t.mirrored ? '' : ' (mirror a release first)'}</button>${t.tokenless ? `<button class="sm" onclick="pickCmd('tokenless',this)" title="No token: the host must come from an enrolment subnet (Settings)">Token-less</button>` : ''}</div>
+      <p class="help">Run this as root on each Ubuntu or Debian test host. The token works on up to ${t.hosts} hosts until ${new Date(t.expires_at).toLocaleTimeString()}; the token-less command works for hosts in ${t.enrol_cidrs.length ? 'the enrolment subnets ' + esc(t.enrol_cidrs.join(', ')) : 'no subnet yet (set one under Settings)'}${t.auto_approve ? '' : ' and the host then waits for approval here'}.</p>
+      <pre id="cmd">${esc(t.github)}</pre>`, actions: [{ label: 'Copy command', cls: 'primary', close: false, run: function () { copyText(t[$('#cmd').dataset.k || 'github'], $('#modal footer button.primary')); } }, { label: 'Close' }] });
   } catch (e) { fail(e); }
 }
 
@@ -364,26 +383,34 @@ async function installCommand() {
 const fabricPalette = ['#2f6fed', '#d97706', '#0f9d58', '#9333ea', '#dc2626', '#0891b2', '#65a30d', '#db2777'];
 function fabricColor(f, fabrics) { const i = fabrics.indexOf(f); return i < 0 ? 'var(--muted)' : fabricPalette[i % fabricPalette.length]; }
 const shortPort = n => String(n || '').replace(/^Ethernet/, 'E').replace(/^PortChannel/, 'Po');
+let topoShow = 'auto';
 function drawTopology(t) {
   const sw = t.switches || [];
+  // A big fleet is drawn as the hosts that matter now: cabled ports with
+  // traffic or in a running test. "auto" does that above 40 hosts.
+  const legIDs = new Set((t.runs || []).flatMap(r => r.legs.flatMap(l => [l.client_port_id, l.server_port_id])));
+  const active = h => h.ports.some(p => legIDs.has(p.id) || (p.tx_gbps || 0) + (p.rx_gbps || 0) >= 0.1);
+  const n = (t.hosts || []).length;
+  if (topoShow === 'active' || (topoShow === 'auto' && n > 40)) t = { ...t, hosts: (t.hosts || []).filter(active), trimmed: n };
   const fabrics = [...new Set((t.hosts || []).flatMap(h => h.ports.map(p => p.fabric)).filter(Boolean))].sort();
   const legs = (t.runs || []).flatMap(r => r.legs);
   const legPorts = new Set(legs.flatMap(l => [l.client_port_id, l.server_port_id]));
   const n0 = (t.hosts || []).length, cols = Math.max(1, Math.min(n0, 10));
   const HW = 184, HH = 84, GAP = 16, W = Math.max(960, cols * (HW + GAP) + 40);
   const rows = Math.ceil(n0 / cols);
-  const SWY = 24, SWH = 46;
+  const SWY = (t.links || []).length ? 44 : 24, SWH = 46; // room above the switches for inter-switch arcs
   const hostY = r => SWY + SWH + 170 + r * (HH + 110);
   const H = hostY(Math.max(rows, 1) - 1) + HH + 24;
   const out = [], links = [], labels = [];
   // Switches across the top, their ports as stubs along the bottom edge.
-  const swPos = {};
+  const swPos = {}, swBox = {};
   const swTotal = sw.reduce((a, s) => a + Math.max(s.ports.length, 1), 0) || 1;
   const swAvail = W - 40 - (sw.length - 1) * 30;
   let sx = 20;
   for (const s of sw) {
     const n = Math.max(s.ports.length, 1), wdt = Math.max(160, swAvail * n / swTotal);
     out.push(`<rect class="box sw" x="${sx}" y="${SWY}" width="${wdt}" height="${SWH}" rx="8"/>`);
+    swBox[s.name.toLowerCase()] = { x: sx + wdt / 2, y: SWY };
     out.push(`<text x="${sx + 10}" y="${SWY + 18}" font-weight="600">${esc(s.name)}</text><text class="mut" x="${sx + 10}" y="${SWY + 34}">${esc(s.address)}${s.source ? ' · ' + esc(s.source) : ' · no counters yet'}</text>`);
     s.ports.forEach((p, i) => {
       const x = sx + wdt * (i + 0.5) / n, y = SWY + SWH;
@@ -394,6 +421,14 @@ function drawTopology(t) {
     sx += wdt + 30;
   }
   if (!sw.length) out.push(`<text class="mut" x="${W / 2}" y="${SWY + 28}" text-anchor="middle">No switch configured. Add one on the Switches page to see its ports here.</text>`);
+  // Cables between switches (leaf/spine, or two leaves joined), from the
+  // switches' own LLDP tables: an arc above the switch row.
+  (t.links || []).forEach((l, i) => {
+    const a = swPos[(l.a + '/' + l.a_port).toLowerCase()] || swBox[l.a.toLowerCase()], b = swPos[(l.b + '/' + l.b_port).toLowerCase()] || swBox[l.b.toLowerCase()];
+    if (!a || !b) return;
+    const ya = a.y === SWY + SWH ? SWY : a.y, yb = b.y === SWY + SWH ? SWY : b.y, lift = 6 + (i % 3) * 8;
+    links.push(`<path class="link idle" d="M${a.x} ${ya} C ${a.x} ${lift}, ${b.x} ${lift}, ${b.x} ${yb}" stroke="var(--muted)" stroke-width="2"><title>${esc(l.a)} ${esc(l.a_port)} to ${esc(l.b)} ${esc(l.b_port)}</title></path>`);
+  });
   // Hosts in the order of their switch ports, so lines cross as little as
   // possible; hosts with no mapping yet go last.
   const anchor = h => { const xs = h.ports.map(p => swPos[(p.switch + '/' + p.switch_port).toLowerCase()]).filter(Boolean).map(q => q.x); return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : Infinity; };
@@ -427,12 +462,12 @@ function drawTopology(t) {
       }
     });
   });
-  if (!hosts.length) out.push(`<text class="mut" x="${W / 2}" y="${H / 2}" text-anchor="middle">No hosts enrolled yet.</text>`);
+  if (!hosts.length) out.push(`<text class="mut" x="${W / 2}" y="${H / 2}" text-anchor="middle">${t.trimmed ? `${t.trimmed} hosts enrolled; none is in a test or carrying traffic now. Choose "all hosts" above to draw every one.` : 'No hosts enrolled yet.'}</text>`);
   const legend = fabrics.map((f, i) => `<g transform="translate(${W - 20 - (fabrics.length - i) * 90}, ${H - 8})"><rect width="12" height="4" y="-6" rx="2" fill="${fabricColor(f, fabrics)}"/><text class="sm mut" x="16">fabric ${esc(f)}</text></g>`).join('');
   return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMin meet">${links.join('')}${out.join('')}${labels.join('')}${legend}</svg>`;
 }
 async function pageTopology(token) {
-  if (!mount(token, `<div class="page-head"><h1>Topology</h1><span class="spacer"></span><span class="sub" id="tp-legs"></span><span class="sub" id="tp-upd"></span></div>
+  if (!mount(token, `<div class="page-head"><h1>Topology</h1><span class="spacer"></span><label class="sub">Show <select onchange="topoShow=this.value;refreshFn?.()"><option value="auto" ${topoShow === 'auto' ? 'selected' : ''}>auto (all up to 40 hosts)</option><option value="all" ${topoShow === 'all' ? 'selected' : ''}>all hosts</option><option value="active" ${topoShow === 'active' ? 'selected' : ''}>hosts in a test or with traffic</option></select></label><span class="sub" id="tp-legs"></span><span class="sub" id="tp-upd"></span></div>
     <p class="help">Drawn from each host's LLDP neighbour and the switch's own port counters. Line width follows the live rate; the legs of a run in progress glow. Switch ports and the fabric column come from the switch itself (its LLDP and VLAN tables, polled every minute) or from the host's lldpd; "no LLDP" means neither has seen a neighbour on that port yet.</p>
     <div class="card topo" style="padding:10px 10px 4px" id="tp-svg"></div><div id="tp-warn"></div>
     <div class="card"><h2>Switch ports in use</h2><div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th>Switch</th><th>Port</th><th>Link</th><th>Host</th><th>Host port</th><th>IP</th><th>Fabric</th><th class="num">In Gbps</th><th class="num">Out Gbps</th><th class="num">Discards in / out</th><th class="num">Errors in / out</th><th class="num">FCS</th></tr></thead><tbody id="tp-ports"></tbody></table></div></div>
@@ -441,13 +476,14 @@ async function pageTopology(token) {
     const t = await api('GET', '/topology');
     set('tp-svg', drawTopology(t));
     set('tp-warn', t.warning ? `<div class="card" style="border-color:var(--warn);color:var(--warn)">${esc(t.warning)}</div>` : '');
-    const byPort = {};
+    const byPort = {}, peer = {};
     for (const h of t.hosts) for (const p of h.ports) if (p.switch && p.switch_port) byPort[(p.switch + '/' + p.switch_port).toLowerCase()] = { h, p };
+    for (const l of t.links || []) { peer[(l.a + '/' + l.a_port).toLowerCase()] = l.b + ' ' + l.b_port; peer[(l.b + '/' + l.b_port).toLowerCase()] = l.a + ' ' + l.a_port; }
     const rows = t.switches.flatMap(s => s.ports.map(p => {
       const m = byPort[(s.name + '/' + p.name).toLowerCase()];
       const bad = (p.in_discards || 0) + (p.out_discards || 0) + (p.in_errors || 0) + (p.out_errors || 0) + (p.fcs_errors || 0) > 0;
       return `<tr><td>${esc(s.name)}</td><td class="mono">${esc(p.name)}</td><td>${p.up == null ? '<span class="muted">?</span>' : badge(p.up ? 'up' : 'down', p.up ? 'pass' : 'fail')}${p.speed_mbps ? ` <span class="muted">${p.speed_mbps / 1000}G</span>` : ''}</td>
-        <td>${m ? `<b>${esc(m.h.name)}</b>` : '<span class="muted">-</span>'}</td><td class="mono">${m ? esc(m.p.label || m.p.netdev) : ''}</td><td class="mono">${m?.p.ip ? esc(m.p.ip) : ''}</td><td>${p.vlan ? `${esc(p.vlan)}${m?.p.fabric && m.p.fabric !== p.vlan ? ` <span class="badge fail" title="The host port's fabric label does not match the VLAN the switch has this port in">host says ${esc(m.p.fabric)}</span>` : ''}` : esc(m?.p.fabric || '')}</td>
+        <td>${m ? `<b>${esc(m.h.name)}</b>` : peer[(s.name + '/' + p.name).toLowerCase()] ? `<span class="muted" title="Cable to another switch">switch ${esc(peer[(s.name + '/' + p.name).toLowerCase()])}</span>` : '<span class="muted">-</span>'}</td><td class="mono">${m ? esc(m.p.label || m.p.netdev) : ''}</td><td class="mono">${m?.p.ip ? esc(m.p.ip) : ''}</td><td>${p.vlan ? `${esc(p.vlan)}${m?.p.fabric && m.p.fabric !== p.vlan ? ` <span class="badge fail" title="The host port's fabric label does not match the VLAN the switch has this port in">host says ${esc(m.p.fabric)}</span>` : ''}` : esc(m?.p.fabric || '')}</td>
         <td class="num">${fmt(p.rx_gbps)}</td><td class="num">${fmt(p.tx_gbps)}</td><td class="num" style="color:${bad ? 'var(--warn)' : 'inherit'}">${fmt(p.in_discards, 0)} / ${fmt(p.out_discards, 0)}</td><td class="num" style="color:${bad ? 'var(--warn)' : 'inherit'}">${fmt(p.in_errors, 0)} / ${fmt(p.out_errors, 0)}</td><td class="num">${fmt(p.fcs_errors, 0)}</td></tr>`;
     }));
     set('tp-ports', rows.join('') || `<tr><td colspan="12" class="empty">${t.switches.length ? 'No switch port is mapped to a host yet and none carries traffic. The mapping appears once hosts report LLDP neighbours.' : 'No switch configured.'}</td></tr>`);
@@ -769,6 +805,122 @@ async function startRun(ev) {
   return false;
 }
 
+/* ---------- settings (Phase 7 and 8) ---------- */
+async function pageSettings(token) {
+  if (!mount(token, `<div class="page-head"><h1>Settings</h1></div>
+    <div class="card" id="st-signin"><h2>Sign-in</h2></div>
+    <div class="card" id="st-tokens"><h2>API tokens</h2></div>
+    <div class="card" id="st-sessions"><h2>Signed-in users</h2></div>
+    <div class="card" id="st-notify"><h2>Notifications</h2></div>
+    <div class="card" id="st-enrol"><h2>Enrolment</h2></div>
+    <div class="card" id="st-updates"><h2>Fleet updates</h2></div>
+    <div class="card" id="st-backup"><h2>Backup and restore</h2></div>`)) return;
+  await Promise.all([stSignin(), stTokens(), stSessions(), stNotify(), stEnrol(), stUpdates(), stBackup()]);
+}
+const chk = (name, on, label) => `<label class="inline"><input type="checkbox" name="${name}" ${on ? 'checked' : ''}> ${label}</label>`;
+async function stSignin() {
+  let o; try { o = await api('GET', '/access/oidc'); } catch (e) { set('st-signin', `<h2>Sign-in</h2><p class="help">${esc(e.message)}</p>`); return; }
+  set('st-signin', `<h2>Sign-in</h2>
+    <p class="help">The admin password always works. Single sign-on sends the browser to an OpenID Connect provider (Okta, Entra ID, Keycloak, Google, Authentik) and gives signed-in people a role: <b>admin</b> changes anything, <b>viewer</b> reads everything. Register this redirect URL at the provider: <span class="mono" id="oidc-redirect">${esc(o.redirect_url)}</span></p>
+    <form id="oidc-form" onsubmit="return saveOIDC(event)"><div class="row">
+      ${chk('enabled', o.enabled, 'Enable single sign-on')}
+      <label>Button label <input name="provider_name" value="${esc(o.provider_name)}" style="width:160px"></label>
+      <label>Issuer URL <input name="issuer" value="${esc(o.issuer)}" placeholder="https://login.example.com/realms/lab" style="width:340px"></label></div>
+      <div class="row"><label>Client ID <input name="client_id" value="${esc(o.client_id)}" style="width:260px"></label>
+      <label>Client secret <input name="client_secret" type="password" placeholder="${o.client_secret_set ? 'stored; leave blank to keep' : 'from the provider'}" style="width:260px" autocomplete="new-password"></label>
+      <label>Scopes <input name="scopes" value="${esc(o.scopes)}" style="width:200px"></label>
+      <label>Groups claim <input name="groups_claim" value="${esc(o.groups_claim)}" style="width:120px"></label>
+      <label>Session hours <input name="session_hours" type="number" min="1" max="720" value="${o.session_hours}" style="width:80px"></label></div>
+      <div class="row"><label>Admins <input name="admins" value="${esc((o.admins || []).join(', '))}" placeholder="dylan@example.com, netops" style="width:360px"></label>
+      <label>Viewers <input name="viewers" value="${esc((o.viewers || []).join(', '))}" placeholder="emails or groups" style="width:360px"></label>
+      ${chk('allow_all_viewers', o.allow_all_viewers, 'Anyone the provider signs in is a viewer')}</div>
+      <p class="help">Admins and viewers are email addresses or group names from the provider's claims, comma separated.</p>
+      <div class="row"><button class="primary" type="submit">Save</button><button type="button" onclick="testOIDC()">Test provider</button><span class="sub" id="oidc-test"></span></div></form>`);
+}
+function oidcForm() {
+  const f = new FormData($('#oidc-form')), g = k => f.get(k) || '';
+  return { enabled: !!g('enabled'), provider_name: g('provider_name'), issuer: g('issuer'), client_id: g('client_id'), client_secret: g('client_secret'), scopes: g('scopes'), groups_claim: g('groups_claim'),
+    session_hours: +g('session_hours') || 12, admins: list(g('admins')), viewers: list(g('viewers')), allow_all_viewers: !!g('allow_all_viewers') };
+}
+async function saveOIDC(ev) { ev.preventDefault(); try { await api('PUT', '/access/oidc', oidcForm()); toast('Sign-in settings saved', 'pass'); stSignin(); } catch (e) { fail(e); } return false; }
+async function testOIDC() {
+  const el = $('#oidc-test'); el.textContent = 'asking the provider...';
+  try { const r = await api('POST', '/access/oidc/test', oidcForm()); el.innerHTML = r.ok ? `<span class="delta-good">provider found</span>: authorization at <span class="mono">${esc(r.authorization_endpoint)}</span>, keys at <span class="mono">${esc(r.jwks_uri)}</span>` : 'discovery document incomplete'; }
+  catch (e) { el.innerHTML = `<span class="delta-bad">${esc(e.message)}</span>`; }
+}
+async function stTokens() {
+  let ts; try { ts = await api('GET', '/access/tokens'); } catch (e) { set('st-tokens', `<h2>API tokens</h2><p class="help">${esc(e.message)}</p>`); return; }
+  set('st-tokens', `<h2>API tokens <span class="spacer"></span><button class="sm primary" onclick="newToken()">New token</button></h2>
+    <p class="help">For scripts, CI and the <span class="mono">srnet</span> CLI (<span class="mono">SRNET_TOKEN=...</span>). Send it as <span class="mono">Authorization: Bearer &lt;token&gt;</span>. A token is shown once, when created.</p>
+    <div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th>Name</th><th>Role</th><th>Prefix</th><th>Created</th><th>Last used</th><th></th></tr></thead><tbody>
+    ${ts.map(t => `<tr><td><b>${esc(t.name)}</b></td><td>${esc(t.role)}</td><td class="mono muted">${esc(t.prefix)}…</td><td class="muted">${when(t.created_at)}</td><td class="muted">${t.last_used ? ago(t.last_used) : 'never'}</td>
+      <td style="text-align:right"><button class="sm danger" onclick="confirmBox('Revoke token', 'Revoke ${esc(t.name)}? Anything using it stops working.', 'Revoke', async () => { await api('DELETE', '/access/tokens/${t.id}'); stTokens(); })">Revoke</button></td></tr>`).join('') || '<tr><td colspan="6" class="empty">No API tokens yet.</td></tr>'}</tbody></table></div>`);
+}
+function newToken() {
+  modal({ title: 'New API token', body: `<div class="row"><label>Name <input id="tok-name" placeholder="what will use it" style="width:240px"></label><label>Role <select id="tok-role"><option value="admin">admin</option><option value="viewer">viewer (read only)</option></select></label></div>`,
+    actions: [{ label: 'Cancel' }, { label: 'Create', cls: 'primary', close: false, run: async () => {
+      try { const t = await api('POST', '/access/tokens', { name: $('#tok-name').value, role: $('#tok-role').value }); closeModal(); stTokens();
+        modal({ title: 'Token for ' + esc(t.name), body: `<p class="help">Copy it now; it is not shown again.</p><pre id="tok-val">${esc(t.token)}</pre><p class="help">Example: <span class="mono">curl -H "Authorization: Bearer ${esc(t.token)}" ${esc(location.origin)}/api/v1/runs</span></p>`,
+          actions: [{ label: 'Copy token', cls: 'primary', close: false, run: function () { copyText(t.token, $('#modal footer button.primary')); } }, { label: 'Done' }] });
+      } catch (e) { fail(e); } } }] });
+}
+async function stSessions() {
+  let ses; try { ses = await api('GET', '/access/sessions'); } catch (e) { set('st-sessions', `<h2>Signed-in users</h2><p class="help">${esc(e.message)}</p>`); return; }
+  set('st-sessions', `<h2>Signed-in users</h2><div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th>User</th><th>Role</th><th>From</th><th>Signed in</th><th>Last seen</th><th>Expires</th><th></th></tr></thead><tbody>
+    ${ses.map(s => `<tr><td><b>${esc(s.name || s.email)}</b> <span class="muted">${esc(s.email)}</span>${s.current ? ' <span class="chip">this browser</span>' : ''}</td><td>${esc(s.role)}</td><td class="mono muted">${esc(s.ip)}</td><td class="muted">${when(s.created_at)}</td><td class="muted">${ago(s.last_seen)}</td><td class="muted">${when(s.expires_at)}</td>
+      <td style="text-align:right"><button class="sm danger" onclick="api('DELETE','/access/sessions/${esc(s.id)}').then(stSessions,fail)">Sign out</button></td></tr>`).join('') || '<tr><td colspan="7" class="empty">Nobody is signed in through single sign-on. Password logins do not appear here.</td></tr>'}</tbody></table></div>`);
+}
+let notifyState = null;
+async function stNotify() {
+  let n; try { n = await api('GET', '/notify'); } catch (e) { set('st-notify', `<h2>Notifications</h2><p class="help">${esc(e.message)}</p>`); return; }
+  notifyState = n;
+  set('st-notify', `<h2>Notifications <span class="spacer"></span><button class="sm" onclick="notifyState.channels.push({name:'',kind:'slack',url:'',events:['alert_open','run_fail','suite_done'],enabled:true});renderNotify()">Add channel</button><button class="sm primary" onclick="saveNotify()">Save channels</button></h2>
+    <p class="help">Where alerts and results go. Slack: an incoming webhook URL. Teams: a Workflows "post to a channel when a webhook request is received" URL (Adaptive Card). JSON webhook: a POST with event, level, title, text, link, fields and data, optionally signed with HMAC-SHA256.</p>
+    <div id="notify-rows">${n.channels.map((c, i) => notifyRow(c, i, n)).join('') || '<p class="help">No channels yet.</p>'}</div>`);
+}
+function renderNotify() { const n = notifyState; set('notify-rows', n.channels.map((c, i) => notifyRow(c, i, n)).join('') || '<p class="help">No channels yet.</p>'); }
+function notifyRow(c, i, n) { return `<div class="card" style="margin:10px 0;padding:12px 14px">
+    <div class="row"><label>Name <input value="${esc(c.name)}" oninput="notifyState.channels[${i}].name=this.value" style="width:160px"></label>
+      <label>Kind <select onchange="notifyState.channels[${i}].kind=this.value;renderNotify()">${['slack', 'teams', 'webhook'].map(k => `<option value="${k}" ${c.kind === k ? 'selected' : ''}>${k === 'slack' ? 'Slack incoming webhook' : k === 'teams' ? 'Microsoft Teams workflow webhook' : 'JSON webhook'}</option>`).join('')}</select></label>
+      <label>URL <input value="${esc(c.url)}" oninput="notifyState.channels[${i}].url=this.value" placeholder="https://hooks.slack.com/services/..." style="width:360px"></label>
+      ${c.kind === 'webhook' ? `<label>Signing secret <input value="${esc(c.secret || '')}" oninput="notifyState.channels[${i}].secret=this.value" placeholder="optional, X-SRNet-Signature" style="width:200px"></label>` : ''}
+      <label class="inline"><input type="checkbox" ${c.enabled ? 'checked' : ''} onchange="notifyState.channels[${i}].enabled=this.checked"> Enabled</label></div>
+    <div class="row" style="margin-top:8px">${n.events.map(e => `<label class="inline" title="${esc(e.Label)}"><input type="checkbox" ${(c.events || []).includes(e.Key) ? 'checked' : ''} onchange="toggleEvent(${i},'${e.Key}',this.checked)"> ${esc(e.Label.split(' (')[0])}</label>`).join('')}</div>
+    <div class="row" style="margin-top:8px"><span class="sub">${c.last_at ? (c.last_ok ? `<span class="delta-good">last delivery ok</span> ${ago(c.last_at)}, ${c.sent || 0} sent` : `<span class="delta-bad">last delivery failed</span> ${ago(c.last_at)}: ${esc(c.last_error)}`) : 'nothing sent yet'}</span><span class="spacer"></span>
+      <button class="sm" onclick="testChannel(${c.id})" ${c.id ? '' : 'disabled title="save first"'}>Send test</button><button class="sm danger" onclick="notifyState.channels.splice(${i},1);renderNotify()">Remove</button></div></div>`; }
+function toggleEvent(i, key, on) { const c = notifyState.channels[i]; c.events = (c.events || []).filter(e => e !== key); if (on) c.events.push(key); }
+async function saveNotify() { try { await api('PUT', '/notify', { channels: notifyState.channels }); toast('Channels saved', 'pass'); stNotify(); } catch (e) { fail(e); } }
+async function testChannel(id) { try { await api('POST', `/notify/${id}/test`); toast('Test message delivered', 'pass'); stNotify(); } catch (e) { fail(e); stNotify(); } }
+async function stEnrol() {
+  let e; try { e = await api('GET', '/enrol'); } catch (x) { set('st-enrol', `<h2>Enrolment</h2><p class="help">${esc(x.message)}</p>`); return; }
+  set('st-enrol', `<h2>Enrolment</h2>
+    <p class="help">Hosts normally enrol with a one-hour install token from the Hosts page. Hosts in the subnets below may enrol <b>without a token</b>, so one fixed command fits cloud-init, Ansible or a PXE post-script for hundreds of hosts. They are either approved at once or wait on the Hosts page until an admin approves them.</p>
+    <form onsubmit="return saveEnrol(event)"><div class="row"><label>Subnets <input name="cidrs" value="${esc((e.cidrs || []).join(', '))}" placeholder="176.16.0.0/16, 10.20.0.0/22" style="width:400px"></label>
+      ${chk('auto_approve', e.auto_approve, 'Approve such hosts automatically (otherwise they wait for approval)')}<button class="primary" type="submit">Save</button></div></form>`);
+}
+async function saveEnrol(ev) { ev.preventDefault(); const f = new FormData(ev.target); try { await api('PUT', '/enrol', { cidrs: list(f.get('cidrs')), auto_approve: !!f.get('auto_approve') }); toast('Enrolment settings saved', 'pass'); } catch (e) { fail(e); } return false; }
+async function stUpdates() {
+  let u; try { u = await api('GET', '/updates/settings'); } catch (x) { set('st-updates', `<h2>Fleet updates</h2><p class="help">${esc(x.message)}</p>`); return; }
+  set('st-updates', `<h2>Fleet updates</h2><form onsubmit="return saveUpdates(event)"><div class="row"><label>Hosts updated at once <input name="parallel" type="number" min="1" max="20" value="${u.parallel}" style="width:80px"></label><button class="primary" type="submit">Save</button></div>
+    <p class="help">Each host is still waited for until idle, verified on the new version and rolled back by its launcher if it does not come back. With one at a time a fleet of 200 takes about an hour; with 10 at a time, minutes.</p></form>`);
+}
+async function saveUpdates(ev) { ev.preventDefault(); try { await api('PUT', '/updates/settings', { parallel: +new FormData(ev.target).get('parallel') }); toast('Saved', 'pass'); } catch (e) { fail(e); } return false; }
+async function stBackup() {
+  let files = []; try { files = await api('GET', '/backups'); } catch (e) { }
+  set('st-backup', `<h2>Backup and restore</h2>
+    <p class="help">A backup holds everything typed in: host names, tags, port labels and fabrics, fabric profiles, suites, schedules, switch settings, sign-in and notification settings, API token hashes. Results and telemetry stay in Postgres and VictoriaMetrics (use <span class="mono">pg_dump srnet</span> for those). A file is written every night into <span class="mono">/var/lib/srnet/backups</span> and the newest 14 are kept. Restore merges a backup on top of what exists and deletes nothing.</p>
+    <div class="row"><button class="primary" onclick="location.href='/api/v1/backup'">Download backup</button><button onclick="location.href='/api/v1/backup?runs=1'">With the last 1000 runs</button>
+      <label class="sub">Restore from file <input type="file" id="restore-file" accept=".json" style="display:none" onchange="restoreFile(this)"></label><button onclick="$('#restore-file').click()">Restore...</button></div>
+    ${files.length ? `<div class="tbl" style="margin:12px 0 0;box-shadow:none"><table><thead><tr><th>Nightly backups</th><th class="num">Size</th><th>Written</th></tr></thead><tbody>${files.map(f => `<tr><td><a href="/api/v1/backups/${esc(f.name)}" download>${esc(f.name)}</a></td><td class="num">${Math.round(f.size / 1024)} KB</td><td class="muted">${when(f.at)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="help">No nightly backup written yet.</p>'}`);
+}
+async function restoreFile(inp) {
+  const f = inp.files[0]; if (!f) return;
+  const text = await f.text(); inp.value = '';
+  confirmBox('Restore backup', `Apply ${f.name} on top of the current settings? Names, labels, profiles, suites, schedules, switches and settings in the file replace the current ones; nothing is deleted.`, 'Restore', async () => {
+    try { const r = await fetch('/api/v1/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text }); const j = await r.json(); if (!r.ok) throw new Error(j.error || r.statusText);
+      toast(`Restored: ${j.Hosts} hosts, ${j.Ports} ports, ${j.Fabrics} fabric profiles, ${j.Suites} suites, ${j.Schedules} schedules, ${j.Switches} switches, ${j.Settings} settings, ${j.Tokens} tokens` + (j.problems.length ? `; ${j.problems.length} problem(s): ${j.problems.join('; ')}` : ''), j.problems.length ? 'warn' : 'pass', 12000); route(); } catch (e) { fail(e); } });
+}
+
 /* ---------- suites and schedules ---------- */
 async function pageSuites(token) {
   if (!mount(token, `<div class="page-head"><h1>Suites</h1><span class="spacer"></span><button onclick="nightlySuite()" title="A write, send and read run to the same hosts, scheduled every night and compared with the baselines">Nightly acceptance</button> <button class="primary" onclick="editSuite()">New suite</button></div>
@@ -791,7 +943,7 @@ async function pageSuites(token) {
       : `<tr><td colspan="7" class="empty">No schedules. Cron is 5 fields in the controller's local time, for example <span class="mono">0 2 * * *</span> for 02:00 every night.</td></tr>`);
     set('suite-runs', sruns.length ? sruns.map(r => `<tr><td>${r.id}</td><td>${esc(r.suite_name)}</td><td class="muted">${esc(r.trigger)}</td><td>${badge(r.status)}</td><td>${badge(r.verdict)}</td>
       <td>${r.run_ids.map(id => `<a href="#run/${id}">${id}</a>`).join(' ')}</td><td class="muted">${when(r.started_at)}</td>
-      <td style="text-align:right">${r.status === 'running' ? `<button class="sm danger" onclick="api('POST','/suite-runs/${r.id}/cancel').then(refreshFn,fail)">Cancel</button>` : ''}</td></tr>`).join('')
+      <td style="text-align:right">${r.status === 'running' ? `<button class="sm danger" onclick="api('POST','/suite-runs/${r.id}/cancel').then(refreshFn,fail)">Cancel</button>` : `<a href="/api/v1/suite-runs/${r.id}/report.html" target="_blank" title="Acceptance report: every run, the fabric check and the fleet, ready to print"><button class="sm">Report</button></a>`}</td></tr>`).join('')
       : `<tr><td colspan="8" class="empty">No suite runs yet.</td></tr>`);
     const added = sessionStorage.getItem('suitespec');
     if (added) { sessionStorage.removeItem('suitespec'); editSuite(0, [JSON.parse(added)]); }
@@ -863,7 +1015,7 @@ function delSchedule(id, name) { confirmBox('Delete schedule', `Delete schedule 
 
 /* ---------- fleet ---------- */
 async function pageFleet(token) {
-  if (!mount(token, `<div class="page-head"><h1>Fleet</h1><span class="spacer"></span><button onclick="checkGitHub()">Check GitHub</button><button class="primary" onclick="fetchRelease()">Mirror a release</button></div>
+  if (!mount(token, `<div class="page-head"><h1>Fleet</h1><span class="spacer"></span><button onclick="checkGitHub()">Check GitHub</button><button onclick="uploadRelease()" title="For a controller without internet: upload SHA256SUMS and the agent binaries of a GitHub release">Upload release</button><button class="primary" onclick="fetchRelease()">Mirror a release</button></div>
     <div class="tiles" id="fleet-tiles"></div>
     <div class="card"><h2>Mirrored releases</h2><div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th>Version</th><th>Builds</th><th>Mirrored</th><th></th></tr></thead><tbody id="releases"></tbody></table></div></div>
     <div id="jobs"></div>`)) return;
@@ -890,9 +1042,16 @@ function fetchRelease() {
   modal({ title: 'Mirror a release', body: `<div class="row"><label>Version <input id="rel-v" placeholder="latest" class="mono" style="width:160px"></label></div><p class="help" style="margin-top:12px">Downloads the agent binaries and checksums from GitHub Releases into the controller. Leave empty for the newest release.</p>`,
     actions: [{ label: 'Cancel' }, { label: 'Fetch', cls: 'primary', close: false, run: async () => { try { const r = await api('POST', '/releases/fetch', { version: $('#rel-v').value || 'latest' }); toast(`Mirrored ${r.version}`, 'pass'); closeModal(); refreshFn?.(); } catch (e) { fail(e); } } }] });
 }
+function uploadRelease() {
+  modal({ title: 'Upload a release', body: `<div class="row"><label>Version <input id="up-v" placeholder="v0.1.24" class="mono" style="width:140px"></label><label>Files <input id="up-files" type="file" multiple></label></div>
+    <p class="help" style="margin-top:12px">Pick <span class="mono">SHA256SUMS</span>, <span class="mono">srnet-agent-linux-amd64</span> and <span class="mono">srnet-agent-linux-arm64</span> from the GitHub release's assets. Each binary is checked against SHA256SUMS before it is kept.</p>`,
+    actions: [{ label: 'Cancel' }, { label: 'Upload', cls: 'primary', close: false, run: async () => {
+      const fd = new FormData(); fd.append('version', $('#up-v').value.trim()); for (const f of $('#up-files').files) fd.append('files', f, f.name);
+      try { const r = await fetch('/api/v1/releases/upload', { method: 'POST', body: fd }); const j = await r.json(); if (!r.ok) throw new Error(j.error || r.statusText); toast(`Uploaded ${j.version} (${j.arches.join(', ')})`, 'pass'); closeModal(); refreshFn?.(); } catch (e) { fail(e); } } }] });
+}
 function startUpdate(version) {
-  modal({ title: 'Update agents to ' + version, body: `<div class="row"><label>Hosts <input id="upd-hosts" placeholder="all hosts" style="width:360px"></label></div><p class="help" style="margin-top:12px">Leave empty for every host, or list names and <span class="mono">tag:&lt;tag&gt;</span> selectors. Hosts busy with a test are waited for; each host must report the new version before the next one starts.</p>`,
-    actions: [{ label: 'Cancel' }, { label: 'Start update', cls: 'primary', close: false, run: async () => { try { const j = await api('POST', '/updates', { version, hosts: list($('#upd-hosts').value) }); toast(`Update job ${j.id} started`, 'pass'); closeModal(); refreshFn?.(); } catch (e) { fail(e); } } }] });
+  modal({ title: 'Update agents to ' + version, body: `<div class="row"><label>Hosts <input id="upd-hosts" placeholder="all hosts" style="width:360px"></label><label>At a time <input id="upd-par" type="number" min="1" max="20" placeholder="setting" style="width:80px"></label></div><p class="help" style="margin-top:12px">Leave empty for every host, or list names and <span class="mono">tag:&lt;tag&gt;</span> selectors. Hosts busy with a test are waited for; each host must report the new version before the next one starts.</p>`,
+    actions: [{ label: 'Cancel' }, { label: 'Start update', cls: 'primary', close: false, run: async () => { try { const j = await api('POST', '/updates', { version, hosts: list($('#upd-hosts').value), parallel: +$('#upd-par').value || 0 }); toast(`Update job ${j.id} started`, 'pass'); closeModal(); refreshFn?.(); } catch (e) { fail(e); } } }] });
 }
 
 /* ---------- switches ---------- */
@@ -983,7 +1142,17 @@ async function alertBadge() {
   try { const alerts = await api('GET', '/alerts'); const n = alerts.length; const b = $('#alert-count'); b.textContent = n; b.style.display = n ? '' : 'none';
     const f = alerts.filter(a => a.kind === 'fabric_mismatch').length, fb = $('#fabric-count'); fb.textContent = f; fb.style.display = f ? '' : 'none'; } catch {}
 }
-api('GET', '/status').then(s => { $('#ver').textContent = 'controller ' + s.version; $('#grafana').href = s.grafana_url || ('http://' + location.hostname + ':3000'); }).catch(() => {});
+api('GET', '/status').then(s => { $('#ver').textContent = 'controller ' + s.version; $('#grafana').href = s.grafana_url || ('http://' + location.hostname + ':3000'); whoami(s.whoami); }).catch(() => {});
+// whoami shows who is signed in and trims the UI for a viewer (the API
+// refuses their writes anyway; this spares them the buttons).
+function whoami(w) {
+  if (!w) return;
+  $('#me').textContent = `${w.name}${w.role === 'viewer' ? ' (read only)' : ''}`;
+  $('#signout').style.display = w.via === 'sso' ? '' : 'none';
+  $('#pwbtn').style.display = w.via === 'password' ? '' : 'none';
+  document.body.classList.toggle('viewer', w.role === 'viewer');
+}
+async function signOut() { try { await fetch('/logout', { method: 'POST' }); } catch (e) { } location.href = '/login'; }
 alertBadge(); setInterval(() => { if (!document.hidden) alertBadge(); }, 30000);
 setInterval(() => { $('#clock').textContent = new Date().toLocaleTimeString(); }, 1000);
 route();

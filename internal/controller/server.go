@@ -39,6 +39,8 @@ type Server struct {
 	alerts  *alerter
 	suites  *suiteRunner
 	snmp    *snmpCollector
+	acc     *access   // Phase 7: tokens, SSO sessions, roles
+	notify  *notifier // Phase 7: Slack, Teams and webhook channels
 
 	mu         sync.Mutex
 	agentCache map[string]int64              // secret hash -> agent id
@@ -57,6 +59,8 @@ type Server struct {
 	qos         map[string]*switchPortCfg // switch|port (lower-cased) -> port settings and queue counters, from the same poll
 	qosErr      string
 	qosLogged   string
+	enrol       EnrolSettings  // Phase 8: token-less enrolment subnets
+	updates     UpdateSettings // Phase 8: fleet update parallelism
 }
 
 func NewServer(ctx context.Context, cfg Config) (*Server, error) {
@@ -76,7 +80,16 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 		rel:    newReleases(filepath.Join(cfg.DataDir, "releases"), store, h, al),
 		alerts: al, suites: newSuiteRunner(store, orch, al), snmp: snmp,
 		agentCache: map[string]int64{}, portCache: map[int64]map[string]portMeta{}, hostName: map[int64]string{},
+		acc: newAccess(),
 	}
+	s.notify = newNotifier(store, cfg.PublicURL)
+	s.loadAccess(ctx)
+	s.loadScale(ctx)
+	s.notify.load(ctx)
+	al.notifier = s.notify
+	s.rel.notify = s.notify
+	s.suites.notify = s.notify
+	orch.onFinish = s.notify.runFinished
 	orch.switches = s.switchList
 	orch.lldp = s.fillLLDP
 	orch.fabric = s.fabricIssuesFor
@@ -86,6 +99,7 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	go s.suites.scheduler(ctx)
 	go s.gnmicLoop(ctx)
 	go s.switchPollLoop(ctx)
+	go s.backupLoop(ctx)
 	return s, nil
 }
 
@@ -147,10 +161,13 @@ func (s *Server) gnmicLoop(ctx context.Context) {
 func (s *Server) Close() { s.store.Close() }
 
 func (s *Server) Handler() http.Handler {
+	if s.acc == nil {
+		s.acc = newAccess() // tests build a Server by hand
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
 	ui := uiHandler()
-	mux.HandleFunc("GET /{$}", s.admin(ui.ServeHTTP))
+	mux.HandleFunc("GET /{$}", s.view(ui.ServeHTTP))
 	mux.HandleFunc("GET /ca.pem", func(w http.ResponseWriter, r *http.Request) { http.ServeFile(w, r, s.cfg.CACert) })
 
 	mux.HandleFunc("POST /api/v1/enroll", s.enroll)
@@ -160,23 +177,26 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/agent/events", s.agent(s.agentEvent))
 	mux.HandleFunc("POST /api/v1/agent/results", s.agent(s.agentResult))
 
-	mux.HandleFunc("GET /api/v1/status", s.admin(s.status))
-	mux.HandleFunc("GET /api/v1/hosts", s.admin(s.listHosts))
-	mux.HandleFunc("GET /api/v1/topology", s.admin(s.topology))
+	mux.HandleFunc("GET /api/v1/status", s.view(s.status))
+	mux.HandleFunc("GET /api/v1/hosts", s.view(s.listHosts))
+	mux.HandleFunc("GET /api/v1/topology", s.view(s.topology))
 	mux.HandleFunc("PATCH /api/v1/hosts/{id}", s.admin(s.patchHost))
 	mux.HandleFunc("DELETE /api/v1/hosts/{id}", s.admin(s.deleteHost))
 	mux.HandleFunc("PATCH /api/v1/ports/{id}", s.admin(s.patchPort))
 	mux.HandleFunc("POST /api/v1/hosts/import", s.admin(s.importHosts))
 	mux.HandleFunc("POST /api/v1/tokens", s.admin(s.createToken))
 	mux.HandleFunc("POST /api/v1/admin/password", s.admin(s.changePassword))
-	mux.HandleFunc("GET /api/v1/runs", s.admin(s.listRuns))
+	mux.HandleFunc("GET /api/v1/runs", s.view(s.listRuns))
 	mux.HandleFunc("POST /api/v1/runs", s.admin(s.createRun))
-	mux.HandleFunc("GET /api/v1/runs/{id}", s.admin(s.getRun))
+	mux.HandleFunc("GET /api/v1/runs/{id}", s.view(s.getRun))
 	mux.HandleFunc("POST /api/v1/runs/{id}/cancel", s.admin(s.cancelRun))
 	mux.HandleFunc("POST /api/v1/runs/{id}/baseline", s.admin(s.setBaseline))
 	s.routes3(mux)
 	s.routesSwitches(mux)
 	s.routesFabric(mux)
+	s.routesAccess(mux)
+	s.routesOps(mux)
+	s.routesScale(mux)
 	return mux
 }
 
@@ -191,18 +211,6 @@ func randomToken(n int) string {
 	b := make([]byte, n)
 	rand.Read(b)
 	return base64.RawURLEncoding.EncodeToString(b)
-}
-
-func (s *Server) admin(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		user, pass, ok := r.BasicAuth()
-		if !ok || !s.adminLogin(user, pass) {
-			w.Header().Set("WWW-Authenticate", `Basic realm="srnet"`)
-			httpError(w, http.StatusUnauthorized, "admin login required")
-			return
-		}
-		h(w, r)
-	}
 }
 
 // adminLogin checks a Basic auth credential against the configured admin,
@@ -267,20 +275,34 @@ func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "hostname missing from inventory")
 		return
 	}
+	// An install token admits any host; without one the host must come from
+	// an enrolment subnet, and is then approved at once or parked for an
+	// admin (Phase 8).
+	approved, via := true, "token"
 	if err := s.store.ConsumeToken(r.Context(), hashSecret(req.Token)); err != nil {
-		httpError(w, http.StatusForbidden, err.Error())
-		return
+		e := s.enrolSettings()
+		if !enrolAllowed(e, clientIP(r)) {
+			if req.Token == "" {
+				err = errors.New("no install token given and " + clientIP(r) + " is not in an enrolment subnet")
+			}
+			httpError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		approved, via = e.AutoApprove, "subnet"
 	}
 	secret := randomToken(32)
-	uid, err := s.store.EnrollAgent(r.Context(), "agt_"+randomToken(9), hashSecret(secret), req.Inventory)
+	uid, err := s.store.EnrollAgent(r.Context(), "agt_"+randomToken(9), hashSecret(secret), req.Inventory, approved)
 	if err != nil {
 		serverError(w, err)
 		return
 	}
+	if !approved {
+		s.notify.hostPending(req.Inventory.Hostname, clientIP(r))
+	}
 	s.mu.Lock()
 	s.agentCache = map[string]int64{} // a re-enrolled host's old secret must stop working
 	s.mu.Unlock()
-	s.store.Audit(r.Context(), "agent.enroll", map[string]string{"uid": uid, "hostname": req.Inventory.Hostname, "ip": clientIP(r)})
+	s.store.Audit(r.Context(), "agent.enroll", map[string]any{"uid": uid, "hostname": req.Inventory.Hostname, "ip": clientIP(r), "via": via, "approved": approved})
 	writeJSON(w, api.EnrollResponse{AgentID: uid, Secret: secret})
 }
 
@@ -370,8 +392,9 @@ func (s *Server) agentResult(w http.ResponseWriter, r *http.Request) {
 // Admin endpoints.
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
+	p := who(r)
 	writeJSON(w, map[string]any{"version": version.Version, "public_url": s.cfg.PublicURL, "grafana_url": s.cfg.GrafanaURL, "time": time.Now(),
-		"switches": len(s.switchList())})
+		"switches": len(s.switchList()), "whoami": api.Whoami{Name: p.Name, Role: p.Role, Via: p.Via}, "sso": s.oidcSettings().Ready()})
 }
 
 func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {

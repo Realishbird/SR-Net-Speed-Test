@@ -15,16 +15,24 @@ CA_SHA=""
 VERSION="latest"
 WITH_MFT=0
 UNINSTALL=0
+SOURCE="auto"
+SKIP_APT=0
 
 usage() {
   cat <<EOF
-usage: install.sh --controller URL --token TOKEN --ca-sha256 HEX [--version vX.Y.Z] [--with-mft]
+usage: install.sh --controller URL [--token TOKEN] --ca-sha256 HEX [--version vX.Y.Z] [--source auto|github|controller] [--skip-apt] [--with-mft]
        install.sh --uninstall
 
   --controller   controller URL, e.g. https://10.0.0.5:8443
-  --token        one-time enrollment token from 'srnet token'
+  --token        enrollment token from the Hosts page or 'srnet token'; may be left out when
+                 this host's subnet is listed under Settings > Enrolment on the controller
   --ca-sha256    sha256 of the controller's CA certificate (pins the CA on first contact)
   --version      agent release to install (default: latest)
+  --source       where the agent binary comes from: github (releases), controller (a release
+                 mirrored on the controller, for hosts without internet), auto (controller
+                 if it has one, else github)
+  --skip-apt     do not install packages (an air-gapped host with rdma-core, perftest,
+                 iperf3, ethtool, lldpd and chrony already present)
   --with-mft     also note Mellanox MFT (not installed; printed as a hint)
   --uninstall    stop and remove the agent, its user and config
 EOF
@@ -37,6 +45,8 @@ while [ $# -gt 0 ]; do
     --token) TOKEN="$2"; shift 2 ;;
     --ca-sha256) CA_SHA="$2"; shift 2 ;;
     --version) VERSION="$2"; shift 2 ;;
+    --source) SOURCE="$2"; shift 2 ;;
+    --skip-apt) SKIP_APT=1; shift ;;
     --with-mft) WITH_MFT=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     -h|--help) usage ;;
@@ -79,26 +89,61 @@ esac
 ENROLLED=0
 [ -s /etc/srnet/agent.json ] && grep -q '"secret": *"[^"]' /etc/srnet/agent.json && ENROLLED=1
 if [ "$ENROLLED" -eq 0 ]; then
-  [ -n "$CONTROLLER" ] && [ -n "$TOKEN" ] && [ -n "$CA_SHA" ] || die "--controller, --token and --ca-sha256 are required for a first install"
-fi
-
-log "Installing packages (rdma-core, perftest, iperf3, ethtool, chrony)"
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq rdma-core ibverbs-utils perftest iperf3 ethtool pciutils chrony curl ca-certificates lldpd >/dev/null
-systemctl enable --now chrony >/dev/null 2>&1 || true
-systemctl enable --now lldpd >/dev/null 2>&1 || true
-
-log "Downloading srnet-agent ($VERSION, $ARCH)"
-if [ "$VERSION" = "latest" ]; then
-  BASE="https://github.com/$REPO/releases/latest/download"
-else
-  BASE="https://github.com/$REPO/releases/download/$VERSION"
+  [ -n "$CONTROLLER" ] && [ -n "$CA_SHA" ] || die "--controller and --ca-sha256 are required for a first install (--token too, unless this subnet may enrol without one)"
 fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-curl -fsSL -o "$TMP/srnet-agent" "$BASE/srnet-agent-linux-$ARCH" || die "download failed: $BASE/srnet-agent-linux-$ARCH (is there a release yet?)"
-curl -fsSL -o "$TMP/SHA256SUMS" "$BASE/SHA256SUMS" || die "download failed: $BASE/SHA256SUMS"
+
+# The controller CA is fetched first and pinned by fingerprint, so downloads
+# from the controller (--source controller) are verified too.
+CACERT=""
+if [ -n "$CONTROLLER" ] && [ -n "$CA_SHA" ]; then
+  log "Fetching and pinning the controller CA"
+  curl -fsSk -o "$TMP/ca.pem" "$CONTROLLER/ca.pem" || die "cannot reach $CONTROLLER/ca.pem"
+  GOT=$(sha256sum "$TMP/ca.pem" | cut -d' ' -f1)
+  [ "$GOT" = "$CA_SHA" ] || die "CA fingerprint mismatch: expected $CA_SHA, got $GOT. Check the controller URL."
+  CACERT="$TMP/ca.pem"
+fi
+
+if [ "$SKIP_APT" -eq 0 ]; then
+  log "Installing packages (rdma-core, perftest, iperf3, ethtool, chrony)"
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y -qq rdma-core ibverbs-utils perftest iperf3 ethtool pciutils chrony curl ca-certificates lldpd >/dev/null
+else
+  log "Skipping packages (--skip-apt)"
+  for t in ib_write_bw iperf3 ethtool lldpd; do command -v "$t" >/dev/null 2>&1 || echo "  warning: $t is not installed" ; done
+fi
+systemctl enable --now chrony >/dev/null 2>&1 || true
+systemctl enable --now lldpd >/dev/null 2>&1 || true
+
+# Where the binary comes from. The controller serves releases it has
+# mirrored (Fleet page) at /dl/<version>/<file>, taking the install token;
+# "auto" prefers it when it has a release and falls back to GitHub.
+fetch_from_controller() {
+  [ -n "$CONTROLLER" ] && [ -n "$CACERT" ] || return 1
+  curl -fsS --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" -o "$TMP/SHA256SUMS" "$CONTROLLER/dl/$VERSION/SHA256SUMS" 2>/dev/null || return 1
+  curl -fsS --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" -o "$TMP/srnet-agent" "$CONTROLLER/dl/$VERSION/srnet-agent-linux-$ARCH" || return 1
+  echo "$CONTROLLER/dl/$VERSION"
+}
+fetch_from_github() {
+  if [ "$VERSION" = "latest" ]; then
+    BASE="https://github.com/$REPO/releases/latest/download"
+  else
+    BASE="https://github.com/$REPO/releases/download/$VERSION"
+  fi
+  curl -fsSL -o "$TMP/srnet-agent" "$BASE/srnet-agent-linux-$ARCH" || die "download failed: $BASE/srnet-agent-linux-$ARCH (is there a release yet?)"
+  curl -fsSL -o "$TMP/SHA256SUMS" "$BASE/SHA256SUMS" || die "download failed: $BASE/SHA256SUMS"
+  echo "$BASE"
+}
+log "Downloading srnet-agent ($VERSION, $ARCH, source $SOURCE)"
+case "$SOURCE" in
+  controller) FROM=$(fetch_from_controller) || die "the controller has no mirrored release $VERSION for $ARCH (Fleet page: Mirror a release or Upload release)" ;;
+  github) FROM=$(fetch_from_github) ;;
+  auto) FROM=$(fetch_from_controller) || FROM=$(fetch_from_github) ;;
+  *) die "--source must be auto, github or controller" ;;
+esac
+log "Got srnet-agent from $FROM"
 (cd "$TMP" && grep " srnet-agent-linux-$ARCH\$" SHA256SUMS | sed "s/srnet-agent-linux-$ARCH/srnet-agent/" | sha256sum -c --quiet -) || die "checksum mismatch for srnet-agent"
 install -m 0755 "$TMP/srnet-agent" /usr/local/bin/srnet-agent
 
@@ -173,13 +218,12 @@ WantedBy=multi-user.target
 EOF
 
 if [ "$ENROLLED" -eq 0 ]; then
-  log "Fetching and pinning the controller CA"
-  curl -fsSk -o "$TMP/ca.pem" "$CONTROLLER/ca.pem" || die "cannot reach $CONTROLLER/ca.pem"
-  GOT=$(sha256sum "$TMP/ca.pem" | cut -d' ' -f1)
-  [ "$GOT" = "$CA_SHA" ] || die "CA fingerprint mismatch: expected $CA_SHA, got $GOT. Check the controller URL."
-  install -m 0644 -o srnet -g srnet "$TMP/ca.pem" /etc/srnet/ca.pem
-
-  log "Enrolling with $CONTROLLER"
+  install -m 0644 -o srnet -g srnet "$CACERT" /etc/srnet/ca.pem
+  if [ -n "$TOKEN" ]; then
+    log "Enrolling with $CONTROLLER"
+  else
+    log "Enrolling with $CONTROLLER without a token (this host's subnet must be allowed under Settings > Enrolment)"
+  fi
   runuser -u srnet -- /usr/local/bin/srnet-agent enroll --controller "$CONTROLLER" --token "$TOKEN" --ca /etc/srnet/ca.pem --config /etc/srnet/agent.json
 fi
 

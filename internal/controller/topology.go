@@ -722,9 +722,13 @@ func (s *Server) topology(w http.ResponseWriter, r *http.Request) {
 	ports, source, err := s.switchPortStats(r.Context())
 	t := buildTopology(hosts, s.switchList(), ports, source, s.metrics.live, s.metrics.hostLive, s.hub.online)
 	s.mu.Lock()
-	vlans := s.vlans
+	vlans, lldp := s.vlans, s.lldp
 	s.mu.Unlock()
 	applyVLANs(&t, vlans)
+	t.Links = switchLinks(lldp, s.switchList())
+	if t.Links == nil {
+		t.Links = []api.TopoLink{}
+	}
 	if err != nil {
 		t.Warning = "switch counters unavailable: " + err.Error()
 	}

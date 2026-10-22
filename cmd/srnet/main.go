@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ import (
 
 type cli struct {
 	url, user, pass string
+	bearer          string // SRNET_TOKEN: an API token from Settings, instead of the password
 	http            *http.Client
 }
 
@@ -45,7 +47,7 @@ func main() {
 		pool.AppendCertsFromPEM(pem)
 		tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
-	c := &cli{url: strings.TrimRight(url, "/"), user: user, pass: pass, http: &http.Client{Transport: tr, Timeout: 60 * time.Second}}
+	c := &cli{url: strings.TrimRight(url, "/"), user: user, pass: pass, bearer: os.Getenv("SRNET_TOKEN"), http: &http.Client{Transport: tr, Timeout: 60 * time.Second}}
 
 	if len(os.Args) < 2 {
 		usage()
@@ -93,6 +95,18 @@ func main() {
 		err = c.schedule(ctx, args)
 	case "alerts":
 		err = c.alerts(ctx, args)
+	case "api-tokens":
+		err = c.apiTokens(ctx)
+	case "api-token":
+		err = c.apiToken(ctx, args)
+	case "approve":
+		err = c.approve(ctx, args)
+	case "backup":
+		err = c.backup(ctx, args)
+	case "restore":
+		err = c.restore(ctx, args)
+	case "suite-report":
+		err = c.suiteReport(ctx, args)
 	case "report":
 		err = c.report(ctx, args)
 	default:
@@ -135,7 +149,14 @@ func usage() {
                                 run a suite on a cron expression
   alerts [--all|--clear ID|--clear-all]  open alerts (agent offline, link down, hot optics, idle errors, failed runs, failed updates); clear by hand
 
-Environment: SRNET_URL, SRNET_USER, SRNET_PASSWORD or SRNET_PASSWORD_FILE, SRNET_CA`)
+  api-tokens                    list API tokens; api-token create <name> [--role viewer] | revoke <id>
+  approve <host id>             let a host that enrolled without a token take part in tests
+  backup [-o file] [--runs]     download the configuration (names, labels, profiles, suites, settings)
+  restore <file>                merge a backup on top of the current configuration
+  suite-report <suite run id> [-o file]   acceptance report (HTML) for a suite run
+
+Environment: SRNET_URL, SRNET_USER, SRNET_PASSWORD or SRNET_PASSWORD_FILE, SRNET_TOKEN (an API token
+instead of the password), SRNET_CA`)
 	os.Exit(2)
 }
 
@@ -162,7 +183,11 @@ func (c *cli) call(ctx context.Context, method, path string, in, out any) error 
 		return err
 	}
 	req.Header.Set("Content-Type", ct)
-	req.SetBasicAuth(c.user, c.pass)
+	if c.bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+c.bearer)
+	} else {
+		req.SetBasicAuth(c.user, c.pass)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
@@ -543,4 +568,139 @@ func splitList(s string) []string {
 		}
 	}
 	return out
+}
+
+// Phase 7 and 8 commands.
+
+func (c *cli) apiTokens(ctx context.Context) error {
+	var ts []api.APIToken
+	if err := c.call(ctx, "GET", "/api/v1/access/tokens", nil, &ts); err != nil {
+		return err
+	}
+	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\tNAME\tROLE\tPREFIX\tCREATED\tLAST USED")
+	for _, t := range ts {
+		last := "never"
+		if t.LastUsed != nil {
+			last = t.LastUsed.Local().Format("2006-01-02 15:04")
+		}
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%s…\t%s\t%s\n", t.ID, t.Name, t.Role, t.Prefix, t.CreatedAt.Local().Format("2006-01-02 15:04"), last)
+	}
+	return tw.Flush()
+}
+
+func (c *cli) apiToken(ctx context.Context, args []string) error {
+	if len(args) < 2 {
+		return errors.New("usage: srnet api-token create <name> [--role admin|viewer] | revoke <id>")
+	}
+	switch args[0] {
+	case "create":
+		fs := flag.NewFlagSet("api-token create", flag.ExitOnError)
+		role := fs.String("role", "admin", "admin or viewer")
+		fs.Parse(args[2:])
+		var t api.APIToken
+		if err := c.call(ctx, "POST", "/api/v1/access/tokens", map[string]string{"name": args[1], "role": *role}, &t); err != nil {
+			return err
+		}
+		fmt.Printf("token %d (%s, %s) created; it is shown once:\n%s\n\nexport SRNET_TOKEN=%s\n", t.ID, t.Name, t.Role, t.Token, t.Token)
+		return nil
+	case "revoke":
+		return c.call(ctx, "DELETE", "/api/v1/access/tokens/"+args[1], nil, nil)
+	}
+	return fmt.Errorf("unknown api-token action %q", args[0])
+}
+
+func (c *cli) approve(ctx context.Context, args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: srnet approve <host id>")
+	}
+	if err := c.call(ctx, "POST", "/api/v1/hosts/"+args[0]+"/approve", nil, nil); err != nil {
+		return err
+	}
+	fmt.Println("approved")
+	return nil
+}
+
+func (c *cli) backup(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("backup", flag.ExitOnError)
+	out := fs.String("o", "", "write to this file (default: srnet-backup-<date>.json)")
+	runs := fs.Bool("runs", false, "include the last 1000 runs for reference")
+	fs.Parse(args)
+	path := "/api/v1/backup"
+	if *runs {
+		path += "?runs=1"
+	}
+	var raw json.RawMessage
+	if err := c.call(ctx, "GET", path, nil, &raw); err != nil {
+		return err
+	}
+	name := *out
+	if name == "" {
+		name = "srnet-backup-" + time.Now().Format("2006-01-02-1504") + ".json"
+	}
+	if err := os.WriteFile(name, raw, 0o600); err != nil {
+		return err
+	}
+	fmt.Printf("wrote %s (%d bytes)\n", name, len(raw))
+	return nil
+}
+
+func (c *cli) restore(ctx context.Context, args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: srnet restore <backup.json>")
+	}
+	b, err := os.ReadFile(args[0])
+	if err != nil {
+		return err
+	}
+	var res struct {
+		Hosts, Ports, Fabrics, Suites, Schedules, Switches, Settings, Tokens int
+		Problems                                                             []string
+	}
+	if err := c.call(ctx, "POST", "/api/v1/restore", json.RawMessage(b), &res); err != nil {
+		return err
+	}
+	fmt.Printf("restored: %d hosts, %d ports, %d fabric profiles, %d suites, %d schedules, %d switches, %d settings, %d tokens\n",
+		res.Hosts, res.Ports, res.Fabrics, res.Suites, res.Schedules, res.Switches, res.Settings, res.Tokens)
+	for _, p := range res.Problems {
+		fmt.Println("  problem:", p)
+	}
+	return nil
+}
+
+func (c *cli) suiteReport(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("suite-report", flag.ExitOnError)
+	out := fs.String("o", "", "write to this file (default: stdout)")
+	fs.Parse(args)
+	if fs.NArg() != 1 {
+		return errors.New("usage: srnet suite-report <suite run id> [-o file]")
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", c.url+"/api/v1/suite-runs/"+fs.Arg(0)+"/report.html", nil)
+	if err != nil {
+		return err
+	}
+	if c.bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+c.bearer)
+	} else {
+		req.SetBasicAuth(c.user, c.pass)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return errors.New(resp.Status)
+	}
+	w := io.Writer(os.Stdout)
+	if *out != "" {
+		f, err := os.Create(*out)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		w = f
+	}
+	_, err = io.Copy(w, resp.Body)
+	return err
 }

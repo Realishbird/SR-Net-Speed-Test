@@ -45,6 +45,8 @@ curl -fsSL https://raw.githubusercontent.com/Realishbird/SR-Net-Speed-Test/main/
 
 `install.sh` installs `rdma-core`, `perftest`, `iperf3`, `ethtool`, `chrony` and `lldpd` from apt, downloads the signed-checksum agent binary for the host's architecture (amd64 or arm64), pins the controller's CA by fingerprint, enrolls, and starts `srnet-agent.service` as the unprivileged `srnet` user. It adds no sudo rules: the service's ambient `CAP_NET_ADMIN` covers `ethtool -m` for transceiver readings and its supplementary group `adm` covers `lldpctl` for switch neighbours (the sudo rules older versions wrote never worked under the service's capability bounding set and are removed on upgrade). Re-running upgrades in place; `--uninstall` removes everything.
 
+Hosts without internet, and fleets of hundreds, have two more ways in (see "Air-gapped installs" and "Enrolment without a token" below).
+
 ## 3. Name your devices
 
 Hosts enroll under their Linux hostname. Rename and tag them from the controller:
@@ -171,6 +173,74 @@ In the UI, open any finished run and click "Add to a suite" to copy its spec int
 The controller opens an alert when an agent stops reporting for 2 minutes, a port with an address leaves ACTIVE (a port with no IP is taken to be unused), error counters grow while no test runs on that port (growth during a run belongs to that run's result and does not alert; an idle-error alert closes by itself after 15 minutes without further growth), a transceiver reports 70 C or more (`transceiver_max_c` in `controller.json`), a run or suite fails, or an update fails. Alerts close themselves when the condition clears; the Alerts page has "Clear" per alert and "Clear all" for the ones that do not (a failed update, a failed run), and `srnet alerts --clear ID` / `--clear-all` do the same. `srnet alerts` and the Alerts page list them; set `alert_webhook_url` in `/etc/srnet/controller.json` to POST a JSON body (`state`, `kind`, `host`, `port`, `message`, `text`) to Slack, Teams, Alertmanager or a script on every open and resolve.
 
 Every run has a CSV and an HTML report (print to PDF from the browser): `srnet report 42 --format csv -o run42.csv`, `srnet report 42 --format html -o run42.html`, or the links on the run page.
+
+## Sign-in, roles and API tokens
+
+The admin password always works (HTTP Basic, or the browser prompt). Two more ways in come with Phase 7, both on the Settings page:
+
+- **Single sign-on** over OpenID Connect (Okta, Entra ID, Keycloak, Google, Authentik, any provider with a discovery document). Fill in the issuer URL, client ID and secret, register the redirect URL the page shows at the provider, and list who is an **admin** (changes anything) and who is a **viewer** (reads everything) by email address or group name from the provider's claims, or let anyone the provider signs in be a viewer. Sign-in uses the authorization code flow with PKCE; the ID token's signature (RS256/ES256 families), issuer, audience, expiry and nonce are checked against the provider's keys. Sessions last 12 hours by default and are listed on the Settings page, where an admin can sign anyone out. With single sign-on on, `/` goes to the sign-in page; `/?basic` still asks for the password. "Test provider" checks discovery before you save.
+- **API tokens** for scripts, CI and the CLI: `Settings > New token` (or `srnet api-token create ci`) prints a `srnet_...` token once. Send it as `Authorization: Bearer <token>`; a viewer token can only GET. The CLI takes it from `SRNET_TOKEN` instead of the password.
+
+Every endpoint under `/api/v1` is plain JSON. The ones a script usually needs:
+
+| Method and path | What it does |
+|---|---|
+| `GET /api/v1/status` | version, counts, who you are |
+| `GET /api/v1/hosts`, `PATCH /api/v1/hosts/{id}`, `POST /api/v1/hosts/{id}/approve` | fleet, naming, approval |
+| `POST /api/v1/runs` (a run spec), `GET /api/v1/runs`, `GET /api/v1/runs/{id}`, `POST /api/v1/runs/{id}/cancel` | tests |
+| `GET /api/v1/runs/{id}/report.html`, `.csv` | run reports |
+| `GET /api/v1/suites`, `POST /api/v1/suites/{id}/run`, `GET /api/v1/suite-runs`, `GET /api/v1/suite-runs/{id}/report.html` | suites and the acceptance report |
+| `GET /api/v1/fabric-check`, `GET /api/v1/alerts` | fabric state, open alerts |
+| `GET /api/v1/backup`, `POST /api/v1/restore` | configuration backup |
+| `GET /api/v1/access/tokens`, `POST`, `DELETE .../{id}` | API tokens |
+
+```bash
+export SRNET_URL=https://10.0.0.5:8443 SRNET_CA=ca.pem SRNET_TOKEN=srnet_...
+curl -sS --cacert ca.pem -H "Authorization: Bearer $SRNET_TOKEN" "$SRNET_URL/api/v1/runs?limit=5"
+curl -sS --cacert ca.pem -H "Authorization: Bearer $SRNET_TOKEN" -X POST "$SRNET_URL/api/v1/runs" \
+  -d '{"name":"ci write","test":"write","clients":["770AP"],"servers":["tag:spark"],"duration_sec":30}'
+```
+
+## Notifications (Slack, Teams, webhooks)
+
+`Settings > Notifications` sends alerts and results where people look. A channel is a Slack incoming webhook, a Microsoft Teams Workflows webhook ("post to a channel when a webhook request is received", delivered as an Adaptive Card) or a plain JSON webhook (`event`, `level`, `title`, `text`, `link`, `fields`, `data`, `time`; signed with HMAC-SHA256 in `X-SRNet-Signature` when the channel has a secret). Each channel picks its events: alert opened or resolved, run passed, warned or failed, suite run finished, fleet update finished, host waiting for approval. Delivery is tried three times; the page shows each channel's last result, and "Send test" posts a sample. The older `alert_webhook_url` in `controller.json` keeps working for alerts.
+
+## Backup and restore
+
+`Settings > Download backup`, `GET /api/v1/backup` or `srnet backup` writes one JSON file with everything an operator typed in: host names, tags, sites, port labels and fabrics, fabric profiles, suites, schedules, switch settings, sign-in, notification, enrolment and update settings, and the hashes of API tokens (the tokens keep working after a restore). Results and telemetry are not in it: `pg_dump srnet` and the VictoriaMetrics snapshot API cover those; `?runs=1` adds the last 1000 runs for reference only. The controller writes a backup into `/var/lib/srnet/backups` every night and keeps 14. `Restore...` on the page, `POST /api/v1/restore` or `srnet restore file.json` merges a backup on top of what exists, matching hosts by agent UID and ports by device and port number, and deletes nothing. The same file moves a configuration to a new controller: deploy it, let the hosts enrol, restore.
+
+## Acceptance report
+
+Every suite run has a printable report (`Suites > Report`, `GET /api/v1/suite-runs/{id}/report.html`, `srnet suite-report 4 -o report.html`): the suite's runs with their verdicts and aggregates against baselines, each run's leg table, the fabric check at the time, the hosts under test with agent versions, and sign-off lines. It is the document to attach to a hand-over or send to a vendor.
+
+## Enrolment without a token
+
+For hundreds of hosts one fixed command fits cloud-init, Ansible or a PXE post-script better than tokens. `Settings > Enrolment` lists subnets whose hosts may enrol without a token; they are approved at once or wait on the Hosts page (`pending` badge, Approve or Reject; `srnet approve <id>`; `host_pending` notification) and no test runs on an unapproved host. The install command then has no `--token`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Realishbird/SR-Net-Speed-Test/main/install.sh \
+  | sudo bash -s -- --controller https://10.0.0.5:8443 --ca-sha256 <fingerprint>
+```
+
+The Hosts page shows every form of the command under "Agent install command", and a filter box narrows a long fleet by name, tag, site or hostname. Updates run several hosts at a time (`Settings > Fleet updates`, or "At a time" when starting one, up to 20) with the same per-host wait, verification and rollback.
+
+## Air-gapped installs
+
+A lab without internet needs nothing from GitHub at install time:
+
+1. Put a release on the controller. With internet on the controller, `Fleet > Mirror a release`; without, download `SHA256SUMS`, `srnet-agent-linux-amd64` and `srnet-agent-linux-arm64` from the GitHub release elsewhere and use `Fleet > Upload release` (each binary is checked against `SHA256SUMS`).
+2. The controller serves `install.sh` itself and the mirrored binaries at `/dl/<version>/<file>` (an install token, an admin login or an address in an enrolment subnet opens them). The "Air-gapped" tab of the Hosts page's "Agent install command" gives it:
+
+```bash
+curl -fsSLk https://10.0.0.5:8443/install.sh \
+  | sudo bash -s -- --controller https://10.0.0.5:8443 --token <token> --ca-sha256 <fingerprint> --source controller
+```
+
+`install.sh` pins the controller's CA by fingerprint before it downloads anything, so the `-k` on the first fetch of the script is the only unverified step and the fingerprint catches a wrong controller. `--source auto` (the default) tries the controller first and falls back to GitHub; `--source github` is the old behaviour. The packages (`rdma-core`, `perftest`, `iperf3`, `ethtool`, `lldpd`, `chrony`) still come from apt: point the hosts at a local mirror, or pass `--skip-apt` on hosts that already have them (DGX OS and most RDMA images do). Agent updates from the Fleet page never needed internet on the hosts.
+
+## Several switches
+
+Each switch on the Switches page is polled on its own; a port's switch comes from the host's LLDP neighbour, so a host cabled to any configured switch is placed. Cables between configured switches (leaf and spine, or two leaves joined) are read from the switches' own LLDP tables and drawn as arcs above the switch row on the Topology page; the "Switch ports in use" table names the peer switch for such ports. Topology draws every host up to 40 and above that only hosts in a test or carrying traffic, with a selector for all of them.
 
 ## Development
 
