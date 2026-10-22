@@ -69,7 +69,8 @@ func WriteGnmicConfig(cfg Config, path string, ports map[string][]string) (int, 
 		// figures (Phase 5).
 		sub := "transceivers-" + strings.ToLower(sw.Name)
 		qsub := "qos-" + strings.ToLower(sw.Name)
-		fmt.Fprintf(&b, "    subscriptions: [counters, %s, %s]\n", yamlStr(sub), yamlStr(qsub))
+		hsub := "health-" + strings.ToLower(sw.Name)
+		fmt.Fprintf(&b, "    subscriptions: [counters, %s, %s, %s]\n", yamlStr(sub), yamlStr(qsub), yamlStr(hsub))
 		fmt.Fprintf(&xcvr, "  %s:\n    paths:\n", yamlStr(sub))
 		for _, p := range names {
 			fmt.Fprintf(&xcvr, "      - /openconfig-platform:components/component[name=%s]/transceiver/state\n", p)
@@ -77,10 +78,22 @@ func WriteGnmicConfig(cfg Config, path string, ports map[string][]string) (int, 
 		}
 		xcvr.WriteString("    mode: stream\n    stream-mode: sample\n    sample-interval: 60s\n    encoding: json_ietf\n")
 		fmt.Fprintf(&xcvr, "  %s:\n    paths:\n", yamlStr(qsub))
+		// Per port, in the one subscription (several streams at once made
+		// this SONiC drop one with "queue disposed"): queue counters and
+		// watermarks, ingress priority-group watermarks, PFC counters and
+		// watchdog, the Ethernet error and frame-size counters, and the
+		// Ethernet state (FEC mode, advertised speed).
 		for _, p := range names {
 			fmt.Fprintf(&xcvr, "      - /openconfig-qos:qos/interfaces/interface[interface-id=%s]/output/queues\n", p)
+			fmt.Fprintf(&xcvr, "      - /openconfig-qos:qos/interfaces/interface[interface-id=%s]/input/priority-groups\n", p)
 			fmt.Fprintf(&xcvr, "      - /openconfig-qos:qos/interfaces/interface[interface-id=%s]/pfc\n", p)
+			fmt.Fprintf(&xcvr, "      - /openconfig-interfaces:interfaces/interface[name=%s]/openconfig-if-ethernet:ethernet/state/counters\n", p)
+			fmt.Fprintf(&xcvr, "      - /openconfig-interfaces:interfaces/interface[name=%s]/openconfig-if-ethernet:ethernet/state\n", p)
 		}
+		xcvr.WriteString("    mode: stream\n    stream-mode: sample\n    sample-interval: 30s\n    encoding: json_ietf\n")
+		// Switch CPU and memory; PSUs, fans and temperature sensors are
+		// keyed by names the switch invents, so the controller polls those.
+		fmt.Fprintf(&xcvr, "  %s:\n    paths:\n      - /openconfig-system:system/cpus\n      - /openconfig-system:system/memory\n", yamlStr(hsub))
 		xcvr.WriteString("    mode: stream\n    stream-mode: sample\n    sample-interval: 30s\n    encoding: json_ietf\n")
 	}
 	if n == 0 {

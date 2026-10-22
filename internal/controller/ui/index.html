@@ -166,6 +166,7 @@ body.viewer nav a[data-page="new"], body.viewer nav a[data-page="settings"], bod
 <script>
 /* ---------- helpers ---------- */
 const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = (n, d = 1) => (n == null || isNaN(n) ? 0 : +n).toFixed(d);
 const when = s => s ? new Date(s).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }) : '';
@@ -312,7 +313,7 @@ async function pageHosts(token) {
       <label class="sub">Import CSV <input type="file" id="csv" accept=".csv" style="display:none"></label><button onclick="$('#csv').click()">Import CSV</button>
       <button class="primary" onclick="installCommand()">Agent install command</button></div>
     <p class="help">Names, tags, labels and expected rates are editable in place; a change saves when you leave the field. CSV columns: host, name, tags, site, rack, ip, label, fabric, expected_gbps.</p>
-    <div class="tbl"><table><thead><tr><th></th><th>Name</th><th>Hostname</th><th>Tags</th><th>Site</th><th>Agent</th><th>Port</th><th>IP</th><th>State</th><th class="num">Speed</th><th>Label</th><th>Fabric</th><th class="num">Expected Gbps</th><th>Switch port</th><th class="num">Live TX / RX</th></tr></thead><tbody id="hosts"></tbody></table></div>`)) return;
+    <div class="tbl"><table><thead><tr><th></th><th>Name</th><th>Hostname</th><th>Tags</th><th>Site</th><th>Agent</th><th>Port</th><th>IP</th><th>State</th><th class="num">Speed</th><th>Label</th><th>Fabric</th><th class="num">Expected Gbps</th><th title="PCIe link the NIC negotiated against what the card and the slot can do">PCIe</th><th>Switch port</th><th class="num">Live TX / RX</th></tr></thead><tbody id="hosts"></tbody></table></div>`)) return;
   $('#csv').onchange = async e => {
     const f = e.target.files[0]; if (!f) return;
     try { const r = await api('POST', '/hosts/import', await f.text()); toast(`Applied ${r.applied} row(s)` + (r.problems.length ? `; ${r.problems.length} problem(s): ` + r.problems.join('; ') : ''), r.problems.length ? 'warn' : 'pass', 9000); refresh(); } catch (x) { fail(x); }
@@ -339,7 +340,7 @@ async function pageHosts(token) {
             <td ${rs}><input class="cell" style="width:90px" value="${esc(h.site)}" onchange="patch('/hosts/${h.id}',{site:this.value})"></td>
             <td ${rs} class="muted" title="${esc(Object.entries(h.tools || {}).map(([k, v]) => k + ' ' + v).join(', ') || 'no tool versions reported yet')}">${esc(h.agent_version)}<br><span class="mono">${esc(h.arch)}</span>${h.tools?.torch ? `<br><span class="mono" title="PyTorch ${esc(h.tools.torch)}, CUDA ${esc(h.tools.cuda)}${h.tools.nccl ? ', NCCL ' + esc(h.tools.nccl) : ''}: this host can take part in NCCL collective tests">gpu${h.tools.cuda === 'True' ? '' : ' (no CUDA)'}</span>` : ''}</td>`;
         }
-        if (!p) { html += '<td colspan="9" class="muted">no RDMA ports found</td></tr>'; return; }
+        if (!p) { html += '<td colspan="10" class="muted">no RDMA ports found</td></tr>'; return; }
         const sw = p.lldp_switch || p.lldp_port ? `${esc(p.lldp_switch)} <span class="muted">${esc(p.lldp_port)}</span>` : '<span class="muted">-</span>';
         html += `<td><b>${esc(p.rdma_dev)}/${p.port_num}</b> <span class="muted">${esc(p.netdev)}</span></td>
           <td class="mono">${esc((p.addrs || []).join(', ')) || '<span class="muted">no IP</span>'}</td>
@@ -348,11 +349,12 @@ async function pageHosts(token) {
           <td><input class="cell" value="${esc(p.label)}" placeholder="label" onchange="patch('/ports/${p.id}',{label:this.value})"></td>
           <td><input class="cell" style="width:70px" value="${esc(p.fabric)}" placeholder="fabric" onchange="patch('/ports/${p.id}',{fabric:this.value})"></td>
           <td class="num"><input class="cell" style="width:70px;text-align:right" value="${p.expected_gbps || ''}" placeholder="${p.speed_mbps / 1000}" onchange="patch('/ports/${p.id}',{expected_gbps:+this.value||0})"></td>
+          <td>${pcieCell(p)}</td>
           <td>${sw}</td>
           <td class="num">${fmt(p.tx_gbps)} / ${fmt(p.rx_gbps)}</td></tr>`;
       });
     }
-    set('hosts', html || `<tr><td colspan="15" class="empty">${all.length ? 'No host matches the filter.' : 'No hosts enrolled yet. Click "Agent install command" and run it on each test host.'}</td></tr>`);
+    set('hosts', html || `<tr><td colspan="16" class="empty">${all.length ? 'No host matches the filter.' : 'No hosts enrolled yet. Click "Agent install command" and run it on each test host.'}</td></tr>`);
   };
   await refresh(); setRefresh(refresh, 5000);
 }
@@ -471,7 +473,7 @@ async function pageTopology(token) {
     <p class="help">Drawn from each host's LLDP neighbour and the switch's own port counters. Line width follows the live rate; the legs of a run in progress glow. Switch ports and the fabric column come from the switch itself (its LLDP and VLAN tables, polled every minute) or from the host's lldpd; "no LLDP" means neither has seen a neighbour on that port yet.</p>
     <div class="card topo" style="padding:10px 10px 4px" id="tp-svg"></div><div id="tp-warn"></div>
     <div class="card"><h2>Switch ports in use</h2><div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th>Switch</th><th>Port</th><th>Link</th><th>Host</th><th>Host port</th><th>IP</th><th>Fabric</th><th class="num">In Gbps</th><th class="num">Out Gbps</th><th class="num">Discards in / out</th><th class="num">Errors in / out</th><th class="num">FCS</th></tr></thead><tbody id="tp-ports"></tbody></table></div></div>
-    <div class="card"><h2>Hosts under test</h2><div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th></th><th>Host</th><th class="num">CPU</th><th class="num">Load</th><th class="num">Memory</th><th>Ports</th><th>Switch ports</th><th class="num">TX / RX Gbps</th></tr></thead><tbody id="tp-hosts"></tbody></table></div></div>`)) return;
+    <div class="card"><h2>Hosts under test</h2><div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th></th><th>Host</th><th class="num">CPU</th><th class="num">Load</th><th class="num">Memory</th><th>Ports</th><th>Switch ports</th><th title="NIC chip and transceiver (optic) temperature per port, from the agent's sensors">Temperatures</th><th class="num">TX / RX Gbps</th></tr></thead><tbody id="tp-hosts"></tbody></table></div></div>`)) return;
   const refresh = async () => {
     const t = await api('GET', '/topology');
     set('tp-svg', drawTopology(t));
@@ -494,8 +496,9 @@ async function pageTopology(token) {
         <td class="num" style="color:${cpu > 85 ? 'var(--fail)' : cpu > 60 ? 'var(--warn)' : 'inherit'}">${st ? fmt(cpu, 0) + '%' : '<span class="muted">-</span>'}</td><td class="num">${st ? fmt(st.load1, 2) : ''}</td><td class="num">${st ? fmt(st.mem_pct, 0) + '%' : ''}</td>
         <td>${h.ports.filter(p => p.ip).map(p => `<span class="chip">${esc(p.label || p.netdev)} <span class="muted">${esc(p.ip)}</span></span>`).join(' ')}</td>
         <td>${h.ports.filter(p => !p.twin_of && (p.switch_port || p.lldp_port)).map(p => `<span class="mono">${esc(p.switch || p.lldp_switch)} ${esc(p.switch_port || p.lldp_port)}</span>`).join(', ') || '<span class="muted">no LLDP yet</span>'}</td>
+        <td>${tempCells(h.ports.filter(p => !p.twin_of && (p.optic_c || p.nic_c)), t.optic_max_c, t.nic_max_c)}</td>
         <td class="num">${fmt(tx)} / ${fmt(rx)}</td></tr>`;
-    }).join('') || `<tr><td colspan="8" class="empty">No hosts enrolled yet.</td></tr>`);
+    }).join('') || `<tr><td colspan="9" class="empty">No hosts enrolled yet.</td></tr>`);
     const legs = (t.runs || []).reduce((a, r) => a + r.legs.length, 0);
     set('tp-legs', legs ? `<span class="live">live</span> ${legs} leg${legs === 1 ? '' : 's'} running` : '');
     set('tp-upd', 'updated ' + new Date().toLocaleTimeString());
@@ -558,15 +561,59 @@ function delFabric(fabric) { confirmBox('Remove profile', `Remove the profile of
 
 /* ---------- runs ---------- */
 async function pageRuns(token) {
-  if (!mount(token, `<div class="page-head"><h1>Runs</h1><span class="spacer"></span><a href="#new"><button class="primary">New run</button></a></div>
-    <div class="tbl"><table><thead><tr><th>ID</th><th>Name</th><th>Test</th><th>Topology</th><th>Status</th><th>Verdict</th><th class="num">Tool Gbps</th><th class="num">Counter Gbps</th><th class="num" title="Aggregate against the newest baseline run of the same shape">vs baseline</th><th>Started</th></tr></thead><tbody id="runs"></tbody></table></div>`)) return;
+  if (!mount(token, `<div class="page-head"><h1>Runs</h1><span class="spacer"></span>
+      <button onclick="cleanupRuns()" title="Delete failed or old runs in one go">Clean up</button>
+      <button class="danger" id="del-sel" disabled onclick="deleteSelectedRuns()">Delete selected</button>
+      <a href="#new"><button class="primary">New run</button></a></div>
+    <div class="tbl"><table><thead><tr><th><input type="checkbox" onchange="$$('.run-sel').forEach(c => { c.checked = this.checked; }); selCount()"></th><th>ID</th><th>Name</th><th>Test</th><th>Topology</th><th>Status</th><th>Verdict</th><th class="num">Tool Gbps</th><th class="num">Counter Gbps</th><th class="num" title="Aggregate against the newest baseline run of the same shape">vs baseline</th><th>Started</th></tr></thead><tbody id="runs"></tbody></table></div>`)) return;
   const refresh = async () => {
     const runs = await api('GET', '/runs');
-    set('runs', runs.length ? runs.map(r => `<tr><td><a href="#run/${r.id}">${r.id}</a></td><td><a href="#run/${r.id}">${esc(r.name)}</a></td><td>${esc(r.spec.test)}</td><td class="muted">${topoName(r.spec)}</td>
+    const sel = new Set($$('.run-sel:checked').map(c => c.value));
+    window._runs = runs;
+    set('runs', runs.length ? runs.map(r => `<tr><td>${r.status === 'queued' || r.status === 'running' ? '' : `<input type="checkbox" class="run-sel" value="${r.id}" ${sel.has(String(r.id)) ? 'checked' : ''} onchange="selCount()">`}</td><td><a href="#run/${r.id}">${r.id}</a></td><td><a href="#run/${r.id}">${esc(r.name)}</a></td><td>${esc(r.spec.test)}</td><td class="muted">${topoName(r.spec)}</td>
       <td>${badge(r.status)}</td><td>${badge(r.verdict)}</td><td class="num">${fmt(r.status === 'running' ? r.summary.live_gbps : r.summary.tool_gbps)}</td><td class="num">${fmt(r.summary.counter_gbps)}</td><td class="num">${baselineCell(r)}</td><td class="muted" title="${when(r.started_at)}">${ago(r.started_at) || '-'}</td></tr>`).join('')
-      : `<tr><td colspan="10" class="empty">No runs yet.</td></tr>`);
+      : `<tr><td colspan="11" class="empty">No runs yet.</td></tr>`);
+    selCount();
   };
   await refresh(); setRefresh(refresh, 5000);
+}
+function selCount() { const n = $$('.run-sel:checked').length, b = $('#del-sel'); if (b) { b.disabled = !n; b.textContent = n ? `Delete selected (${n})` : 'Delete selected'; } }
+function deleteSelectedRuns() {
+  const ids = $$('.run-sel:checked').map(c => +c.value); if (!ids.length) return;
+  const names = ids.map(id => (window._runs || []).find(r => r.id === id)?.name || '');
+  deleteRuns(ids, JSON.stringify(names));
+}
+function cleanupRuns() {
+  modal({ title: 'Clean up runs', body: `<label><input type="checkbox" id="cu-failed" checked> Failed and canceled runs, and runs with a fail verdict</label><br>
+    <label>Runs older than <input id="cu-days" type="number" min="0" value="30" style="width:70px"> days (0 = any age)</label>
+    <p class="help" id="cu-preview">Counting...</p>
+    <label><input type="checkbox" id="cu-samples"> Also delete their per-second samples</label>`,
+    actions: [{ label: 'Cancel' }, { label: 'Delete matching runs', cls: 'danger', run: async () => {
+      const res = await api('POST', '/runs/delete', { failed: $('#cu-failed').checked, older_than_days: +$('#cu-days').value || 0, samples: $('#cu-samples').checked });
+      toast(`Deleted ${res.deleted.length} run${res.deleted.length === 1 ? '' : 's'}` + (res.skipped.length ? `; skipped ${res.skipped.length} (baselines and active runs stay)` : ''), 'pass', 8000); refreshFn?.();
+    } }] });
+  const preview = async () => {
+    const f = $('#cu-failed').checked, d = +$('#cu-days').value || 0;
+    if (!f && !d) { set('cu-preview', 'Tick a filter or give an age.'); return; }
+    try { const r = await api('GET', `/runs/delete-preview?failed=${f ? 1 : 0}&older_than_days=${d}`); set('cu-preview', `${r.count} run${r.count === 1 ? '' : 's'} match${r.count === 1 ? 'es' : ''} (baselines are kept unless forced).`); } catch (e) { set('cu-preview', e.message); }
+  };
+  $('#cu-failed').onchange = preview; $('#cu-days').oninput = preview; preview();
+}
+// pcieCell: "Gen5 x4" with the card's maximum, red when the link came up slower or narrower than the card can do.
+function pcieCell(p) {
+  const l = p.pcie; if (!l || !l.gen) return '<span class="muted">-</span>';
+  const cur = `Gen${l.gen} x${l.width}`, max = l.max_gen ? `Gen${l.max_gen} x${l.max_width}` : '';
+  const down = l.max_gen && (l.gen < l.max_gen || l.width < l.max_width);
+  const slot = l.slot_gen && (l.slot_gen < l.max_gen || l.slot_width < l.max_width) ? ` Slot is Gen${l.slot_gen} x${l.slot_width}.` : '';
+  const usable = l.usable_gbps ? ` About ${fmt(l.usable_gbps, 0)} Gbps usable through this link.` : '';
+  return `<span class="mono" style="color:${down ? 'var(--fail)' : 'inherit'}" title="Negotiated ${cur}${max ? ', card supports ' + max : ''}.${slot}${usable}">${cur}${down ? ` <span class="badge fail">below ${max}</span>` : ''}</span>`;
+}
+// tempCells: "label NIC 44° · optic 49°" per port; amber near the limit, red above it.
+function tempCells(ports, opticMax, nicMax) {
+  if (!ports.length) return '<span class="muted">-</span>';
+  const col = (v, max, near) => v > max ? 'var(--fail)' : v >= max - near ? 'var(--warn)' : 'inherit';
+  return ports.map(p => `<span class="chip" title="${esc(p.label || p.netdev)}: NIC chip ${p.nic_c ? fmt(p.nic_c, 0) + ' °C' : 'n/a'}, optic ${p.optic_c ? fmt(p.optic_c, 0) + ' °C' : 'n/a'} (alerts above ${nicMax || 100} / ${opticMax || 70} °C)">${esc(p.label || p.netdev)}
+    ${p.nic_c ? ` <span style="color:${col(p.nic_c, nicMax || 100, 10)}">NIC ${fmt(p.nic_c, 0)}°</span>` : ''}${p.optic_c ? ` <span style="color:${col(p.optic_c, opticMax || 70, 5)}">optic ${fmt(p.optic_c, 0)}°</span>` : ''}</span>`).join(' ');
 }
 function topoName(s) { return s.mesh ? 'mesh' : s.legs?.length ? 'legs' : s.pairs ? 'pairs' : s.serial ? 'serial' : 'fan'; }
 // baselineCell: the run's own baseline mark, or its aggregate against the baseline it was compared with.
@@ -609,8 +656,12 @@ async function pageRun(token, id) {
       ${r.status === 'done' ? `<button onclick="setBaseline(${r.id}, ${!r.baseline})" title="${r.baseline ? 'Stop using this run as the reference' : 'Compare later runs of the same shape with this one'}">${r.baseline ? 'Unset baseline' : 'Set as baseline'}</button>` : ''}
       <button onclick='sessionStorage.setItem("spec", ${JSON.stringify(JSON.stringify(s))}); location.hash="#new"'>Run again</button>
       <button onclick='sessionStorage.setItem("suitespec", ${JSON.stringify(JSON.stringify(s))}); location.hash="#suites"'>Add to a suite</button>
-      ${!live ? `<a href="/api/v1/runs/${r.id}/report.csv"><button>CSV</button></a> <a href="/api/v1/runs/${r.id}/report.html" target="_blank"><button>Report</button></a>` : ''}
-      ${r.started_at ? `<a href="${grafanaRunURL(r)}" target="_blank" title="Open the Live run dashboard for this run's time range"><button>Grafana</button></a>` : ''}`);
+      ${!live ? `<a href="/api/v1/runs/${r.id}/report.csv"><button>CSV</button></a> <a href="/api/v1/runs/${r.id}/report.html" target="_blank"><button>Report</button></a>
+      <a href="/api/v1/runs/${r.id}/raw?format=csv" title="Every sample collected during the run, one row per reading: host NIC counters, temperatures, PCIe, CPU, and the switch ports on the run's path"><button>Raw data (CSV)</button></a>
+      <a href="/api/v1/runs/${r.id}/raw?format=zip" title="Zip with a manifest (hosts, switches, fabric profiles, run), host_samples.csv and switch_samples.csv, for building your own charts"><button>Raw (zip)</button></a>` : ''}
+      ${r.started_at ? `<a href="${grafanaRunURL(r)}" target="_blank" title="Open the Live run dashboard for this run's time range"><button>Grafana</button></a>
+      <a href="${grafanaSwitchURL(r)}" target="_blank" title="Open the Switch dashboard on this run's time range and ports"><button>Switch view</button></a>` : ''}
+      ${!live ? `<button class="danger" data-names="${esc(JSON.stringify([r.name]))}" onclick="deleteRuns([${r.id}], this.dataset.names, true)" title="Delete this run and its legs">Delete</button>` : ''}`);
     set('run-error', r.error ? `<div class="card" style="border-color:var(--fail);color:var(--fail)">${esc(r.error)}</div>` : '');
     const fab = Object.entries(r.summary.by_fabric || {}).map(([f, g]) => `<div class="tile"><div class="k">Fabric ${esc(f)}</div><div class="v">${fmt(g)}<small>Gbps</small></div></div>`).join('');
     set('run-tiles', lat ? `<div class="tile"><div class="k">Legs</div><div class="v">${(r.legs || []).length}</div></div>${fab}`
@@ -699,6 +750,26 @@ function grafanaRunURL(r) {
   const base = ($('#grafana').getAttribute('href') || ('http://' + location.hostname + ':3000')).replace(/\/+$/, '');
   const from = new Date(r.started_at).getTime() - 30000, to = r.ended_at ? new Date(r.ended_at).getTime() + 30000 : 'now';
   return `${base}/d/srnet-live-run?var-run_id=${r.id}&from=${from}&to=${to}`;
+}
+function grafanaSwitchURL(r) {
+  const base = ($('#grafana').getAttribute('href') || ('http://' + location.hostname + ':3000')).replace(/\/+$/, '');
+  const from = new Date(r.started_at).getTime() - 30000, to = r.ended_at ? new Date(r.ended_at).getTime() + 30000 : 'now';
+  // LegSwitch ports read "<switch> <port>"; the dashboard variable wants the port alone.
+  const ports = [...new Set((r.legs || []).flatMap(l => [l.switch?.client_port, l.switch?.server_port]).filter(Boolean).map(p => p.split(' ').pop()))];
+  return `${base}/d/srnet-switch?from=${from}&to=${to}` + ports.map(p => `&var-port=${encodeURIComponent(p)}`).join('');
+}
+// deleteRuns: confirm with names, then delete; samples=true also drops the runs' series from VictoriaMetrics.
+function deleteRuns(ids, namesJSON, goBack) {
+  const names = JSON.parse(namesJSON || '[]');
+  modal({ title: ids.length === 1 ? `Delete run ${ids[0]}` : `Delete ${ids.length} runs`, body: `<p>${esc(names.slice(0, 8).map((n, i) => `${ids[i]}: ${n}`).join(', '))}${names.length > 8 ? ` and ${names.length - 8} more` : ''}</p>
+    <label><input type="checkbox" id="del-samples"> Also delete the per-second samples these runs recorded (frees space; the Live run dashboard and raw export will have nothing for them)</label><br>
+    <label><input type="checkbox" id="del-force"> Delete even if a run is a baseline</label>
+    <p class="help">Reports, legs and audit entries of a deleted run are gone for good. Queued and running runs are skipped; cancel them first.</p>`,
+    actions: [{ label: 'Cancel' }, { label: 'Delete', cls: 'danger', run: async () => {
+      const res = await api('POST', '/runs/delete', { ids, samples: $('#del-samples').checked, force: $('#del-force').checked });
+      toast(`Deleted ${res.deleted.length} run${res.deleted.length === 1 ? '' : 's'}` + (res.skipped.length ? `; skipped ${res.skipped.length}: ${res.skipped.map(k => k.id + ' ' + k.reason).join('; ')}` : ''), res.skipped.length ? 'warn' : 'pass', 8000);
+      if (goBack) location.hash = '#runs'; else refreshFn?.();
+    } }] });
 }
 async function setBaseline(id, on) {
   try { await api('POST', `/runs/${id}/baseline`, { baseline: on }); toast(on ? `Run ${id} is now the baseline for runs of its shape` : `Run ${id} is no longer a baseline`, 'pass'); refreshFn?.(); route(); } catch (e) { fail(e); }
@@ -943,7 +1014,7 @@ async function pageSuites(token) {
       : `<tr><td colspan="7" class="empty">No schedules. Cron is 5 fields in the controller's local time, for example <span class="mono">0 2 * * *</span> for 02:00 every night.</td></tr>`);
     set('suite-runs', sruns.length ? sruns.map(r => `<tr><td>${r.id}</td><td>${esc(r.suite_name)}</td><td class="muted">${esc(r.trigger)}</td><td>${badge(r.status)}</td><td>${badge(r.verdict)}</td>
       <td>${r.run_ids.map(id => `<a href="#run/${id}">${id}</a>`).join(' ')}</td><td class="muted">${when(r.started_at)}</td>
-      <td style="text-align:right">${r.status === 'running' ? `<button class="sm danger" onclick="api('POST','/suite-runs/${r.id}/cancel').then(refreshFn,fail)">Cancel</button>` : `<a href="/api/v1/suite-runs/${r.id}/report.html" target="_blank" title="Acceptance report: every run, the fabric check and the fleet, ready to print"><button class="sm">Report</button></a>`}</td></tr>`).join('')
+      <td style="text-align:right">${r.status === 'running' ? `<button class="sm danger" onclick="api('POST','/suite-runs/${r.id}/cancel').then(refreshFn,fail)">Cancel</button>` : `<a href="/api/v1/suite-runs/${r.id}/report.html" target="_blank" title="Acceptance report: every run, the fabric check and the fleet, ready to print"><button class="sm">Report</button></a> <a href="/api/v1/suite-runs/${r.id}/raw.zip" title="Every sample of every run in this suite run, one zip per run inside"><button class="sm">Raw data</button></a>`}</td></tr>`).join('')
       : `<tr><td colspan="8" class="empty">No suite runs yet.</td></tr>`);
     const added = sessionStorage.getItem('suitespec');
     if (added) { sessionStorage.removeItem('suitespec'); editSuite(0, [JSON.parse(added)]); }
@@ -1017,7 +1088,7 @@ function delSchedule(id, name) { confirmBox('Delete schedule', `Delete schedule 
 async function pageFleet(token) {
   if (!mount(token, `<div class="page-head"><h1>Fleet</h1><span class="spacer"></span><button onclick="checkGitHub()">Check GitHub</button><button onclick="uploadRelease()" title="For a controller without internet: upload SHA256SUMS and the agent binaries of a GitHub release">Upload release</button><button class="primary" onclick="fetchRelease()">Mirror a release</button></div>
     <div class="tiles" id="fleet-tiles"></div>
-    <div class="card"><h2>Mirrored releases</h2><div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th>Version</th><th>Builds</th><th>Mirrored</th><th></th></tr></thead><tbody id="releases"></tbody></table></div></div>
+    <div class="card"><h2>Mirrored releases</h2><div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th>Version</th><th>Builds</th><th>Mirrored</th><th title="Agents running this version; such a version is never pruned">In use</th><th></th></tr></thead><tbody id="releases"></tbody></table></div></div>
     <div id="jobs"></div>`)) return;
   let checked = false;
   const refresh = async () => {
@@ -1028,8 +1099,10 @@ async function pageFleet(token) {
       <div class="tile"><div class="k">Agents</div><div class="v" style="font-size:20px">${Object.entries(versions).map(([v, n]) => `${esc(v)} <small>× ${n}</small>`).join('<br>') || '<small>none</small>'}</div></div>
       <div class="tile"><div class="k">Latest on GitHub</div><div class="v" style="font-size:20px" id="latest">${esc(rel.latest_on_github || '?')}</div></div>`);
     set('releases', rel.mirrored.length ? rel.mirrored.map(r => `<tr><td><b>${esc(r.version)}</b></td><td>${r.arches.map(a => `<span class="chip">${a}</span>`).join(' ')}</td><td class="muted">${when(r.mirrored_at)}</td>
-      <td style="text-align:right"><button class="sm primary" onclick="startUpdate('${esc(r.version)}')">Update agents</button></td></tr>`).join('')
-      : `<tr><td colspan="4" class="empty">Nothing mirrored. Click "Mirror a release" to pull one from GitHub, then push it to the agents.</td></tr>`);
+      <td>${r.in_use ? `<span class="chip" title="Agents running this version">${r.in_use} agent${r.in_use === 1 ? '' : 's'}</span>` : '<span class="muted">-</span>'}</td>
+      <td style="text-align:right;white-space:nowrap"><button class="sm primary" onclick="startUpdate('${esc(r.version)}')">Update agents</button> <button class="sm danger" ${r.in_use ? 'disabled title="An agent runs this version; update the fleet first"' : `onclick="removeRelease('${esc(r.version)}')"`}>Remove</button></td></tr>`).join('')
+      + `<tr><td colspan="5" class="help" style="padding:8px 12px">Old releases are pruned automatically: the newest ${rel.keep || 3} stay, plus any version an agent still runs (release_keep in the controller config).</td></tr>`
+      : `<tr><td colspan="5" class="empty">Nothing mirrored. Click "Mirror a release" to pull one from GitHub, then push it to the agents.</td></tr>`);
     set('jobs', jobs.map(j => `<div class="card"><h2>Update job ${j.id} to ${esc(j.version)} ${badge(j.status, j.status === 'done' ? 'pass' : j.status === 'failed' ? 'fail' : 'running')} <span class="muted" style="text-transform:none;letter-spacing:0">${when(j.created_at)}</span></h2>
       <div class="tbl" style="margin:0;box-shadow:none"><table><thead><tr><th>Host</th><th>From</th><th>Status</th><th>Note</th></tr></thead><tbody>${j.hosts.map(h => `<tr><td>${esc(h.name)}</td><td class="muted">${esc(h.from)}</td><td>${badge(h.status)}</td><td class="muted wrap">${esc(h.note)}</td></tr>`).join('')}</tbody></table></div></div>`).join('')
       || `<p class="help">No update jobs yet. Updates go one host at a time; a host that does not come back on the new version is rolled back by its launcher.</p>`);
@@ -1058,7 +1131,7 @@ function startUpdate(version) {
 async function pageSwitches(token) {
   if (!mount(token, `<div class="page-head"><h1>Switches</h1><span class="spacer"></span><button class="primary" onclick="editSwitch()">Add switch</button></div>
     <p class="help">Enterprise SONiC switches the controller reads port counters from. gNMI streams every 30 s through gnmic (preferred, the fastest rate Enterprise SONiC accepts); SNMP v2c is polled every 30 s and works with just a read-only community. The switch is only ever read. Hosts' LLDP matches their ports to switch ports automatically.</p>
-    <div class="tbl"><table><thead><tr><th>Name</th><th>Address</th><th>SNMP</th><th>gNMI</th><th></th></tr></thead><tbody id="switches"></tbody></table></div>`)) return;
+    <div class="tbl"><table><thead><tr><th>Name</th><th>Address</th><th>SNMP</th><th>gNMI</th><th title="CPU, memory, temperature sensors, fans and PSUs, read over gNMI once a minute">Health</th><th></th></tr></thead><tbody id="switches"></tbody></table></div>`)) return;
   const refresh = async () => {
     const list = await api('GET', '/switches');
     window._switches = list;
@@ -1066,11 +1139,26 @@ async function pageSwitches(token) {
     set('switches', list.length ? list.map(sw => `<tr><td><b>${esc(sw.name)}</b></td><td class="mono">${esc(sw.address)}</td>
       <td class="wrap">${probe(sw.snmp)}${sw.has_snmp ? ` <span class="chip">v${esc(sw.snmp_version || '2c')}</span>` : ''}</td>
       <td class="wrap">${probe(sw.gnmi)}${sw.gnmi_user ? ` <span class="chip">${esc(sw.gnmi_user)}@:${sw.gnmi_port || 8080}${sw.gnmi_tls ? ' tls' : ''}</span>` : ''}</td>
+      <td class="wrap">${switchHealth(sw.health)}</td>
       <td style="text-align:right;white-space:nowrap"><button class="sm" onclick="testSwitch('${esc(sw.name)}')">Test</button> <button class="sm" onclick="editSwitch('${esc(sw.name)}')">Edit</button> <button class="sm danger" onclick="delSwitch('${esc(sw.name)}')">Remove</button></td></tr>`).join('')
-      : `<tr><td colspan="5" class="empty">No switches yet. Click "Add switch"; you need the switch's management IP and a read-only SNMP community, or a gNMI user and password.</td></tr>`);
+      : `<tr><td colspan="6" class="empty">No switches yet. Click "Add switch"; you need the switch's management IP and a read-only SNMP community, or a gNMI user and password.</td></tr>`);
   };
   await refresh(); setRefresh(refresh, 10000);
 }
+// switchHealth: one line of chips; a hot sensor, a failed fan or PSU turns red.
+function switchHealth(h) {
+  if (!h) return '<span class="muted">not read yet</span>';
+  const hot = (h.temps || []).filter(t => t.high_c && t.c >= t.high_c), maxT = Math.max(0, ...(h.temps || []).map(t => t.c));
+  const bad = l => (l || []).filter(x => !x.ok);
+  const up = h.uptime_sec ? (h.uptime_sec > 172800 ? Math.floor(h.uptime_sec / 86400) + ' d' : Math.floor(h.uptime_sec / 3600) + ' h') : '';
+  return [h.cpu_pct ? `<span class="chip" style="color:${h.cpu_pct > 85 ? 'var(--fail)' : 'inherit'}">CPU ${fmt(h.cpu_pct, 0)}%</span>` : '',
+    h.mem_pct ? `<span class="chip">mem ${fmt(h.mem_pct, 0)}%</span>` : '',
+    (h.temps || []).length ? `<span class="chip" style="color:${hot.length ? 'var(--fail)' : 'inherit'}" title="${esc((h.temps || []).map(t => `${t.name} ${fmt(t.c, 0)}°${t.high_c ? ' (limit ' + fmt(t.high_c, 0) + ')' : ''}`).join(', '))}">${hot.length ? hot.length + ' sensor' + (hot.length === 1 ? '' : 's') + ' over limit' : 'hottest ' + fmt(maxT, 0) + ' °C'}</span>` : '',
+    (h.fans || []).length ? `<span class="chip" style="color:${bad(h.fans).length ? 'var(--fail)' : 'inherit'}" title="${esc(h.fans.map(f => f.name + ' ' + (f.ok ? 'ok' : f.status || 'failed')).join(', '))}">fans ${h.fans.length - bad(h.fans).length}/${h.fans.length}</span>` : '',
+    (h.psus || []).length ? `<span class="chip" style="color:${bad(h.psus).length ? 'var(--fail)' : 'inherit'}" title="${esc(h.psus.map(f => f.name + ' ' + (f.ok ? 'ok' : f.status || 'failed')).join(', '))}">PSU ${h.psus.length - bad(h.psus).length}/${h.psus.length}</span>` : '',
+    up ? `<span class="chip" title="${esc(h.last_reboot ? 'Last reboot: ' + h.last_reboot : '')}">up ${up}</span>` : ''].filter(Boolean).join(' ') || '<span class="muted">no readings</span>';
+}
+function removeRelease(v) { confirmBox('Remove release', `Delete the mirrored files of ${v} from the controller? It can be mirrored again from GitHub later.`, 'Remove', async () => { await api('DELETE', `/releases/${encodeURIComponent(v)}`); toast(`${v} removed`, 'pass'); refreshFn?.(); }); }
 function editSwitch(name) {
   const sw = (window._switches || []).find(s => s.name === name) || { name: '', address: '', has_snmp: true, snmp_version: '2c', gnmi_port: 8080, gnmi_tls: true, gnmi_user: '' };
   const editing = !!name;

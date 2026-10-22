@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -109,6 +110,12 @@ func main() {
 		err = c.suiteReport(ctx, args)
 	case "report":
 		err = c.report(ctx, args)
+	case "raw":
+		err = c.raw(ctx, args)
+	case "delete":
+		err = c.deleteRuns(ctx, args)
+	case "remove-release":
+		err = c.removeRelease(ctx, args)
 	default:
 		usage()
 	}
@@ -136,9 +143,16 @@ func usage() {
   cancel <run id>
   baseline <run id> [--off]     mark a finished run as the baseline its shape is compared against
   report <run id> [--format csv|html] [-o file]
+  raw <run id> [-o file] [--format csv|jsonl|zip] [--switch mapped|all|none]
+                                every sample collected during the run (host counters, temperatures,
+                                PCIe, CPU, switch ports on its path), one row per reading
+  raw --from -1h [--to T] [--hosts a,b]   the same for a time window (up to 7 days)
+  delete <run id...> | --failed | --older-than 30d  [--force] [--samples] [--yes]
+                                delete runs (baselines need --force; --samples also drops their series)
 
   releases [--check]            agent builds mirrored on the controller (and the newest on GitHub)
   fetch-release [version]       mirror a release from GitHub (default: latest)
+  remove-release <version>      delete a mirrored release (the newest 3 and versions in use are kept by the daily prune)
   update --version vX [--host a,b | --tag t]
                                 push an agent update one host at a time, with rollback
   updates                       update job history
@@ -703,4 +717,165 @@ func (c *cli) suiteReport(ctx context.Context, args []string) error {
 	}
 	_, err = io.Copy(w, resp.Body)
 	return err
+}
+
+// download streams a GET to a file or stdout (reports and raw exports).
+func (c *cli) download(ctx context.Context, path, out string) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", c.url+path, nil)
+	if err != nil {
+		return err
+	}
+	if c.bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+c.bearer)
+	} else {
+		req.SetBasicAuth(c.user, c.pass)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 400))
+		return fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	w := io.Writer(os.Stdout)
+	if out != "" {
+		f, err := os.Create(out)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		w = f
+	}
+	_, err = io.Copy(w, resp.Body)
+	return err
+}
+
+// raw downloads every sample collected during a run (or a time window).
+func (c *cli) raw(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("raw", flag.ExitOnError)
+	out := fs.String("o", "", "write to this file (default: stdout)")
+	format := fs.String("format", "csv", "csv, jsonl or zip (zip = manifest + host and switch CSVs)")
+	sw := fs.String("switch", "mapped", "switch ports to include: mapped (the run's path), all, none")
+	from := fs.String("from", "", "export a time window instead of a run: RFC3339, unix seconds, or relative like -1h")
+	to := fs.String("to", "", "end of the window (default now)")
+	hosts := fs.String("hosts", "", "window export: only these hosts (comma separated)")
+	fs.Parse(args)
+	q := url.Values{"format": {*format}, "switch": {*sw}}
+	switch {
+	case *from != "":
+		q.Set("from", *from)
+		if *to != "" {
+			q.Set("to", *to)
+		}
+		if *hosts != "" {
+			q.Set("hosts", *hosts)
+		}
+		return c.download(ctx, "/api/v1/export?"+q.Encode(), *out)
+	case fs.NArg() == 1:
+		return c.download(ctx, "/api/v1/runs/"+fs.Arg(0)+"/raw?"+q.Encode(), *out)
+	}
+	return errors.New("usage: srnet raw <run id> [-o file] [--format csv|jsonl|zip] [--switch mapped|all|none]\n       srnet raw --from -1h [--to now] [--hosts a,b] [-o file]")
+}
+
+// delete removes runs by id or by filter.
+func (c *cli) deleteRuns(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("delete", flag.ExitOnError)
+	failed := fs.Bool("failed", false, "failed and canceled runs, and runs with a fail verdict")
+	older := fs.String("older-than", "", "runs created more than this long ago, e.g. 30d or 720h")
+	force := fs.Bool("force", false, "delete baselines too")
+	samples := fs.Bool("samples", false, "also delete the runs' per-second samples from VictoriaMetrics")
+	yes := fs.Bool("yes", false, "do not ask")
+	fs.Parse(args)
+	var ids []int64
+	for _, a := range fs.Args() {
+		n, err := strconv.ParseInt(a, 10, 64)
+		if err != nil {
+			return fmt.Errorf("run id %q is not a number", a)
+		}
+		ids = append(ids, n)
+	}
+	days := 0
+	if *older != "" {
+		d, err := parseDays(*older)
+		if err != nil {
+			return err
+		}
+		days = d
+	}
+	if len(ids) == 0 && !*failed && days == 0 {
+		return errors.New("usage: srnet delete <run id...> | --failed | --older-than 30d  [--force] [--samples] [--yes]")
+	}
+	if len(ids) == 0 {
+		var pv struct {
+			IDs []int64 `json:"ids"`
+		}
+		q := url.Values{"older_than_days": {strconv.Itoa(days)}}
+		if *failed {
+			q.Set("failed", "1")
+		}
+		if err := c.call(ctx, "GET", "/api/v1/runs/delete-preview?"+q.Encode(), nil, &pv); err != nil {
+			return err
+		}
+		if len(pv.IDs) == 0 {
+			fmt.Println("no run matches")
+			return nil
+		}
+		fmt.Printf("%d run(s) match: %v\n", len(pv.IDs), pv.IDs)
+		ids = pv.IDs
+	}
+	if !*yes {
+		fmt.Printf("delete %d run(s)%s? [y/N] ", len(ids), map[bool]string{true: " and their samples", false: ""}[*samples])
+		var ans string
+		fmt.Scanln(&ans)
+		if ans != "y" && ans != "Y" && ans != "yes" {
+			return errors.New("aborted")
+		}
+	}
+	var res api.DeleteResult
+	if err := c.call(ctx, "POST", "/api/v1/runs/delete", map[string]any{"ids": ids, "force": *force, "samples": *samples}, &res); err != nil {
+		return err
+	}
+	fmt.Printf("deleted %d run(s)\n", len(res.Deleted))
+	for _, k := range res.Skipped {
+		fmt.Printf("skipped %d: %s\n", k.ID, k.Reason)
+	}
+	if res.SampleErrors > 0 {
+		fmt.Printf("%d run(s) kept their samples (VictoriaMetrics error, see the controller log)\n", res.SampleErrors)
+	}
+	return nil
+}
+
+func parseDays(s string) (int, error) {
+	if n, ok := strings.CutSuffix(s, "d"); ok {
+		d, err := strconv.Atoi(n)
+		if err != nil || d <= 0 {
+			return 0, fmt.Errorf("--older-than wants a count of days like 30d, not %q", s)
+		}
+		return d, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("--older-than wants a count of days like 30d, not %q", s)
+	}
+	days := int(d.Hours() / 24)
+	if days == 0 {
+		days = 1
+	}
+	return days, nil
+}
+
+func (c *cli) removeRelease(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("remove-release", flag.ExitOnError)
+	force := fs.Bool("force", false, "remove even if an agent runs this version")
+	fs.Parse(args)
+	if fs.NArg() != 1 {
+		return errors.New("usage: srnet remove-release <version> [--force]")
+	}
+	q := ""
+	if *force {
+		q = "?force=1"
+	}
+	return c.call(ctx, "DELETE", "/api/v1/releases/"+url.PathEscape(fs.Arg(0))+q, nil, nil)
 }

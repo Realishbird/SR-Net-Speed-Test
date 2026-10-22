@@ -75,6 +75,7 @@ func DiscoverPorts(ctx context.Context) []api.Port {
 			if p.Netdev != "" {
 				fillNetdev(ctx, &p)
 			}
+			p.PCIe = ReadPCIe(p)
 			ports = append(ports, p)
 		}
 	}

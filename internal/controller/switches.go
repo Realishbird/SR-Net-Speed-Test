@@ -142,7 +142,16 @@ func (s *Server) listSwitches(w http.ResponseWriter, r *http.Request) {
 	out := make([]api.Switch, 0, len(list))
 	snmp := s.snmp.statuses()
 	for _, sw := range list {
-		out = append(out, s.switchView(sw, snmp, series, err))
+		v := s.switchView(sw, snmp, series, err)
+		if s.health != nil {
+			s.health.mu.Lock()
+			if h, ok := s.health.last[sw.Name]; ok {
+				hc := h
+				v.Health = &hc
+			}
+			s.health.mu.Unlock()
+		}
+		out = append(out, v)
 	}
 	writeJSON(w, out)
 }

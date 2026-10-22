@@ -1,0 +1,2297 @@
+{
+ "uid": "srnet-switch",
+ "title": "SR-Net: Switch",
+ "tags": [
+  "srnet",
+  "switch"
+ ],
+ "timezone": "browser",
+ "schemaVersion": 39,
+ "version": 1,
+ "refresh": "30s",
+ "time": {
+  "from": "now-3h",
+  "to": "now"
+ },
+ "editable": true,
+ "description": "Everything the controller reads from the switch itself, over gNMI (gnmic streams every 30 s, the fastest Enterprise SONiC accepts) and SNMP (every 30 s, every 2 s on the ports in use while a run is active): throughput, queue drops, ECN, PFC, buffers, errors, FEC, optics and switch health. Open it from a run page with \"Switch view\" to land on the run's time range and ports.",
+ "annotations": {
+  "list": [
+   {
+    "name": "Runs",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "srnet-vm"
+    },
+    "enable": true,
+    "iconColor": "rgba(0, 150, 255, 0.8)",
+    "expr": "max by (run_id) (srnet_rdma_rx_gbps{run_id!=\"\"})",
+    "step": "15s",
+    "titleFormat": "Run {{run_id}}",
+    "tagKeys": "run_id",
+    "textFormat": "Test traffic from the controller's run {{run_id}}",
+    "useValueForTime": false
+   }
+  ]
+ },
+ "templating": {
+  "list": [
+   {
+    "name": "switch",
+    "label": "Switch",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "srnet-vm"
+    },
+    "query": {
+     "query": "label_values({__name__=~\"srnet_gnmi_.*counters_in_octets\"}, source)",
+     "refId": "v"
+    },
+    "refresh": 2,
+    "sort": 1,
+    "includeAll": false,
+    "current": {},
+    "description": "gNMI target name (the switch's name in the controller, lower-cased by gnmic)."
+   },
+   {
+    "name": "port",
+    "label": "Ports",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "srnet-vm"
+    },
+    "query": {
+     "query": "label_values({__name__=~\"srnet_gnmi_.*counters_in_octets\",source=~\"(?i)$switch\"}, interface_name)",
+     "refId": "v"
+    },
+    "refresh": 2,
+    "sort": 7,
+    "multi": true,
+    "includeAll": true,
+    "allValue": ".*",
+    "current": {
+     "text": "All",
+     "value": "$__all"
+    },
+    "description": "Pick the switch ports to look at. The run page's Switch view button pre-selects the run's ports."
+   }
+  ]
+ },
+ "panels": [
+  {
+   "type": "row",
+   "title": "Overview",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "stat",
+   "title": "Ports up",
+   "description": "Ports with link, from the SNMP walk every 30 s.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": ""
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "graphMode": "area",
+    "colorMode": "value"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "count(srnet_switch_up{switch=~\"(?i)$switch\"} == 1)"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Total in",
+   "description": "Sum of the selected ports' ingress, 2 minute rate.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 4,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Gbps",
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "graphMode": "area",
+    "colorMode": "value"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(rate({__name__=~\"srnet_gnmi_.*counters_in_octets\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m] keep_metric_names)) * 8 / 1e9"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Total out",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 8,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Gbps",
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "graphMode": "area",
+    "colorMode": "value"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(rate({__name__=~\"srnet_gnmi_.*counters_out_octets\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m] keep_metric_names)) * 8 / 1e9"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Queue drops /s",
+   "description": "Packets dropped in egress queues of the selected ports. Any value above 0 under load means the fabric is lossy for that traffic.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "pps",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 0.001
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "graphMode": "none",
+    "colorMode": "value"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(rate({__name__=~\"srnet_gnmi_.*queues.*_dropped_pkts\",source=~\"(?i)$switch\",interface_interface_id=~\"$port\"}[2m] keep_metric_names))"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "PFC pause /s",
+   "description": "Priority flow control pause frames received plus sent. 0 on this fabric means PFC is off or never needed.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 16,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "pps",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 0.001
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "graphMode": "none",
+    "colorMode": "value"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(rate({__name__=~\"srnet_gnmi_.*pfc.*pause_frames_(rx|tx)\",source=~\"(?i)$switch\",interface_interface_id=~\"$port\"}[2m] keep_metric_names))"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "CRC errors /s",
+   "description": "Frames failing the CRC: a bad cable or optic.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 20,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "pps",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 0.001
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "graphMode": "none",
+    "colorMode": "value"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(rate({__name__=~\"srnet_gnmi_.*ethernet_state_counters_in_crc_errors\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m] keep_metric_names))"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "CPU",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 5,
+    "w": 4,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "decimals": 0,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 70
+       },
+       {
+        "color": "red",
+        "value": 90
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "graphMode": "none",
+    "colorMode": "value"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max(srnet_switch_cpu_pct{switch=~\"(?i)$switch\"})"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Memory",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 4,
+    "y": 5,
+    "w": 4,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "decimals": 0,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 80
+       },
+       {
+        "color": "red",
+        "value": 95
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "graphMode": "none",
+    "colorMode": "value"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max(srnet_switch_mem_used_pct{switch=~\"(?i)$switch\"})"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Hottest sensor",
+   "description": "Hottest of the switch's temperature sensors (TEMP n components).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 8,
+    "y": 5,
+    "w": 4,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "celsius",
+     "decimals": 0,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 60
+       },
+       {
+        "color": "red",
+        "value": 75
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "graphMode": "none",
+    "colorMode": "value"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max(srnet_switch_temp_c{switch=~\"(?i)$switch\"})"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Hottest optic",
+   "description": "Hottest transceiver among the selected ports (module case temperature).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 5,
+    "w": 4,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "celsius",
+     "decimals": 0,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 65
+       },
+       {
+        "color": "red",
+        "value": 70
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "graphMode": "none",
+    "colorMode": "value"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max({__name__=~\"srnet_gnmi_.*component_state_temperature_instant\",source=~\"(?i)$switch\",name=~\"$port\"})"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Fans / PSUs failed",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 16,
+    "y": 5,
+    "w": 4,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "",
+     "decimals": 0,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "graphMode": "none",
+    "colorMode": "value"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "(count(srnet_switch_fan_ok{switch=~\"(?i)$switch\"} == 0) or vector(0)) + (count(srnet_switch_psu_ok{switch=~\"(?i)$switch\"} == 0) or vector(0))"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Uptime",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 20,
+    "y": 5,
+    "w": 4,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "graphMode": "area",
+    "colorMode": "value"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max(srnet_switch_uptime_seconds{switch=~\"(?i)$switch\"})"
+    }
+   ]
+  },
+  {
+   "type": "row",
+   "title": "Throughput",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 9,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "timeseries",
+   "title": "Ingress Gbps per port (gNMI, 30 s)",
+   "description": "Bytes received by the switch on each port. gNMI samples every 30 s (the fastest Enterprise SONiC accepts), so short bursts are averaged.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 10,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Gbps",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "((rate({__name__=~\"srnet_gnmi_.*counters_in_octets\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m] keep_metric_names) * 8 / 1e9) * on(interface_name) group_left(host, host_port, fabric) label_replace(srnet_switch_port_info{switch=~\"(?i)$switch\"}, \"interface_name\", \"$1\", \"port\", \"(.*)\")) or ((rate({__name__=~\"srnet_gnmi_.*counters_in_octets\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m] keep_metric_names) * 8 / 1e9) unless on(interface_name) label_replace(srnet_switch_port_info{switch=~\"(?i)$switch\"}, \"interface_name\", \"$1\", \"port\", \"(.*)\"))",
+     "legendFormat": "{{interface_name}} {{host}} {{host_port}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Egress Gbps per port (gNMI, 30 s)",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 10,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Gbps",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "((rate({__name__=~\"srnet_gnmi_.*counters_out_octets\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m] keep_metric_names) * 8 / 1e9) * on(interface_name) group_left(host, host_port, fabric) label_replace(srnet_switch_port_info{switch=~\"(?i)$switch\"}, \"interface_name\", \"$1\", \"port\", \"(.*)\")) or ((rate({__name__=~\"srnet_gnmi_.*counters_out_octets\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m] keep_metric_names) * 8 / 1e9) unless on(interface_name) label_replace(srnet_switch_port_info{switch=~\"(?i)$switch\"}, \"interface_name\", \"$1\", \"port\", \"(.*)\"))",
+     "legendFormat": "{{interface_name}} {{host}} {{host_port}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Port Gbps during runs (SNMP, 2 s)",
+   "description": "While a run is active the controller polls the ports that are up every 2 s over SNMP; between runs every 30 s. This is the view to compare with the host NIC counters second by second.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 18,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Gbps",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "srnet_switch_rx_gbps{switch=~\"(?i)$switch\",port=~\"$port\"}",
+     "legendFormat": "{{port}} in"
+    },
+    {
+     "refId": "B",
+     "expr": "srnet_switch_tx_gbps{switch=~\"(?i)$switch\",port=~\"$port\"}",
+     "legendFormat": "{{port}} out"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Utilisation (% of line rate)",
+   "description": "Ingress and egress rate against the port's configured speed (ifHighSpeed). A 100G port carrying 98 Gbps is at 98%.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 18,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000,
+      "thresholdsStyle": {
+       "mode": "line"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 95
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "(rate({__name__=~\"srnet_gnmi_.*counters_(in|out)_octets\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m] keep_metric_names)) * 8 / 1e6 / on(interface_name) group_left() label_replace(srnet_switch_speed_mbps{switch=~\"(?i)$switch\"}, \"interface_name\", \"$1\", \"port\", \"(.*)\") * 100",
+     "legendFormat": "{{interface_name}} {{__name__}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Packets per second",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 26,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "pps",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "rate({__name__=~\"srnet_gnmi_.*counters_in_(unicast|multicast|broadcast)_pkts\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m] keep_metric_names)",
+     "legendFormat": "{{interface_name}} {{__name__}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Average frame size (bytes)",
+   "description": "Octets divided by packets. RDMA at 4096 MTU shows about 4 kB; small values mean control traffic or fragmentation.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 26,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "(rate({__name__=~\"srnet_gnmi_.*counters_in_octets\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m] keep_metric_names)) / (rate({__name__=~\"srnet_gnmi_.*counters_in_pkts\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m] keep_metric_names))",
+     "legendFormat": "{{interface_name}}"
+    }
+   ]
+  },
+  {
+   "type": "row",
+   "title": "Congestion and buffers",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 34,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "timeseries",
+   "title": "Queue drops per second",
+   "description": "Packets dropped per egress queue (tail drops and WRED drops). The 400G to 100G step from the 770AP into the Sparks shows here as queue 0 drops on the Spark ports.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 35,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "pps",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000,
+      "thresholdsStyle": {
+       "mode": "line"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 0.001
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "rate({__name__=~\"srnet_gnmi_.*queues.*_dropped_pkts\",source=~\"(?i)$switch\",interface_interface_id=~\"$port\"}[2m] keep_metric_names)",
+     "legendFormat": "{{interface_interface_id}} {{queue_name}} {{__name__}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "ECN marked per second",
+   "description": "Packets ECN-marked by WRED. 0 means ECN is not configured on the queue, so RoCE congestion control never kicks in and the NIC retransmits after drops instead.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 35,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "pps",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "rate({__name__=~\"srnet_gnmi_.*queues.*ecn_marked_pkts\",source=~\"(?i)$switch\",interface_interface_id=~\"$port\"}[2m] keep_metric_names)",
+     "legendFormat": "{{interface_interface_id}} {{queue_name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Transmit packets per queue",
+   "description": "Which queue carries the traffic. RoCE should sit in the lossless queue (3 on a classic profile); everything in queue 0 means no DSCP-to-queue map is applied.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 43,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "pps",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000,
+      "stacking": {
+       "mode": "normal"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "rate({__name__=~\"srnet_gnmi_.*queues.*_transmit_pkts\",source=~\"(?i)$switch\",interface_interface_id=~\"$port\"}[2m] keep_metric_names)",
+     "legendFormat": "{{interface_interface_id}} {{queue_name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Queue watermark (% of buffer)",
+   "description": "Peak egress queue occupancy in the last sample window, as a share of the shared buffer. Sustained values near 100 precede drops.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 43,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000,
+      "thresholdsStyle": {
+       "mode": "line"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 80
+       },
+       {
+        "color": "red",
+        "value": 95
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max by (interface_interface_id, queue_name) ({__name__=~\"srnet_gnmi_.*queues.*periodic_watermark_percent\",source=~\"(?i)$switch\",interface_interface_id=~\"$port\"})",
+     "legendFormat": "{{interface_interface_id}} {{queue_name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Queue watermark (bytes)",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 51,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max by (interface_interface_id, queue_name) ({__name__=~\"srnet_gnmi_.*queues.*state_watermark$\",source=~\"(?i)$switch\",interface_interface_id=~\"$port\"})",
+     "legendFormat": "{{interface_interface_id}} {{queue_name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Ingress priority-group watermark (%)",
+   "description": "Shared and headroom buffer use per ingress priority group. Headroom use above 0 means PFC was asserted and the buffer absorbed in-flight data.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 51,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max by (interface_interface_id, name) ({__name__=~\"srnet_gnmi_.*priority_groups.*periodic_watermark_percent\",source=~\"(?i)$switch\",interface_interface_id=~\"$port\"})",
+     "legendFormat": "{{interface_interface_id}} PG {{name}} {{__name__}}"
+    }
+   ]
+  },
+  {
+   "type": "row",
+   "title": "Priority flow control",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 59,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "timeseries",
+   "title": "PFC pause frames received per second",
+   "description": "Pause frames the switch received from hosts (the host asked the switch to stop). Per priority.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 60,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "pps",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "rate({__name__=~\"srnet_gnmi_.*pfc.*pause_frames_rx\",source=~\"(?i)$switch\",interface_interface_id=~\"$port\"}[2m] keep_metric_names)",
+     "legendFormat": "{{interface_interface_id}} prio {{dot1p}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "PFC pause frames sent per second",
+   "description": "Pause frames the switch sent to hosts (the switch asked the host to stop).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 60,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "pps",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "rate({__name__=~\"srnet_gnmi_.*pfc.*pause_frames_tx\",source=~\"(?i)$switch\",interface_interface_id=~\"$port\"}[2m] keep_metric_names)",
+     "legendFormat": "{{interface_interface_id}} prio {{dot1p}}"
+    }
+   ]
+  },
+  {
+   "type": "table",
+   "title": "PFC enable and watchdog state",
+   "description": "Current PFC configuration per port and priority and the PFC watchdog's counters. storm_detected above 0 means a port was stuck sending pause and the watchdog cut it off.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 68,
+    "w": 24,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "options": {
+    "showHeader": true,
+    "sortBy": [
+     {
+      "displayName": "interface_name"
+     }
+    ]
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "{__name__=~\"srnet_gnmi_.*pfc.*(enable|status|storm_detected|storm_restored|watchdog.*)\",source=~\"(?i)$switch\",interface_interface_id=~\"$port\"}",
+     "format": "table",
+     "instant": true
+    }
+   ],
+   "transformations": [
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true,
+       "__name__": true,
+       "source": true,
+       "subscription_name": true,
+       "job": true,
+       "instance": true
+      }
+     }
+    }
+   ]
+  },
+  {
+   "type": "row",
+   "title": "Errors and link quality",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 76,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "timeseries",
+   "title": "CRC errors per second",
+   "description": "Any CRC error at steady rate points at the cable or the optic on that port. Compare with the host's symbol errors on the same leg.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 77,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "pps",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000,
+      "thresholdsStyle": {
+       "mode": "line"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 0.001
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "((rate({__name__=~\"srnet_gnmi_.*ethernet_state_counters_in_crc_errors\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m] keep_metric_names)) * on(interface_name) group_left(host, host_port, fabric) label_replace(srnet_switch_port_info{switch=~\"(?i)$switch\"}, \"interface_name\", \"$1\", \"port\", \"(.*)\")) or ((rate({__name__=~\"srnet_gnmi_.*ethernet_state_counters_in_crc_errors\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m] keep_metric_names)) unless on(interface_name) label_replace(srnet_switch_port_info{switch=~\"(?i)$switch\"}, \"interface_name\", \"$1\", \"port\", \"(.*)\"))",
+     "legendFormat": "{{interface_name}} {{host}} {{host_port}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Malformed frames per second",
+   "description": "Fragments and undersize frames: a bad link. Oversize and jabber: an MTU mismatch (a 9000 byte frame into a 1500 byte port).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 77,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "pps",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "rate({__name__=~\"srnet_gnmi_.*ethernet_state_counters_in_(fragment|jabber|oversize|undersize)_frames\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m] keep_metric_names)",
+     "legendFormat": "{{interface_name}} {{__name__}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Discards and errors (SNMP)",
+   "description": "Interface-level discards (buffer full) and errors from IF-MIB. Out discards on a 100G port fed from a 400G port are the speed-mismatch drops.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 85,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "pps",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "rate(srnet_switch_in_discards{switch=~\"(?i)$switch\",port=~\"$port\"}[2m])",
+     "legendFormat": "{{port}} in discards"
+    },
+    {
+     "refId": "B",
+     "expr": "rate(srnet_switch_out_discards{switch=~\"(?i)$switch\",port=~\"$port\"}[2m])",
+     "legendFormat": "{{port}} out discards"
+    },
+    {
+     "refId": "C",
+     "expr": "rate(srnet_switch_in_errors{switch=~\"(?i)$switch\",port=~\"$port\"}[2m])",
+     "legendFormat": "{{port}} in errors"
+    },
+    {
+     "refId": "D",
+     "expr": "rate(srnet_switch_out_errors{switch=~\"(?i)$switch\",port=~\"$port\"}[2m])",
+     "legendFormat": "{{port}} out errors"
+    }
+   ]
+  },
+  {
+   "type": "table",
+   "title": "FEC and link state",
+   "description": "Per port: the FEC in use (RS-FEC is required at 100G and above over copper and most optics), configured speed and auto-negotiation. This SONiC build does not expose FEC corrected or uncorrected codeword counters, so pre-FEC bit error rate is not available; CRC errors are the post-FEC signal.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 85,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "options": {
+    "showHeader": true,
+    "sortBy": [
+     {
+      "displayName": "interface_name"
+     }
+    ]
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "{__name__=~\"srnet_gnmi_.*ethernet_state_(oper_fec|port_fec|port_speed|negotiated_port_speed|auto_negotiate|unreliable_los|advertised_speed)$\",source=~\"(?i)$switch\",interface_name=~\"$port\"}",
+     "format": "table",
+     "instant": true
+    }
+   ],
+   "transformations": [
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true,
+       "__name__": true,
+       "source": true,
+       "subscription_name": true,
+       "job": true,
+       "instance": true
+      }
+     }
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Ingress frame sizes",
+   "description": "Histogram of received frame sizes as rates. RDMA traffic at MTU 4096 lands in the 2048 to 4095 bucket; 9000 byte MTU in 8192 and up.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 93,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "pps",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000,
+      "stacking": {
+       "mode": "normal"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "label_replace(rate({__name__=~\"srnet_gnmi_.*ethernet_state_counters_in_frames_.*_octets\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m] keep_metric_names), \"size\", \"$1\", \"__name__\", \".*in_frames_(.*)_octets\")",
+     "legendFormat": "{{interface_name}} {{size}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Egress frame sizes",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 93,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "pps",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000,
+      "stacking": {
+       "mode": "normal"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "label_replace(rate({__name__=~\"srnet_gnmi_.*ethernet_state_counters_out_frames_.*_octets\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m] keep_metric_names), \"size\", \"$1\", \"__name__\", \".*out_frames_(.*)_octets\")",
+     "legendFormat": "{{interface_name}} {{size}}"
+    }
+   ]
+  },
+  {
+   "type": "row",
+   "title": "Optics",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 101,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "timeseries",
+   "title": "Transceiver temperature",
+   "description": "Module case temperature from the switch side DOM. Most QSFP modules alarm at 70 to 75 C.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 102,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "celsius",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000,
+      "thresholdsStyle": {
+       "mode": "line"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 65
+       },
+       {
+        "color": "red",
+        "value": 70
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "{__name__=~\"srnet_gnmi_.*component_state_temperature_instant\",source=~\"(?i)$switch\",name=~\"$port\"}",
+     "legendFormat": "{{name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Receive power",
+   "description": "Optical receive power per module (per lane where the module reports it). Falling receive power on one port means a dirty connector or a failing far-end laser.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 102,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "dBm",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "{__name__=~\"srnet_gnmi_.*transceiver.*input_power.*instant\",source=~\"(?i)$switch\",name=~\"$port\"}",
+     "legendFormat": "{{name}} {{__name__}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Transmit power",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 110,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "dBm",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "{__name__=~\"srnet_gnmi_.*transceiver.*output_power.*instant\",source=~\"(?i)$switch\",name=~\"$port\"}",
+     "legendFormat": "{{name}} {{__name__}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Laser bias current",
+   "description": "Rising bias current at constant output power is a laser ageing out.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 110,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "mA",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "{__name__=~\"srnet_gnmi_.*transceiver.*laser_bias_current.*instant\",source=~\"(?i)$switch\",name=~\"$port\"}",
+     "legendFormat": "{{name}} {{__name__}}"
+    }
+   ]
+  },
+  {
+   "type": "row",
+   "title": "Switch health",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 118,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "timeseries",
+   "title": "CPU and memory",
+   "description": "Control-plane CPU and memory. Telemetry streaming itself costs a little CPU; a busy CPU does not slow the data plane but delays counters.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 119,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000,
+      "thresholdsStyle": {
+       "mode": "line"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 85
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "srnet_switch_cpu_pct{switch=~\"(?i)$switch\"}",
+     "legendFormat": "CPU %"
+    },
+    {
+     "refId": "B",
+     "expr": "srnet_switch_mem_used_pct{switch=~\"(?i)$switch\"}",
+     "legendFormat": "memory used %"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Temperature sensors",
+   "description": "Every TEMP sensor the switch reports (ASIC, inlet, outlet, CPU) against the lowest high-threshold.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 119,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "celsius",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "srnet_switch_temp_c{switch=~\"(?i)$switch\"}",
+     "legendFormat": "{{sensor}}"
+    },
+    {
+     "refId": "B",
+     "expr": "max(srnet_switch_temp_high_c{switch=~\"(?i)$switch\"})",
+     "legendFormat": "high limit"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Fans and PSUs OK",
+   "description": "1 = present and operating, 0 = failed or missing.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 127,
+    "w": 12,
+    "h": 6
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": 60000
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "srnet_switch_fan_ok{switch=~\"(?i)$switch\"}",
+     "legendFormat": "{{fan}}"
+    },
+    {
+     "refId": "B",
+     "expr": "srnet_switch_psu_ok{switch=~\"(?i)$switch\"}",
+     "legendFormat": "{{psu}}"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Uptime",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 127,
+    "w": 6,
+    "h": 6
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "graphMode": "area",
+    "colorMode": "value"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max(srnet_switch_uptime_seconds{switch=~\"(?i)$switch\"})"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "gNMI series per switch",
+   "description": "How many distinct series gnmic delivered in the last two minutes. A drop to 0 means the stream died (see the Switches page).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "srnet-vm"
+   },
+   "gridPos": {
+    "x": 18,
+    "y": 127,
+    "w": 6,
+    "h": 6
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": ""
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "graphMode": "area",
+    "colorMode": "value"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "count(last_over_time({__name__=~\"srnet_gnmi_.+\",source=~\"(?i)$switch\"}[2m]))"
+    }
+   ]
+  }
+ ]
+}

@@ -259,6 +259,7 @@ func (s *Server) uploadRelease(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.store.Audit(r.Context(), "release.upload", map[string]any{"version": rel.Version, "arches": rel.Arches, "by": who(r).Name})
+	s.pruneReleases(r.Context(), who(r).Name)
 	writeJSON(w, rel)
 }
 

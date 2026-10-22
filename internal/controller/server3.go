@@ -53,7 +53,11 @@ func (s *Server) agentRelease(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listReleases(w http.ResponseWriter, r *http.Request) {
-	out := api.ReleaseList{Current: version.Version, Mirrored: s.rel.Mirrored()}
+	out := api.ReleaseList{Current: version.Version, Mirrored: s.rel.Mirrored(), Keep: s.releaseKeep()}
+	counts := s.rel.versionCounts()
+	for i := range out.Mirrored {
+		out.Mirrored[i].InUse = counts[out.Mirrored[i].Version]
+	}
 	if r.URL.Query().Get("check") == "1" {
 		if v, err := s.rel.LatestOnGitHub(r.Context()); err == nil {
 			out.Latest = v
@@ -87,6 +91,7 @@ func (s *Server) fetchRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.store.Audit(r.Context(), "release.fetch", rel)
+	s.pruneReleases(r.Context(), who(r).Name)
 	writeJSON(w, rel)
 }
 

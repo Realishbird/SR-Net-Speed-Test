@@ -97,8 +97,33 @@ Agents sample every second during a run and every 15 s otherwise, and the contro
 - NIC drop, pause, FEC and error counters from `ethtool -S`, link speed and carrier flaps
 - Transceiver DOM from `ethtool -m`: temperature, voltage, per-channel TX bias and optical power; power is reported as `dom_power_w` when the module measures it and `dom_power_rated_max_w` when only a rating is available
 - CPU, memory, load and every `hwmon` temperature
+- The NIC chip temperature per port (`nic_temp_c`, the hwmon sensor behind the port's PCI function, mlx5 and bnxt alike) next to the optic's DOM temperature; the Topology page shows both per port, amber near the limit and red above it (`nic_max_c` in `controller.json`, default 100; `transceiver_max_c`, default 70), and a `nic_hot` alert opens above the limit
+- The PCIe link behind each port: generation and width negotiated against what the card and the slot support (`pcie_link_gen`, `pcie_link_width`) plus the AER error counters (`pcie_aer_correctable`, `pcie_aer_nonfatal`, `pcie_aer_fatal`)
 
-Grafana is provisioned with VictoriaMetrics as its data source and four dashboards: **Live run** (pick a run id), **Link health** (error counters, optics and flaps per host over time), **Fleet health** and **Trends** (every finished run's result per link, with the baseline it was compared against).
+Grafana is provisioned with VictoriaMetrics as its data source and five dashboards: **Live run** (pick a run id), **Link health** (error counters, optics and flaps per host over time), **Fleet health**, **Trends** (every finished run's result per link, with the baseline it was compared against) and **Switch** (see below).
+
+### Raw export
+
+Every sample, as collected, is downloadable: the run page has **Raw data (CSV)** and **Raw (zip)** buttons, suite runs have a **Raw data** link, and the CLI has `srnet raw`. One row per reading, counters as counted (not pre-converted to rates), covering the run plus 30 s either side, from every host in the run and from the switch ports on its path:
+
+```
+time,unix_ms,source,name,port,rdma_dev,port_label,fabric,metric,sub,run_id,value,labels
+2026-10-22T02:44:33.770Z,1792637073770,host,Dell Spark 1,enp1s0f0np0,rocep1s0f0,P1-B1-A,100,rdma_rx_bytes,,9,1899102384,configured=yes
+2026-10-22T02:44:30.000Z,1792637070000,switch,z9864F,Ethernet0,,,,gnmi_openconfig_..._counters_in_octets,,,884213312,source=z9864f
+```
+
+```bash
+srnet raw 42 -o run42.csv                       # host and mapped switch samples
+srnet raw 42 --format zip -o run42.zip          # manifest.json (run, legs, hosts, switches, fabric profiles) + host_samples.csv + switch_samples.csv
+srnet raw 42 --format jsonl --switch all        # VictoriaMetrics export lines, every switch port
+srnet raw --from -1h --hosts "Dell Spark 1"     # a time window instead of a run (up to 7 days), idle telemetry included
+```
+
+The same through the API: `GET /api/v1/runs/{id}/raw?format=csv|jsonl|zip&switch=mapped|all|none`, `GET /api/v1/suite-runs/{id}/raw.zip` (one `run-<id>/raw.zip` per run inside) and `GET /api/v1/export?from=&to=&hosts=&switch=&format=` (RFC 3339, unix seconds, or relative like `-30m`). Exports stream, so a long run with many hosts does not need memory on the controller.
+
+### PCIe check
+
+The Hosts page shows each port's PCIe link ("Gen5 x4") with the card's maximum on hover, red when the link trained below what the card can do. The Fabric check page has a **PCIe** row per cable: fail when the link is downtrained, warn when the slot is narrower than the card or when the usable PCIe bandwidth (per-lane rate × lanes × 128/130 × 0.85, about 108 Gbps for Gen5 x4, 215 for Gen4 x16, 430 for Gen5 x16) is below the port's line rate. A `pcie_degraded` alert opens when a sampled link drops below the card's maximum while running. On a DGX Spark each half of the ConnectX-7 sits behind its own Gen5 x4 link, which caps one half at roughly 100 Gbps: that is why both halves are needed for 200G.
 
 ## Baselines and regression
 
@@ -129,6 +154,14 @@ systemctl restart srnet-controller
 
 With gNMI credentials the controller writes `/etc/srnet/gnmic.yaml` (a path unit restarts `gnmic` when it changes) and `gnmic` streams OpenConfig interface counters every 30 s and transceiver state every 60 s as `srnet_gnmi_*` metrics (the fastest rates Enterprise SONiC 4.5 accepts; the switch logs `Invalid Sample Interval` for anything shorter). With only an SNMP community the controller polls IF-MIB every 30 s as `srnet_switch_*` metrics (octets, errors, discards, oper status, derived Gbps). Both can be set; gNMI is preferred. The switch is only ever read.
 
+Because the switch refuses gNMI samples under 30 s, the controller also polls the ports that are up over SNMP every 2 s while a run is active (`switch_fast_poll_sec` in `controller.json`, `-1` to turn it off): in/out octets, errors and discards, so the switch's rate lines up with the hosts' one-second counters on the Live run dashboard and in the raw export. Set both an SNMP community and gNMI credentials to get this.
+
+For each cabled port gnmic also streams, in the one per-port subscription (several streams at once make this SONiC drop one with "queue disposed"): egress queue counters and watermarks (transmit, dropped, ECN-marked and WRED-dropped packets, watermark and periodic watermark in bytes and percent), ingress priority-group watermarks (shared and headroom), PFC counters and the PFC watchdog, the Ethernet error counters (CRC, fragments, jabbers, oversize, undersize) with the in/out frame-size histogram, and the Ethernet state (FEC mode, advertised speed, link-down reason). Switch CPU and memory stream every 30 s. PSUs, fans, temperature sensors, uptime and the last reboot cause are keyed by names the switch invents, so the controller finds the valid component names once (probing `PSU n`, `FAN n`, `TEMP n`) and polls them every minute, written as `srnet_switch_temp_c{sensor}`, `srnet_switch_fan_ok{fan}`, `srnet_switch_psu_ok{psu}`, `srnet_switch_cpu_pct`, `srnet_switch_mem_used_pct` and `srnet_switch_uptime_seconds`; the Switches page shows them as a health strip. This SONiC build does not expose FEC corrected/uncorrected counters or pre-FEC BER, per-lane optic power, or buffer-pool totals; CRC errors plus optic power and bias trends are the signals for a bad cable or optic. Every minute the controller also writes `srnet_switch_port_info{switch, port, vlan, host, host_port, fabric}` so dashboard legends can say which host hangs off each switch port.
+
+### Switch dashboard
+
+**SR-Net: Switch** in Grafana is built only from what the switch itself reports: pick the switch and ports at the top (the **Switch view** button on a run page opens it on that run's time range and ports, and runs show as annotations). Rows: overview stats (ports up, total in/out, queue drops, PFC pauses, CRC errors, CPU, memory, hottest sensor and optic, failed fans or PSUs, uptime), throughput per port (gNMI 30 s, SNMP 2 s during runs, utilisation against line rate, packets, average frame size), congestion and buffers (drops, ECN marks and transmit packets per queue, queue and priority-group watermarks), PFC (pause frames per priority, enable and watchdog table), errors and link quality (CRC, malformed frames, SNMP discards and errors, FEC and link state table, in/out frame-size histograms), optics (temperature with 65/70 thresholds, receive and transmit power, bias current) and switch health (CPU, memory, every temperature sensor against its limit, fans and PSUs). Together with the per-leg switch figures on a run page this is the switch review: throughput against line rate, drops by queue, buffer peaks, PFC, errors and optics per port.
+
 On Enterprise SONiC the telemetry server is on by default (port 8080, TLS with a self-signed certificate, password authentication with the switch's user accounts, mgmt VRF); `show ip telemetry` on the switch confirms it. For SNMP, create a read-only community, for example `snmp-server community srnetro group ro` in `configure terminal`. To test gNMI from the controller: `gnmic -a <switch>:8080 -u admin -p '<password>' --skip-verify capabilities`.
 
 Hosts run `lldpd`, so each port's switch neighbour and port id show in `srnet hosts` and the UI without a cable map. The Topology page draws the result: the switch with the ports in use, every host with its ports, CPU, load and memory, lines coloured by fabric and sized by the live rate, and the legs of a run in progress highlighted. Below it, the switch ports in use with their in/out rate, discards and errors (gNMI, or SNMP when that is all there is), and the hosts with their switch ports. `GET /api/v1/topology` returns the same data. Hosts installed before v0.1.18 need `install.sh` run once more: `lldpctl` is executable by group adm only, and the agent service now runs with that supplementary group (the earlier sudo rule never worked, because the service's capability bounding set leaves sudo unable to change group).
@@ -145,6 +178,8 @@ srnet fetch-release              # mirror the latest release (or: srnet fetch-re
 srnet update --version v0.4.0    # every host; or --host spark-01,spark-02 / --tag client
 srnet updates                    # job history
 ```
+
+Mirrored releases clean themselves up: the newest 3 stay (`release_keep` in `controller.json`; `0` keeps everything), plus any version an agent still runs and the target of a running update job. The prune runs after each mirror or upload and once a day, never during an update job, and each removal is audited (`release.prune`). The Fleet page has a **Remove** button per release (greyed out while an agent runs that version), `srnet remove-release v0.1.9` and `DELETE /api/v1/releases/{version}` do the same.
 
 The Fleet page in the UI does the same. For each host the controller waits until no test uses it, sends an update task, and the agent downloads the binary over its existing TLS session, checks the SHA-256 from the release's `SHA256SUMS`, stages it and exits. The launcher (`/usr/local/bin/srnet-agent-launch`) swaps the new binary in and keeps the old one. The controller waits up to 90 s for the host to report the new version; if it does not come back, the job marks the host failed and the launcher restores the previous binary on the next restart (a new binary that never completes a poll is rolled back). A failed host stops nothing else: the job carries on with the next host and an `update_failed` alert opens.
 
@@ -173,6 +208,12 @@ In the UI, open any finished run and click "Add to a suite" to copy its spec int
 The controller opens an alert when an agent stops reporting for 2 minutes, a port with an address leaves ACTIVE (a port with no IP is taken to be unused), error counters grow while no test runs on that port (growth during a run belongs to that run's result and does not alert; an idle-error alert closes by itself after 15 minutes without further growth), a transceiver reports 70 C or more (`transceiver_max_c` in `controller.json`), a run or suite fails, or an update fails. Alerts close themselves when the condition clears; the Alerts page has "Clear" per alert and "Clear all" for the ones that do not (a failed update, a failed run), and `srnet alerts --clear ID` / `--clear-all` do the same. `srnet alerts` and the Alerts page list them; set `alert_webhook_url` in `/etc/srnet/controller.json` to POST a JSON body (`state`, `kind`, `host`, `port`, `message`, `text`) to Slack, Teams, Alertmanager or a script on every open and resolve.
 
 Every run has a CSV and an HTML report (print to PDF from the browser): `srnet report 42 --format csv -o run42.csv`, `srnet report 42 --format html -o run42.html`, or the links on the run page.
+
+### Deleting runs
+
+Runs can be deleted to clean up: tick rows on the Runs page and **Delete selected**, or **Clean up** to pick failed and canceled runs (and runs with a fail verdict) or runs older than N days, with a preview of how many match; the run page has a **Delete** button. Each confirms with the run names and offers to also delete the run's per-second samples from VictoriaMetrics (only the series stamped with that run id; idle telemetry of the same ports stays). Queued and running runs are skipped, a baseline needs the "even if a baseline" tick, legs go with the run, suite runs drop the id from their list, and every deletion is audited with the run's name, status and verdict. From the shell: `srnet delete 1 4`, `srnet delete --failed`, `srnet delete --older-than 30d --samples --yes`; the API is `DELETE /api/v1/runs/{id}?force=1&samples=1` and `POST /api/v1/runs/delete {ids | failed, older_than_days, force, samples}`.
+
+The Fabric check only grades cables in use: a port with an IP, a label or a fabric, that is ACTIVE if it reports a state, and not the twin PCIe function that shares a switch port with a configured port on the same host (a DGX Spark's second half). Open `fabric_mismatch` alerts for ports that leave that set close on the next check.
 
 ## Sign-in, roles and API tokens
 

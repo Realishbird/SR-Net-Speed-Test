@@ -37,7 +37,7 @@ func TestUIAndStatusNeedAdminLogin(t *testing.T) {
 	if r, _ = http.Get(srv.URL + "/healthz"); r.StatusCode != 200 {
 		t.Errorf("healthz: %d", r.StatusCode)
 	}
-	if d, err := GrafanaDashboards(); err != nil || len(d) != 4 {
+	if d, err := GrafanaDashboards(); err != nil || len(d) != 5 {
 		t.Errorf("dashboards: %d %v", len(d), err)
 	}
 }

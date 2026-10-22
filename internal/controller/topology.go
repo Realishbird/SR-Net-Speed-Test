@@ -307,14 +307,17 @@ func gnmiSource(bySource map[string]SwitchConfig, source string) (SwitchConfig, 
 // gnmicGet runs one gNMI Get against every switch in the gnmic config and
 // returns gnmic's JSON rendering of the answers. The config file is the
 // one gnmic's own subscriptions use, so the credentials live in one place.
-func gnmicGet(ctx context.Context, cfg Config, path string) ([]byte, error) {
+func gnmicGet(ctx context.Context, cfg Config, path string, more ...string) ([]byte, error) {
 	if _, err := os.Stat(cfg.GnmicConfigPath); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, cfg.GnmicPath, "--config", cfg.GnmicConfigPath, "--log=false", "--encoding", "json_ietf", "--format", "json",
-		"get", "--path", path)
+	args := []string{"--config", cfg.GnmicConfigPath, "--log=false", "--encoding", "json_ietf", "--format", "json", "get", "--path", path}
+	for _, p := range more {
+		args = append(args, "--path", p)
+	}
+	cmd := exec.CommandContext(ctx, cfg.GnmicPath, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	raw, err := cmd.Output()
@@ -557,6 +560,8 @@ func (s *Server) switchPollLoop(ctx context.Context) {
 			report("vlans", err, 0)
 		}
 		s.refreshQoS(ctx)
+		s.pushPortInfo()
+		s.pollSwitchHealth(ctx)
 		if s.alerts != nil {
 			s.fabricAlerts(ctx, s.fabricCheck(ctx))
 		}
@@ -629,7 +634,7 @@ func collapseTwins(ports []api.TopoHostPort) {
 // name lldpd saw, which may differ in case from the configured switch name,
 // or be missing when LLDP has not run yet; with a single switch configured
 // an unknown chassis name is taken to be that switch.
-func buildTopology(hosts []hostRec, switches []SwitchConfig, ports map[string]*api.TopoSwitchPort, source map[string]string, live func(portID int64) (tx, rx float64), hostLive func(host string) (api.HostStats, bool), online func(agentID int64) bool) api.Topology {
+func buildTopology(hosts []hostRec, switches []SwitchConfig, ports map[string]*api.TopoSwitchPort, source map[string]string, live func(portID int64) (tx, rx float64), temps func(portID int64) (optic, nic float64), hostLive func(host string) (api.HostStats, bool), online func(agentID int64) bool) api.Topology {
 	t := api.Topology{At: time.Now(), Switches: []api.TopoSwitch{}, Hosts: []api.TopoHost{}, Runs: []api.TopoRun{}}
 	resolveSwitch := func(chassis string) string { return resolveSwitchName(switches, chassis) }
 	used := map[string]bool{}
@@ -650,6 +655,9 @@ func buildTopology(hosts []hostRec, switches []SwitchConfig, ports map[string]*a
 				}
 			}
 			tp.TxGbps, tp.RxGbps = live(p.ID)
+			if temps != nil {
+				tp.OpticC, tp.NicC = temps(p.ID)
+			}
 			if p.LLDPPort != "" {
 				if tp.Switch = resolveSwitch(p.LLDPSwitch); tp.Switch != "" {
 					tp.SwitchPort = p.LLDPPort
@@ -720,7 +728,8 @@ func (s *Server) topology(w http.ResponseWriter, r *http.Request) {
 	}
 	s.fillLLDP(r.Context(), hosts)
 	ports, source, err := s.switchPortStats(r.Context())
-	t := buildTopology(hosts, s.switchList(), ports, source, s.metrics.live, s.metrics.hostLive, s.hub.online)
+	t := buildTopology(hosts, s.switchList(), ports, source, s.metrics.live, s.metrics.temperatures, s.metrics.hostLive, s.hub.online)
+	t.OpticMax, t.NicMax = s.alerts.hotC, s.alerts.nicHotC
 	s.mu.Lock()
 	vlans, lldp := s.vlans, s.lldp
 	s.mu.Unlock()

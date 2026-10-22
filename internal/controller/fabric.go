@@ -575,8 +575,8 @@ func (s *Server) fabricCheck(ctx context.Context) api.FabricCheck {
 	}
 	for _, h := range hosts {
 		for _, hp := range h.Ports {
-			if len(hp.Addrs) == 0 && hp.LLDPPort == "" {
-				continue // an empty second port or an uncabled PCIe function
+			if !cableInUse(h, hp) {
+				continue
 			}
 			var inv *api.Port
 			for i := range h.inv.Ports {
@@ -694,6 +694,24 @@ func checkCable(v hostPortView, fabric, swName, swPort string, spc *switchPortCf
 			wantHost, wantSwitch = max(prof.HostMTU, 4200), max(prof.SwitchMTU, 4200)
 		}
 		c := api.SettingCheck{Name: "MTU", Want: fmt.Sprintf("host >= %d, switch >= %d", wantHost, wantSwitch), Host: num(v.mtu), State: "unknown"}
+		defer func() {
+			// PCIe: the NIC's link must be what the card supports and wide
+			// enough for the port speed; a downtrained link (reseat the card,
+			// a bad riser) or a narrow slot caps every test on this port.
+			pc := api.SettingCheck{Name: "PCIe", Want: "link at the card's maximum, usable bandwidth >= port speed", State: "unknown", Note: "agent has not reported the PCIe link (older agent)"}
+			if l := v.port.PCIe; l != nil {
+				pc.Host, pc.State, pc.Note = fmt.Sprintf("%s (%.0f Gbps usable)", l.String(), l.UsableGbps), "ok", ""
+				switch {
+				case l.Downtrained() && l.SlotGen > 0 && (l.SlotGen < l.MaxGen || l.SlotWidth < l.MaxWidth) && l.Gen >= min(l.SlotGen, l.MaxGen) && l.Width >= min(l.SlotWidth, l.MaxWidth):
+					pc.State, pc.Note = "bad", fmt.Sprintf("the slot offers Gen%d x%d but the card supports Gen%d x%d: move the card to a faster slot", l.SlotGen, l.SlotWidth, l.MaxGen, l.MaxWidth)
+				case l.Downtrained():
+					pc.State, pc.Note = "bad", fmt.Sprintf("link trained to %s but the card supports Gen%d x%d: reseat the card or check the riser", l.String(), l.MaxGen, l.MaxWidth)
+				case v.port.SpeedMbps > 0 && l.UsableGbps < float64(v.port.SpeedMbps)/1000*0.98:
+					pc.State, pc.Note = "bad", fmt.Sprintf("%s carries about %.0f Gbps, below the %dG port: PCIe caps this port", l.String(), l.UsableGbps, v.port.SpeedMbps/1000)
+				}
+			}
+			add(pc)
+		}()
 		if spc != nil && spc.MTU > 0 {
 			c.Switch = num(spc.MTU)
 		}
@@ -922,9 +940,48 @@ func prioList(on []int) string {
 	return strings.Join(parts, ",")
 }
 
-// fabricAlerts opens a fabric_mismatch alert per failing cable and resolves
-// the ones that pass again.
+// cableInUse says whether a host port is one a test can use and so one the
+// fabric check should hold to a profile: it has an address, a label or a
+// fabric set, its link is up, and it is not the twin PCIe function of a
+// configured port on the same cable (the Sparks' ConnectX-7 shows its one
+// port twice; the switch sees both on the same switch port, and the half
+// with no address sits at the default MTU and must not raise an alert).
+func cableInUse(h hostRec, hp api.HostPort) bool {
+	if len(hp.Addrs) == 0 && hp.Label == "" && hp.Fabric == "" {
+		return false
+	}
+	if hp.State != "" && hp.State != "ACTIVE" {
+		return false
+	}
+	if hp.LLDPSwitch != "" && hp.LLDPPort != "" && len(hp.Addrs) == 0 {
+		for _, o := range h.Ports {
+			if o.Netdev != hp.Netdev && len(o.Addrs) > 0 && strings.EqualFold(o.LLDPSwitch, hp.LLDPSwitch) && strings.EqualFold(o.LLDPPort, hp.LLDPPort) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// fabricAlerts opens a fabric_mismatch alert per failing cable, resolves
+// the ones that pass again, and closes alerts on cables the check no
+// longer lists (a port that lost its address, or an unused twin half).
 func (s *Server) fabricAlerts(ctx context.Context, fc api.FabricCheck) {
+	listed := map[string]bool{}
+	for _, c := range fc.Cables {
+		port := c.Netdev
+		if c.Label != "" {
+			port = c.Label
+		}
+		listed[c.Host+"|"+port] = true
+	}
+	if open, err := s.store.Alerts(ctx, true, 1000); err == nil {
+		for _, a := range open {
+			if a.Kind == "fabric_mismatch" && !listed[a.Host+"|"+a.Port] {
+				s.alerts.resolve(ctx, "fabric_mismatch", a.Host, a.Port)
+			}
+		}
+	}
 	for _, c := range fc.Cables {
 		port := c.Netdev
 		if c.Label != "" {
@@ -1097,9 +1154,12 @@ func (m *metrics) qosDeltas(ctx context.Context, sw SwitchConfig, port string, f
 		return out
 	}
 	src := fmt.Sprintf("(?i)(%s|%s|%s:%d)", regexp.QuoteMeta(sw.Name), regexp.QuoteMeta(sw.Address), regexp.QuoteMeta(sw.Address), sw.GNMIPort)
-	sel := fmt.Sprintf(`{__name__=~"%s",source=~"%s",interface_id="%s"}`, qosCounterRe, src, port)
+	// gnmic names the list key interface_interface_id on this SONiC (older
+	// builds wrote interface_id); ask for both.
+	sel1 := fmt.Sprintf(`{__name__=~"%s",source=~"%s",interface_interface_id="%s"}`, qosCounterRe, src, port)
+	sel2 := fmt.Sprintf(`{__name__=~"%s",source=~"%s",interface_id="%s"}`, qosCounterRe, src, port)
 	snap := func(t time.Time) map[string]float64 {
-		rows, err := m.vmQuery(ctx, fmt.Sprintf(`last_over_time(%s[90s] @ %d)`, sel, t.Unix()))
+		rows, err := m.vmQuery(ctx, fmt.Sprintf(`last_over_time(%s[90s] @ %d) or last_over_time(%s[90s] @ %d)`, sel1, t.Unix(), sel2, t.Unix()))
 		if err != nil {
 			return nil
 		}
@@ -1113,7 +1173,11 @@ func (m *metrics) qosDeltas(ctx context.Context, sw SwitchConfig, port string, f
 				}
 			}
 			where := ""
-			if q := row.Labels["name"]; strings.Contains(q, ":") {
+			q := row.Labels["queue_name"]
+			if q == "" {
+				q = row.Labels["name"]
+			}
+			if strings.Contains(q, ":") {
 				where = "queue " + q[strings.LastIndex(q, ":")+1:] + " "
 			} else if p := row.Labels["dot1p"]; p != "" {
 				where = "prio " + p + " "
