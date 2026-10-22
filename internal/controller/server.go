@@ -169,6 +169,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/runs", s.admin(s.createRun))
 	mux.HandleFunc("GET /api/v1/runs/{id}", s.admin(s.getRun))
 	mux.HandleFunc("POST /api/v1/runs/{id}/cancel", s.admin(s.cancelRun))
+	mux.HandleFunc("POST /api/v1/runs/{id}/baseline", s.admin(s.setBaseline))
 	s.routes3(mux)
 	s.routesSwitches(mux)
 	return mux
@@ -649,7 +650,34 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.orch.Live(&run)
+	s.fillBaseline(r.Context(), &run)
 	writeJSON(w, run)
+}
+
+// setBaseline marks a finished run as the reference for later runs of the
+// same shape, or clears the mark. The run's result series are written again
+// so the Trends dashboard reflects the change.
+func (s *Server) setBaseline(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	var req api.BaselineRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	err := s.store.SetBaseline(r.Context(), id, req.Baseline)
+	var ue *userError
+	if errors.As(err, &ue) {
+		httpError(w, http.StatusConflict, ue.Error())
+		return
+	}
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	s.store.Audit(r.Context(), "run.baseline", map[string]any{"run_id": id, "baseline": req.Baseline})
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request) {

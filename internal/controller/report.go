@@ -19,7 +19,8 @@ func WriteRunCSV(w io.Writer, r api.Run) error {
 	cw := csv.NewWriter(w)
 	head := []string{"run_id", "run_name", "test", "status", "verdict", "leg", "stage", "client", "client_ip", "server", "server_ip", "fabric", "msg_size", "expected_gbps", "tool_gbps", "counter_gbps",
 		"lat_min_us", "lat_typical_us", "lat_avg_us", "lat_p99_us", "lat_p999_us", "lat_max_us", "retransmits", "loss_pct", "jitter_ms", "error_deltas", "leg_verdict", "note",
-		"switch_client_port", "switch_server_port", "switch_gbps", "switch_deltas", "cpu_client_avg_pct", "cpu_client_peak_pct", "cpu_server_avg_pct", "cpu_server_peak_pct"}
+		"switch_client_port", "switch_server_port", "switch_gbps", "switch_deltas", "cpu_client_avg_pct", "cpu_client_peak_pct", "cpu_server_avg_pct", "cpu_server_peak_pct",
+		"baseline_run", "baseline_value", "baseline_delta_pct"}
 	if err := cw.Write(head); err != nil {
 		return err
 	}
@@ -52,6 +53,11 @@ func WriteRunCSV(w io.Writer, r api.Run) error {
 		}
 		row = append(row, swCols...)
 		row = append(row, cpuCols...)
+		blCols := make([]string, 3)
+		if b := l.Baseline; b != nil {
+			blCols = []string{strconv.FormatInt(b.RunID, 10), f(b.Value, 2), f(b.DeltaPct, 1)}
+		}
+		row = append(row, blCols...)
 		if err := cw.Write(row); err != nil {
 			return err
 		}
@@ -103,6 +109,11 @@ th,td{border:1px solid #ccc;padding:5px 8px;text-align:left}th{background:#f2f2f
 	if !lat {
 		fmt.Fprintf(w, `<b>Aggregate</b><span>%.1f Gbps from the tool, %.1f Gbps from hardware counters%s</span>`, r.Summary.ToolGbps, r.Summary.CounterGbps, fabricHTML(r.Summary.ByFabric))
 	}
+	if r.Baseline {
+		fmt.Fprint(w, `<b>Baseline</b><span>this run is the baseline for runs of its shape</span>`)
+	} else if b := r.Summary; b.BaselineRunID != 0 {
+		fmt.Fprintf(w, `<b>Baseline</b><span>compared with run %d: %s%s</span>`, b.BaselineRunID, deltaHTML(b.DeltaPct, lat), optHTML(b.Regressed > 0, fmt.Sprintf(" · %d leg(s) regressed", b.Regressed)))
+	}
 	fmt.Fprint(w, `</div><table><tr><th>#</th><th>Client</th><th>Server</th><th>Fabric</th><th class="n">Size</th>`)
 	if lat {
 		fmt.Fprint(w, `<th class="n">Min µs</th><th class="n">Typical µs</th><th class="n">Avg µs</th><th class="n">P99 µs</th><th class="n">P99.9 µs</th><th class="n">Max µs</th>`)
@@ -114,7 +125,7 @@ th,td{border:1px solid #ccc;padding:5px 8px;text-align:left}th{background:#f2f2f
 			fmt.Fprint(w, `<th class="n">Loss %</th><th class="n">Jitter ms</th>`)
 		}
 	}
-	fmt.Fprint(w, `<th>Switch path</th>`)
+	fmt.Fprint(w, `<th class="n">Baseline</th><th>Switch path</th>`)
 	if !lat {
 		fmt.Fprint(w, `<th class="n">Switch Gbps</th>`)
 	}
@@ -136,7 +147,11 @@ th,td{border:1px solid #ccc;padding:5px 8px;text-align:left}th{background:#f2f2f
 				fmt.Fprintf(w, `<td class="n">%.2f</td><td class="n">%.3f</td>`, l.LossPct, l.JitterMs)
 			}
 		}
-		fmt.Fprintf(w, `<td class="muted">%s</td>`, e(switchPath(l.Switch)))
+		bl := ""
+		if b := l.Baseline; b != nil {
+			bl = fmt.Sprintf(`%.1f <span class="%s">%+.1f%%</span>`, b.Value, map[bool]string{true: "warn", false: "muted"}[b.Regressed], b.DeltaPct)
+		}
+		fmt.Fprintf(w, `<td class="n">%s</td><td class="muted">%s</td>`, bl, e(switchPath(l.Switch)))
 		if !lat {
 			sw := ""
 			if l.Switch != nil && l.Switch.Gbps > 0 {
@@ -165,6 +180,18 @@ th,td{border:1px solid #ccc;padding:5px 8px;text-align:left}th{background:#f2f2f
 		fmt.Fprintf(w, `<td class="n muted">%s</td><td class="muted">%s</td><td class="%s">%s</td><td class="muted">%s</td></tr>`, e(cpu), e(errs), e(l.Verdict), e(l.Verdict), e(note))
 	}
 	fmt.Fprint(w, `</table></body></html>`)
+}
+
+// deltaHTML words an aggregate change against a baseline.
+func deltaHTML(pct float64, lat bool) string {
+	word := "faster"
+	if pct < 0 {
+		word = "slower"
+	}
+	if lat {
+		word = map[bool]string{true: "lower p99", false: "higher p99"}[pct >= 0]
+	}
+	return fmt.Sprintf("%.1f%% %s", math.Abs(pct), word)
 }
 
 func errHTML(s string) string {

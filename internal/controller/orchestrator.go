@@ -46,11 +46,12 @@ type legPlan struct {
 }
 
 type activeRun struct {
-	id     int64
-	spec   api.RunSpec
-	plans  []*legPlan // every leg, in order
-	stages [][]*legPlan
-	cancel context.CancelFunc
+	id      int64
+	spec    api.RunSpec
+	plans   []*legPlan // every leg, in order
+	stages  [][]*legPlan
+	cancel  context.CancelFunc
+	summary api.RunSummary // filled by score, extended by applyBaseline
 }
 
 // Orchestrator turns run specs into agent tasks and collects the results.
@@ -137,6 +138,12 @@ func applyDefaults(s *api.RunSpec) error {
 	}
 	if s.MaxLossPct == 0 {
 		s.MaxLossPct = 1
+	}
+	if s.RegressPct == 0 {
+		s.RegressPct = 5
+	}
+	if s.RegressPct < 0 || s.RegressPct > 100 {
+		return errors.New("regression allowance must be between 0 and 100 percent")
 	}
 	if s.DurationSec < 5 || s.DurationSec > 24*3600 {
 		return errors.New("duration must be between 5 s and 24 h")
@@ -560,13 +567,19 @@ func (o *Orchestrator) execute(ctx context.Context, ar *activeRun) {
 	}
 	o.sendCancels(ar) // stops any stragglers; a no-op on agents with nothing running
 	sum, verdict := o.score(ar)
+	ar.summary = sum
 	if status != "done" {
 		verdict = "fail"
+	} else {
+		verdict = o.applyBaseline(bg, ar, verdict)
 	}
 	for _, p := range ar.plans {
 		o.store.SaveLeg(bg, p.leg, p.clientRes, p.serverRes)
 	}
-	o.store.FinishRun(bg, ar.id, status, verdict, errMsg, sum)
+	o.store.FinishRun(bg, ar.id, status, verdict, errMsg, ar.summary)
+	if status == "done" {
+		o.publishResult(bg, ar.id)
+	}
 	log.Printf("run %d %s: %s, %.1f Gbps aggregate", ar.id, status, verdict, sum.ToolGbps)
 }
 

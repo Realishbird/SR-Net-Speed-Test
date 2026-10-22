@@ -94,7 +94,11 @@ Agents sample every second during a run and every 15 s otherwise, and the contro
 - Transceiver DOM from `ethtool -m`: temperature, voltage, per-channel TX bias and optical power; power is reported as `dom_power_w` when the module measures it and `dom_power_rated_max_w` when only a rating is available
 - CPU, memory, load and every `hwmon` temperature
 
-Grafana is provisioned with VictoriaMetrics as its data source and three dashboards: **Live run** (pick a run id), **Link health** (error counters, optics and flaps per host over time) and **Fleet health**.
+Grafana is provisioned with VictoriaMetrics as its data source and four dashboards: **Live run** (pick a run id), **Link health** (error counters, optics and flaps per host over time), **Fleet health** and **Trends** (every finished run's result per link, with the baseline it was compared against).
+
+## Baselines and regression
+
+Open a finished run and click **Set as baseline** (or `srnet baseline <id>`). Every later run of the same shape (test, direction, QPs, MTU) is compared leg by leg with the newest baseline: the run page and the CSV and HTML reports show the baseline figure and the change in percent, and a leg that falls more than the run's allowance behind (default 5%, `regress_pct` in the spec, "Warn % behind baseline" on the New run form) warns with a note naming the baseline run. Latency tests compare p99, lower is better. A leg matches when its client, server and message size match, so a single-link run is compared with the matching leg of a baseline fan-out. Each finished leg is also written to VictoriaMetrics as `srnet_result_*` series for the Trends dashboard. The **Nightly acceptance** button on the Suites page creates a write, send and read suite between chosen hosts and schedules it, which is the acceptance suite the plan's Phase 3 gate asks for.
 
 ## Switch telemetry (Enterprise SONiC)
 

@@ -263,6 +263,7 @@ type RunSpec struct {
 	PassPct     float64   `json:"pass_pct"`
 	MaxLatP99Us float64   `json:"max_lat_p99_us,omitempty"` // latency tests fail above this when set
 	MaxLossPct  float64   `json:"max_loss_pct,omitempty"`   // udp tests fail above this (default 1)
+	RegressPct  float64   `json:"regress_pct,omitempty"`    // warn when a leg is this much worse than its baseline (default 5)
 }
 
 type LegSpec struct {
@@ -274,8 +275,9 @@ type Run struct {
 	ID        int64      `json:"id"`
 	Name      string     `json:"name"`
 	Spec      RunSpec    `json:"spec"`
-	Status    string     `json:"status"`  // queued | running | done | failed | canceled
-	Verdict   string     `json:"verdict"` // pass | warn | fail | ""
+	Status    string     `json:"status"`   // queued | running | done | failed | canceled
+	Verdict   string     `json:"verdict"`  // pass | warn | fail | ""
+	Baseline  bool       `json:"baseline"` // marked as the reference for runs of the same shape
 	Error     string     `json:"error,omitempty"`
 	CreatedAt time.Time  `json:"created_at"`
 	StartedAt *time.Time `json:"started_at,omitempty"`
@@ -289,6 +291,11 @@ type RunSummary struct {
 	CounterGbps float64            `json:"counter_gbps"`
 	ByFabric    map[string]float64 `json:"by_fabric,omitempty"`
 	LiveGbps    float64            `json:"live_gbps,omitempty"`
+	// Comparison with the newest baseline run of the same shape, when one exists.
+	BaselineRunID int64   `json:"baseline_run_id,omitempty"`
+	BaselineGbps  float64 `json:"baseline_gbps,omitempty"` // the baseline's aggregate over the legs matched here
+	DeltaPct      float64 `json:"delta_pct,omitempty"`     // aggregate change against the baseline, in percent (+ is faster)
+	Regressed     int     `json:"regressed,omitempty"`     // legs that fell behind their baseline by more than the allowance
 }
 
 type Leg struct {
@@ -310,8 +317,9 @@ type Leg struct {
 	LossPct      float64          `json:"loss_pct,omitempty"`
 	JitterMs     float64          `json:"jitter_ms,omitempty"`
 	ErrorDeltas  map[string]int64 `json:"error_deltas,omitempty"`
-	Switch       *LegSwitch       `json:"switch,omitempty"` // switch ports and counters, when LLDP and switch telemetry exist
-	CPU          *LegCPU          `json:"cpu,omitempty"`    // host CPU during the test, when the agents reported it
+	Switch       *LegSwitch       `json:"switch,omitempty"`   // switch ports and counters, when LLDP and switch telemetry exist
+	CPU          *LegCPU          `json:"cpu,omitempty"`      // host CPU during the test, when the agents reported it
+	Baseline     *LegBaseline     `json:"baseline,omitempty"` // the same leg in the baseline run, when one matched
 	Verdict      string           `json:"verdict"`
 	Note         string           `json:"note,omitempty"`
 }
@@ -534,6 +542,21 @@ type LegSwitch struct {
 	Gbps       float64            `json:"gbps"`             // average rate along the data flow, from the switch's octet counters
 	Deltas     map[string]float64 `json:"deltas,omitempty"` // "<port> <counter>": growth during the test, only when > 0
 	Note       string             `json:"note,omitempty"`
+}
+
+// LegBaseline compares a leg with the same leg (same client, server and
+// message size) of the newest baseline run of the run's shape. Value is the
+// baseline's figure: Gbps for bandwidth tests, p99 µs for latency tests.
+type LegBaseline struct {
+	RunID     int64   `json:"run_id"`
+	Value     float64 `json:"value"`
+	DeltaPct  float64 `json:"delta_pct"` // this leg against the baseline, in percent of the baseline (+ is faster, or lower latency)
+	Regressed bool    `json:"regressed"` // worse than the baseline by more than the run's allowance
+}
+
+// BaselineRequest is the body of POST /api/v1/runs/{id}/baseline.
+type BaselineRequest struct {
+	Baseline bool `json:"baseline"`
 }
 
 // LegCPU is the CPU use of both hosts during the leg, in percent.

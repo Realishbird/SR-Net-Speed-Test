@@ -166,10 +166,10 @@ func TestReportsCarrySwitchAndCPU(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(csvOut.String()), "\n")
-	if !strings.HasSuffix(lines[0], ",switch_client_port,switch_server_port,switch_gbps,switch_deltas,cpu_client_avg_pct,cpu_client_peak_pct,cpu_server_avg_pct,cpu_server_peak_pct") {
+	if !strings.HasSuffix(lines[0], ",switch_client_port,switch_server_port,switch_gbps,switch_deltas,cpu_client_avg_pct,cpu_client_peak_pct,cpu_server_avg_pct,cpu_server_peak_pct,baseline_run,baseline_value,baseline_delta_pct") {
 		t.Errorf("csv header = %s", lines[0])
 	}
-	if !strings.HasSuffix(lines[1], ",sw Ethernet8,sw Ethernet64,97.86,Ethernet64 in_discards=7,12.3,40,5,9") {
+	if !strings.HasSuffix(lines[1], ",sw Ethernet8,sw Ethernet64,97.86,Ethernet64 in_discards=7,12.3,40,5,9,,,") {
 		t.Errorf("csv row = %s", lines[1])
 	}
 	WriteRunHTML(&htmlOut, r, "test")
