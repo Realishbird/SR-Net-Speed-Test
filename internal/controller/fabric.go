@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -1073,6 +1074,14 @@ func (s *Server) putFabric(w http.ResponseWriter, r *http.Request) {
 	default:
 		httpError(w, http.StatusBadRequest, "mode must be lossless, lossy or empty")
 		return
+	}
+	if p.Subnet = strings.TrimSpace(p.Subnet); p.Subnet != "" {
+		pf, err := netip.ParsePrefix(p.Subnet)
+		if err != nil || !pf.Addr().Is4() || pf.Bits() < 8 || pf.Bits() > 30 {
+			httpError(w, http.StatusBadRequest, "subnet is an IPv4 network with its prefix length, like 172.27.100.0/24")
+			return
+		}
+		p.Subnet = pf.Masked().String()
 	}
 	if p.PFCPriority < -1 || p.PFCPriority > 7 || p.ECNQueue < -1 || p.ECNQueue > 7 || p.RoCEDSCP < -1 || p.RoCEDSCP > 63 || p.CNPDSCP < -1 || p.CNPDSCP > 63 {
 		httpError(w, http.StatusBadRequest, "priorities are 0-7 (or -1 for off), DSCPs 0-63 (or -1 for unchecked)")

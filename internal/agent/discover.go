@@ -40,6 +40,7 @@ func Inventory(ctx context.Context) api.Inventory {
 	addLLDP(ctx, inv.Ports)
 	addSettings(ctx, inv.Ports)
 	inv.Tools = toolVersions(ctx)
+	addNetplan(&inv)
 	return inv
 }
 

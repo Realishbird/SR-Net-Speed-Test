@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Realishbird/SR-Net-Speed-Test/internal/api"
@@ -53,6 +54,15 @@ type Client struct {
 	base   string
 	secret string
 	http   *http.Client
+	lastOK atomic.Int64 // unix nanoseconds of the last call the controller answered
+}
+
+// LastOK is when the controller last answered a call.
+func (c *Client) LastOK() time.Time {
+	if n := c.lastOK.Load(); n != 0 {
+		return time.Unix(0, n)
+	}
+	return time.Time{}
 }
 
 func NewClient(cfg Config) (*Client, error) {
@@ -100,6 +110,7 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any, timeo
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return &httpError{status: resp.StatusCode, msg: fmt.Sprintf("%s %s: %s: %s", method, path, resp.Status, bytes.TrimSpace(msg))}
 	}
+	c.lastOK.Store(time.Now().UnixNano())
 	if out != nil {
 		return json.NewDecoder(resp.Body).Decode(out)
 	}
@@ -178,6 +189,7 @@ func Run(ctx context.Context, cfg Config) error {
 		spool.loop(ctx)
 	}()
 
+	var netplanBusy atomic.Bool
 	log.Printf("agent %s (%s) polling %s", cfg.AgentID, version.Version, cfg.Controller)
 	backoff := time.Second
 	healthy := false
@@ -211,6 +223,20 @@ func Run(ctx context.Context, cfg Config) error {
 				}
 				continue
 			}
+			if t.Kind == api.TaskNetplan {
+				// Runs beside the poll loop: the helper waits for the agent
+				// to keep reaching the controller after the change.
+				if netplanBusy.CompareAndSwap(false, true) {
+					go func() {
+						defer netplanBusy.Store(false)
+						handleNetplan(ctx, c, runner, sampler, spool, t)
+					}()
+				} else {
+					res := api.NetplanResult{Status: "refused", Message: "another network change is still running", At: time.Now()}
+					spool.send(ctx, "/api/v1/agent/events", api.Event{TaskID: t.ID, Type: api.EventNetplanResult, Message: res.Message, Netplan: &res})
+				}
+				continue
+			}
 			runner.Handle(ctx, t)
 		}
 	}
@@ -241,6 +267,22 @@ func handleUpdate(ctx context.Context, c *Client, runner *Runner, sp *spool, t a
 	}
 	log.Printf("update to %s staged; restarting", t.Version)
 	return true
+}
+
+// handleNetplan passes a network change to the root helper, reports the
+// outcome and sends a fresh inventory so the Hosts page shows the new setup.
+func handleNetplan(ctx context.Context, c *Client, runner *Runner, sampler *Sampler, sp *spool, t api.Task) {
+	res := api.NetplanResult{Status: "failed", Message: "the task carried no change", At: time.Now()}
+	if t.Netplan != nil {
+		res = defaultNetplanEnv().runNetplanChange(ctx, *t.Netplan, runner.Active(), c.LastOK)
+	}
+	log.Printf("netplan change %d: %s: %s", res.ID, res.Status, res.Message)
+	sp.send(ctx, "/api/v1/agent/events", api.Event{TaskID: t.ID, Type: api.EventNetplanResult, Message: res.Message, Netplan: &res})
+	inv := Inventory(ctx)
+	sampler.SetPorts(inv.Ports)
+	if err := c.do(ctx, "POST", "/api/v1/agent/inventory", inv, nil, 30*time.Second); err != nil {
+		log.Printf("inventory: %v", err)
+	}
 }
 
 // spool delivers events and results in order, retrying while the controller is

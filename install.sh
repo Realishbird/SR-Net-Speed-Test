@@ -61,9 +61,11 @@ die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 if [ "$UNINSTALL" -eq 1 ]; then
   log "Removing srnet-agent"
-  systemctl disable --now srnet-agent 2>/dev/null || true
+  systemctl disable --now srnet-agent srnet-netplan.path srnet-netplan.timer 2>/dev/null || true
   rm -f /etc/systemd/system/srnet-agent.service /usr/local/bin/srnet-agent /usr/local/bin/srnet-agent-launch /etc/sudoers.d/srnet-ethtool /etc/sudoers.d/srnet-lldp
-  rm -rf /etc/srnet /var/lib/srnet
+  rm -f /etc/systemd/system/srnet-netplan.service /etc/systemd/system/srnet-netplan.path /etc/systemd/system/srnet-netplan.timer
+  rm -rf /etc/srnet /var/lib/srnet /var/lib/srnet-netplan
+  # /etc/netplan/90-srnet.yaml stays: it holds the RDMA ports' addresses.
   userdel srnet 2>/dev/null || true
   systemctl daemon-reload
   log "Done"
@@ -217,6 +219,52 @@ ConfigurationDirectory=srnet
 WantedBy=multi-user.target
 EOF
 
+# The netplan helper lets the controller's Hosts page change the addresses
+# and MTU of RDMA ports. The agent never gets root: it leaves a request in
+# /var/lib/srnet/netplan, and this root service, running the root-owned
+# binary above (never the one fleet updates stage under /var/lib/srnet),
+# checks it, refuses the management port, applies it with netplan and puts
+# the old files back unless the port comes up, a fabric peer answers and
+# the agent still reaches the controller. The timer refreshes what the
+# agent reports about each port's netplan setup.
+log "Installing the netplan helper"
+install -d -m 0750 -o srnet -g srnet /var/lib/srnet/netplan
+install -d -m 0755 -o root -g root /var/lib/srnet-netplan
+cat > /etc/systemd/system/srnet-netplan.service <<'EOF'
+[Unit]
+Description=SR-Net-Speed-Test netplan helper (RDMA port network changes, with rollback)
+Documentation=https://github.com/Realishbird/SR-Net-Speed-Test
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/srnet-agent netplan-helper
+TimeoutStartSec=15min
+EOF
+cat > /etc/systemd/system/srnet-netplan.path <<'EOF'
+[Unit]
+Description=Watch for RDMA port network changes from the srnet agent
+
+[Path]
+PathExists=/var/lib/srnet/netplan/request.json
+Unit=srnet-netplan.service
+
+[Install]
+WantedBy=multi-user.target
+EOF
+cat > /etc/systemd/system/srnet-netplan.timer <<'EOF'
+[Unit]
+Description=Refresh the netplan setup the srnet agent reports
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+Unit=srnet-netplan.service
+
+[Install]
+WantedBy=timers.target
+EOF
+command -v netplan >/dev/null 2>&1 || log "netplan is not installed here: the Hosts page shows each port's setup and offers the netplan to copy"
+
 if [ "$ENROLLED" -eq 0 ]; then
   install -m 0644 -o srnet -g srnet "$CACERT" /etc/srnet/ca.pem
   if [ -n "$TOKEN" ]; then
@@ -229,6 +277,8 @@ fi
 
 systemctl daemon-reload
 systemctl enable --now srnet-agent >/dev/null
+systemctl enable --now srnet-netplan.path srnet-netplan.timer >/dev/null
+systemctl start --no-block srnet-netplan.service
 systemctl restart srnet-agent
 
 log "Self-check"

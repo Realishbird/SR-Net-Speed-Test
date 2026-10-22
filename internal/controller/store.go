@@ -206,7 +206,7 @@ func (s *Store) Hosts(ctx context.Context) ([]hostRec, error) {
 			return nil, err
 		}
 		json.Unmarshal(inv, &h.inv)
-		h.Arch, h.OS, h.AgentVersion = h.inv.Arch, h.inv.OS, h.inv.AgentVersion
+		h.Arch, h.OS, h.AgentVersion, h.Netplan = h.inv.Arch, h.inv.OS, h.inv.AgentVersion, h.inv.Netplan
 		if h.Tags == nil {
 			h.Tags = []string{} // the UI and API clients expect a list, never null
 		}
@@ -232,7 +232,7 @@ func (s *Store) Hosts(ctx context.Context) ([]hostRec, error) {
 		hp.RdmaDev, hp.PortNum, hp.Netdev, hp.Addrs = p.RdmaDev, p.PortNum, p.Netdev, p.Addrs
 		hp.State, hp.SpeedMbps, hp.FWVersion, hp.Transceiver = p.State, p.SpeedMbps, p.FWVersion, p.Transceiver
 		hp.LLDPSwitch, hp.LLDPPort = p.LLDPSwitch, p.LLDPPort
-		hp.MTU, hp.Driver, hp.PCIe = p.MTU, p.Driver, p.PCIe
+		hp.MTU, hp.Driver, hp.PCIe, hp.Netplan = p.MTU, p.Driver, p.PCIe, p.Netplan
 		if hp.Addrs == nil {
 			hp.Addrs = []string{} // a port with no IP configured yet
 		}
