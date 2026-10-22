@@ -8,7 +8,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1164,11 +1163,11 @@ func (m *metrics) qosDeltas(ctx context.Context, sw SwitchConfig, port string, f
 	if m == nil || m.vmURL == "" {
 		return out
 	}
-	src := fmt.Sprintf("(?i)(%s|%s|%s:%d)", regexp.QuoteMeta(sw.Name), regexp.QuoteMeta(sw.Address), regexp.QuoteMeta(sw.Address), sw.GNMIPort)
+	src := gnmiSourceRe(sw)
 	// gnmic names the list key interface_interface_id on this SONiC (older
 	// builds wrote interface_id); ask for both.
-	sel1 := fmt.Sprintf(`{__name__=~"%s",source=~"%s",interface_interface_id="%s"}`, qosCounterRe, src, port)
-	sel2 := fmt.Sprintf(`{__name__=~"%s",source=~"%s",interface_id="%s"}`, qosCounterRe, src, port)
+	sel1 := fmt.Sprintf(`{__name__=~"%s",source=~%q,interface_interface_id=%q}`, qosCounterRe, src, port)
+	sel2 := fmt.Sprintf(`{__name__=~"%s",source=~%q,interface_id=%q}`, qosCounterRe, src, port)
 	snap := func(t time.Time) map[string]float64 {
 		rows, err := m.vmQuery(ctx, fmt.Sprintf(`last_over_time(%s[90s] @ %d) or last_over_time(%s[90s] @ %d)`, sel1, t.Unix(), sel2, t.Unix()))
 		if err != nil {
