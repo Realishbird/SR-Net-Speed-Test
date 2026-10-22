@@ -42,6 +42,17 @@ func (f *fakeNetplanOS) Run(_ context.Context, name string, args ...string) ([]b
 	if name == "netplan" && args[0] == "apply" && f.onApply != nil {
 		f.onApply(f)
 	}
+	if name == "ip" && len(args) == 5 && args[0] == "addr" && args[1] == "del" {
+		l := f.links[args[4]]
+		var keep []netip.Prefix
+		for _, a := range l.addrs {
+			if a.String() != args[2] {
+				keep = append(keep, a)
+			}
+		}
+		l.addrs = keep
+		f.links[args[4]] = l
+	}
 	return nil, nil
 }
 func (f *fakeNetplanOS) LinkState(dev string) ([]netip.Prefix, int, bool, error) {
@@ -390,5 +401,45 @@ func TestNetplanAgentSide(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(e.ReqDir, "alive")); err != nil {
 		t.Errorf("alive file: %v", err)
+	}
+}
+
+// TestNetplanMoveTakesAddressOffOldPort moves a Spark's P2 address from the
+// cable's first PCIe half to its second. netplan apply sets it on the new
+// port but leaves it on the old one, so the helper takes it off there; on a
+// rollback it takes it off the new port instead.
+func TestNetplanMoveTakesAddressOffOldPort(t *testing.T) {
+	addr := netip.MustParsePrefix("172.27.101.20/24")
+	move := api.NetplanChange{ID: 9, Ports: []api.NetplanPort{
+		{Netdev: "enp1s0f1np1", Addresses: []string{}, MTU: 9000},
+		{Netdev: "enP2p1s0f1np1", Addresses: []string{"172.27.101.20/24"}, MTU: 9000, Peers: []string{"172.27.101.1"}},
+	}}
+	for _, ok := range []bool{true, false} {
+		e, f := newNetplanTest(t)
+		f.rdma = append(f.rdma, "enP2p1s0f1np1")
+		f.links["enp1s0f1np1"] = fakeLink{addrs: []netip.Prefix{addr, netip.MustParsePrefix("fe80::1/64")}, mtu: 9000, up: true}
+		f.links["enP2p1s0f1np1"] = fakeLink{mtu: 1500, up: true}
+		f.pingOK = ok
+		f.onApply = func(f *fakeNetplanOS) {
+			if strings.Count(strings.Join(f.cmds, ","), "netplan apply") == 1 {
+				f.links["enP2p1s0f1np1"] = fakeLink{addrs: []netip.Prefix{addr}, mtu: 9000, up: true}
+				touchAlive(t, e, f.now.Add(time.Second))
+			}
+		}
+		var st netplanHelperState
+		res := e.apply(context.Background(), move, &st)
+		cmds := strings.Join(f.cmds, ",")
+		if ok {
+			if res.Status != "applied" || !strings.Contains(cmds, "ip addr del 172.27.101.20/24 dev enp1s0f1np1") || strings.Contains(cmds, "fe80") {
+				t.Errorf("move: %s %s %v", res.Status, res.Message, f.cmds)
+			}
+			if len(f.links["enP2p1s0f1np1"].addrs) != 1 {
+				t.Errorf("new port lost its address: %v", f.links["enP2p1s0f1np1"])
+			}
+			continue
+		}
+		if res.Status != "rolled_back" || !strings.Contains(cmds, "ip addr del 172.27.101.20/24 dev enP2p1s0f1np1") {
+			t.Errorf("rollback: %s %s %v", res.Status, res.Message, f.cmds)
+		}
 	}
 }

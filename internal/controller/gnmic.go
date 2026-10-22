@@ -120,13 +120,24 @@ subscriptions:
     encoding: json_ietf
 `)
 	b.WriteString(xcvr.String())
-	b.WriteString(`outputs:
+	// receive-time: samples carry the switch's own timestamps, and a switch
+	// whose clock drifts (the lab's Z9864F ran 63 s slow) then puts its
+	// counters a minute away from the hosts' samples, so per-leg switch
+	// rates found no traffic in the run's window and the Grafana panels
+	// were shifted. Stamping each sample as it arrives keeps every series
+	// on the controller's clock; precision ns is what the output expects.
+	b.WriteString(`processors:
+  receive-time:
+    event-override-ts:
+      precision: ns
+outputs:
   victoriametrics:
     type: prometheus_write
     url: ` + strings.TrimRight(cfg.VictoriaMetricsURL, "/") + `/api/v1/write
     metric-prefix: srnet_gnmi
     strings-as-labels: true
     interval: 5s
+    event-processors: [receive-time]
 `)
 	out := []byte(b.String())
 	if cur, err := os.ReadFile(path); err == nil && bytes.Equal(cur, out) {

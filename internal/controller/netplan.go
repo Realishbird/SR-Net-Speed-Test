@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/netip"
 	"regexp"
@@ -34,6 +35,7 @@ func (s *Server) routesNetplan(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/hosts/{id}/netplan", s.view(s.getHostNetplan))
 	mux.HandleFunc("POST /api/v1/hosts/{id}/netplan", s.admin(s.postHostNetplan))
 	mux.HandleFunc("POST /api/v1/hosts/{id}/netplan/preview", s.view(s.previewHostNetplan))
+	mux.HandleFunc("POST /api/v1/hosts/{id}/netplan/move", s.admin(s.postHostNetplanMove))
 	mux.HandleFunc("GET /api/v1/netplan/jobs", s.view(func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.netplan.list(0)) }))
 	mux.HandleFunc("GET /api/v1/network/plan", s.view(s.getNetworkPlan))
 	mux.HandleFunc("POST /api/v1/network/plan/apply", s.admin(s.applyNetworkPlan))
@@ -166,6 +168,14 @@ func prepareChange(h hostRec, hosts []hostRec, req api.NetplanRequest) (api.Netp
 	for _, p := range h.Ports {
 		byNetdev[p.Netdev] = p
 	}
+	// The change rewrites every port it lists, so an address may move
+	// between them (Validate refuses one given to two ports).
+	inChange := map[int64]bool{}
+	for _, p := range ch.Ports {
+		if hp, ok := byNetdev[p.Netdev]; ok {
+			inChange[hp.ID] = true
+		}
+	}
 	for i := range ch.Ports {
 		p := &ch.Ports[i]
 		p.Peers = nil // the controller picks them
@@ -183,7 +193,7 @@ func prepareChange(h hostRec, hosts []hostRec, req api.NetplanRequest) (api.Netp
 			if err != nil {
 				continue // Validate words the error
 			}
-			if other := addressOwner(hosts, pf.Addr(), hp.ID); other != "" {
+			if other := addressOwner(hosts, pf.Addr(), inChange); other != "" {
 				return ch, &userError{fmt.Errorf("%s is already on %s", pf.Addr(), other)}
 			}
 			p.Peers = appendPeers(p.Peers, hosts, h.ID, pf)
@@ -195,11 +205,11 @@ func prepareChange(h hostRec, hosts []hostRec, req api.NetplanRequest) (api.Netp
 	return ch, nil
 }
 
-// addressOwner names the port that holds addr, other than port skip.
-func addressOwner(hosts []hostRec, addr netip.Addr, skip int64) string {
+// addressOwner names the port that holds addr, other than the ports in skip.
+func addressOwner(hosts []hostRec, addr netip.Addr, skip map[int64]bool) string {
 	for _, h := range hosts {
 		for _, p := range h.Ports {
-			if p.ID == skip {
+			if skip[p.ID] {
 				continue
 			}
 			for _, a := range p.Addrs {
@@ -278,6 +288,132 @@ func (s *Server) postHostNetplan(w http.ResponseWriter, r *http.Request) {
 	writeJSONStatus(w, http.StatusAccepted, s.netplan.list(h.ID)[0])
 }
 
+// netplanMove asks to move a port's addresses to another port of the host.
+type netplanMove struct {
+	From       string `json:"from"`
+	To         string `json:"to"`
+	TimeoutSec int    `json:"timeout_sec,omitempty"`
+	Preview    bool   `json:"preview,omitempty"` // only render the netplan, for hosts without the helper
+}
+
+// moveRequest is the change that moves from's addresses and MTU to to in
+// one netplan try: on a DGX Spark, from the first PCIe half of a cable to
+// the second, so two cables stop sharing one PCIe link. The old port keeps
+// no address, so its stanza stays (MTU, link up) with none listed.
+func moveRequest(h hostRec, m netplanMove) (api.NetplanRequest, api.HostPort, api.HostPort, error) {
+	var from, to api.HostPort
+	var okF, okT bool
+	for _, p := range h.Ports {
+		switch p.Netdev {
+		case m.From:
+			from, okF = p, true
+		case m.To:
+			to, okT = p, true
+		}
+	}
+	var addrs []string
+	for _, a := range from.Addrs {
+		if pf, err := netip.ParsePrefix(a); err == nil && !pf.Addr().IsLinkLocalUnicast() {
+			addrs = append(addrs, a)
+		}
+	}
+	switch {
+	case !okF || !okT:
+		return api.NetplanRequest{}, from, to, &userError{fmt.Errorf("%s has no RDMA ports %s and %s", h.Name, m.From, m.To)}
+	case m.From == m.To:
+		return api.NetplanRequest{}, from, to, &userError{errors.New("pick two different ports")}
+	case len(addrs) == 0:
+		return api.NetplanRequest{}, from, to, &userError{fmt.Errorf("%s has no address to move", m.From)}
+	case len(to.Addrs) > 0:
+		return api.NetplanRequest{}, from, to, &userError{fmt.Errorf("%s already has an address; edit it instead", m.To)}
+	}
+	mtu := from.MTU
+	if mtu < 576 || mtu > 9216 {
+		mtu = 0
+	}
+	return api.NetplanRequest{TimeoutSec: m.TimeoutSec, Ports: []api.NetplanPort{
+		{Netdev: from.Netdev, Addresses: []string{}, MTU: mtu},
+		{Netdev: to.Netdev, Addresses: addrs, MTU: mtu},
+	}}, from, to, nil
+}
+
+// postHostNetplanMove moves a port's addresses to another port, and once
+// the host confirms the change, its label, fabric and expected rate too,
+// so runs and selectors find the port where it now is.
+func (s *Server) postHostNetplanMove(w http.ResponseWriter, r *http.Request) {
+	var m netplanMove
+	if !readJSON(w, r, &m) {
+		return
+	}
+	h, hosts, err := s.hostByID(r.Context(), r)
+	if err != nil {
+		netplanHTTPError(w, err)
+		return
+	}
+	req, from, to, err := moveRequest(h, m)
+	if err != nil {
+		netplanHTTPError(w, err)
+		return
+	}
+	ch, err := prepareChange(h, hosts, req)
+	if err != nil {
+		netplanHTTPError(w, err)
+		return
+	}
+	if m.Preview {
+		current := ""
+		if h.Netplan != nil {
+			current = h.Netplan.File
+		}
+		pv := renderNetplanPreview(current, ch, h.Ports)
+		// By hand there is no helper to take the address off the old port,
+		// and another file may still set it there.
+		pv.Commands = fmt.Sprintf("grep -ln '%s' /etc/netplan/*.yaml   # a file listed besides 90-srnet.yaml still sets %s: remove its addresses there first\n", from.Netdev, from.Netdev) + pv.Commands
+		for _, a := range req.Ports[1].Addresses {
+			pv.Commands += fmt.Sprintf("sudo ip addr del %s dev %s   # netplan does not take a moved address off the old port\n", a, from.Netdev)
+		}
+		writeJSON(w, pv)
+		return
+	}
+	if err := s.netplanReady(h); err != nil {
+		httpError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if err := s.orch.claimNetplan(h.ID); err != nil {
+		httpError(w, http.StatusConflict, err.Error())
+		return
+	}
+	by := who(r).Name
+	job := &api.NetplanJob{HostID: h.ID, Host: h.Name, Ports: ch.Ports, Status: "running", By: by, Created: time.Now()}
+	s.netplan.add(job)
+	go func() {
+		defer s.orch.releaseNetplan(h.ID)
+		ctx := context.Background()
+		if s.runNetplanJob(ctx, job, ch) == "applied" {
+			s.movePortSettings(ctx, from, to, by)
+		}
+	}()
+	writeJSONStatus(w, http.StatusAccepted, s.netplan.list(h.ID)[0])
+}
+
+// movePortSettings carries a port's label, fabric and expected rate over
+// to the port its address moved to.
+func (s *Server) movePortSettings(ctx context.Context, from, to api.HostPort, by string) {
+	if from.Label == "" && from.Fabric == "" && from.ExpectedGbps == 0 {
+		return
+	}
+	label, fabric, exp := from.Label, from.Fabric, from.ExpectedGbps
+	if err := s.store.UpdatePort(ctx, to.ID, api.PortUpdate{Label: &label, Fabric: &fabric, ExpectedGbps: &exp}); err != nil {
+		log.Printf("netplan move: %s settings to %s: %v", from.Netdev, to.Netdev, err)
+		return
+	}
+	empty, zero := "", 0.0
+	if err := s.store.UpdatePort(ctx, from.ID, api.PortUpdate{Label: &empty, Fabric: &empty, ExpectedGbps: &zero}); err != nil {
+		log.Printf("netplan move: clearing %s: %v", from.Netdev, err)
+	}
+	s.store.Audit(ctx, "port.move", map[string]any{"from": from.Netdev, "to": to.Netdev, "label": label, "fabric": fabric, "by": by})
+}
+
 // netplanReady says why a host cannot take a change now.
 func (s *Server) netplanReady(h hostRec) error {
 	switch {
@@ -291,8 +427,9 @@ func (s *Server) netplanReady(h hostRec) error {
 	return nil
 }
 
-// runNetplanJob sends one change and waits for the helper's verdict.
-func (s *Server) runNetplanJob(ctx context.Context, job *api.NetplanJob, ch api.NetplanChange) {
+// runNetplanJob sends one change and waits for the helper's verdict, which
+// it returns (applied, rolled_back, refused or failed).
+func (s *Server) runNetplanJob(ctx context.Context, job *api.NetplanJob, ch api.NetplanChange) string {
 	ch.ID = job.ID
 	s.netplan.update(job, func(j *api.NetplanJob) { j.Status = "running" })
 	s.store.Audit(ctx, "host.netplan.start", map[string]any{"job": job.ID, "host": job.Host, "ports": ch.Ports, "by": job.By, "batch": job.Batch})
@@ -320,6 +457,7 @@ func (s *Server) runNetplanJob(ctx context.Context, job *api.NetplanJob, ch api.
 	now := time.Now()
 	s.netplan.update(job, func(j *api.NetplanJob) { j.Status, j.Message, j.Steps, j.Done = status, message, steps, &now })
 	s.store.Audit(ctx, "host.netplan.done", map[string]any{"job": job.ID, "host": job.Host, "ports": ch.Ports, "by": job.By, "status": status, "message": message, "steps": steps})
+	return status
 }
 
 // previewHostNetplan renders the netplan file a request would leave, merged
@@ -1044,7 +1182,7 @@ func planChanges(plan api.NetworkPlan, hosts []hostRec, req api.PlanApply) ([]ho
 			return nil, &userError{fmt.Errorf("%s is given to two ports", pf.Addr())}
 		}
 		taken[pf.Addr()] = ap.PortID
-		if owner := addressOwner(hosts, pf.Addr(), row.PortID); owner != "" {
+		if owner := addressOwner(hosts, pf.Addr(), map[int64]bool{row.PortID: true}); owner != "" {
 			return nil, &userError{fmt.Errorf("%s is already on %s", pf.Addr(), owner)}
 		}
 		hc := byHost[row.HostID]

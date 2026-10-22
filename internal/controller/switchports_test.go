@@ -3,6 +3,7 @@ package controller
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Realishbird/SR-Net-Speed-Test/internal/api"
 )
@@ -177,5 +178,16 @@ func TestNetworkPlanSwitchLinesFailClosed(t *testing.T) {
 	}
 	if len(plan.Switch) == 0 || !strings.Contains(strings.Join(plan.Warnings, " "), "No switch lines for") {
 		t.Errorf("fixes %+v, warnings %q", plan.Switch, plan.Warnings)
+	}
+}
+
+func TestParseSwitchClock(t *testing.T) {
+	raw := []byte(`[{"source":"z9864f","updates":[{"Path":"openconfig-system:system/state","values":{"openconfig-system:system/state":{"openconfig-system:state":{"current-datetime":"2026-10-22T22:42:49Z","hostname":"sonic","openconfig-system-deviation:intf-naming-mode":"NATIVE"}}}}]}]`)
+	got := parseSwitchClock(raw)["z9864f"]
+	if want := time.Date(2026, 10, 22, 22, 42, 49, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("clock %v, want %v", got, want)
+	}
+	if m := parseNamingMode(raw); m["z9864f"] != "NATIVE" {
+		t.Errorf("naming from the same answer: %v", m)
 	}
 }
