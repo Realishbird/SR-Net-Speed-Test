@@ -220,8 +220,40 @@ func TestParseIperf3(t *testing.T) {
 
 func TestParseLLDP(t *testing.T) {
 	out := "lldp.enp1s0f0np0.via=LLDP\nlldp.enp1s0f0np0.chassis.name=sonic-z9864\nlldp.enp1s0f0np0.port.ifname=Ethernet64\nlldp.enp1s0f0np0.port.descr=Ethernet64\nlldp.eno1.chassis.name=mgmt-sw\nlldp.eno1.port.ifname=ge-0/0/3\n"
-	n := ParseLLDP(out)
-	if n["enp1s0f0np0"] != [2]string{"sonic-z9864", "Ethernet64"} || n["eno1"][1] != "ge-0/0/3" {
+	n := ParseLLDP(out, "", nil)
+	if n["enp1s0f0np0"] != (LLDPNeighbour{"sonic-z9864", "Ethernet64", "Ethernet64"}) || n["eno1"].Port != "ge-0/0/3" {
 		t.Errorf("lldp = %v", n)
+	}
+}
+
+// TestParseLLDPSparkTwins is a Spark port that hears both the switch and
+// its own twin PCIe function, in both orders. Before the split the fields
+// of the two neighbours mixed: the Spark's hostname with the switch's
+// description, or the switch's name with the twin's netdev.
+func TestParseLLDPSparkTwins(t *testing.T) {
+	sw := func(dev string) string {
+		return "lldp." + dev + ".via=LLDP\nlldp." + dev + ".rid=1\nlldp." + dev + ".chassis.mac=00:11:22:33:44:55\nlldp." + dev + ".chassis.name=sonic\n" +
+			"lldp." + dev + ".port.local=Eth1/2/1\nlldp." + dev + ".port.descr=SPARK-01-RDMA-P2\nlldp." + dev + ".port.ttl=120\n"
+	}
+	twin := func(dev, other string) string {
+		return "lldp." + dev + ".via=LLDP\nlldp." + dev + ".rid=2\nlldp." + dev + ".chassis.mac=fc:4c:ea:f9:42:4f\nlldp." + dev + ".chassis.name=spark-424f\n" +
+			"lldp." + dev + ".port.mac=fc:4c:ea:f9:42:50\nlldp." + dev + ".port.descr=" + other + "\n"
+	}
+	out := sw("enp1s0f1np1") + twin("enp1s0f1np1", "enP2p1s0f1np1") + twin("enP2p1s0f1np1", "enp1s0f1np1") + sw("enP2p1s0f1np1")
+	local := map[string]bool{"enp1s0f1np1": true, "enp2p1s0f1np1": true}
+	n := ParseLLDP(out, "spark-424f", local)
+	want := LLDPNeighbour{Chassis: "sonic", Port: "Eth1/2/1", Descr: "SPARK-01-RDMA-P2"}
+	for _, dev := range []string{"enp1s0f1np1", "enP2p1s0f1np1"} {
+		if n[dev] != want {
+			t.Errorf("%s: %+v, want %+v", dev, n[dev], want)
+		}
+	}
+	// Only the twin heard: no switch at all.
+	if n := ParseLLDP(twin("enp1s0f0np0", "enP2p1s0f0np0"), "SPARK-424F", local); len(n) != 0 {
+		t.Errorf("twin taken for a switch: %+v", n)
+	}
+	// A different hostname, but the port is one of ours.
+	if n := ParseLLDP(twin("enp1s0f0np0", "enP2p1s0f1np1"), "other", local); len(n) != 0 {
+		t.Errorf("own interface taken for a switch port: %+v", n)
 	}
 }

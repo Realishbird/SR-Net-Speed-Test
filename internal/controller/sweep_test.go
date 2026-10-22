@@ -137,8 +137,8 @@ func TestSwitchLLDPFillsHostPorts(t *testing.T) {
 	if p := hosts[0].Ports[2]; p.LLDPPort != "" {
 		t.Errorf("uncabled port got a neighbour: %+v", p)
 	}
-	if p := hosts[1].Ports[0]; p.LLDPPort != "Ethernet9" {
-		t.Errorf("host's own LLDP report was overwritten: %+v", p)
+	if p := hosts[1].Ports[0]; p.LLDPSwitch != "Z9864F" || p.LLDPPort != "Ethernet120" {
+		t.Errorf("the switch's own table should win over the host's report: %+v", p)
 	}
 	if got := speedMbps("openconfig-if-ethernet:SPEED_100GB"); got != 100000 {
 		t.Errorf("speed: %d", got)

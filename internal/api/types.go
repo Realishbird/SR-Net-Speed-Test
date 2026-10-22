@@ -78,7 +78,8 @@ type Port struct {
 	Transceiver string        `json:"transceiver"`
 	NUMANode    int           `json:"numa_node"`
 	LLDPSwitch  string        `json:"lldp_switch,omitempty"` // neighbour chassis name from lldpd
-	LLDPPort    string        `json:"lldp_port,omitempty"`   // neighbour port id
+	LLDPPort    string        `json:"lldp_port,omitempty"`   // neighbour port id (its name, else its alias, else its description)
+	LLDPDescr   string        `json:"lldp_descr,omitempty"`  // neighbour port description, when the port id was a name or alias
 	Settings    *PortSettings `json:"settings,omitempty"`    // host-side RoCE settings, for the fabric check
 	PCIe        *PCIeLink     `json:"pcie,omitempty"`        // the NIC function's PCIe link
 	Netplan     *PortNetplan  `json:"netplan,omitempty"`     // how netplan configures the port, from the root helper
@@ -359,6 +360,7 @@ type HostPort struct {
 	ExpectedGbps float64      `json:"expected_gbps"`
 	LLDPSwitch   string       `json:"lldp_switch,omitempty"`
 	LLDPPort     string       `json:"lldp_port,omitempty"`
+	LLDPDescr    string       `json:"lldp_descr,omitempty"`
 	TxGbps       float64      `json:"tx_gbps"`
 	RxGbps       float64      `json:"rx_gbps"`
 	MTU          int          `json:"mtu,omitempty"`
@@ -700,8 +702,9 @@ type TopoSwitchPort struct {
 	InErrors    float64  `json:"in_errors"`
 	OutErrors   float64  `json:"out_errors"`
 	FCSErrors   float64  `json:"fcs_errors"`
-	VLAN        string   `json:"vlan,omitempty"` // the switch's own VLAN for this port ("100"), the fabric as the switch sees it
-	Hosts       []string `json:"hosts"`          // host names whose LLDP points here
+	VLAN        string   `json:"vlan,omitempty"`  // the switch's own VLAN for this port ("100"), the fabric as the switch sees it
+	Descr       string   `json:"descr,omitempty"` // the port's description on the switch
+	Hosts       []string `json:"hosts"`           // host names whose LLDP points here
 }
 
 type TopoHost struct {

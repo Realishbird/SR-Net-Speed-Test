@@ -508,29 +508,15 @@ func stripModule(k string) string {
 	return k
 }
 
-// fillLLDP completes each host port's switch neighbour from the switches'
-// own LLDP tables where the host's lldpd gave nothing, so the Hosts page,
-// the Topology and per-leg switch figures work even before every host runs
-// lldpctl. The host's own report wins when it has one.
+// fillLLDP sets each host port's switch neighbour from the switches' own
+// LLDP tables, checking what the host's lldpd reported against the
+// switches' port tables (see fillLLDPFrom), so the Hosts page, the
+// Topology, the network plan and per-leg switch figures name real ports.
 func (s *Server) fillLLDP(ctx context.Context, hosts []hostRec) {
 	s.mu.Lock()
-	lldp := s.lldp
+	lldp, ifaces, vlans := s.lldp, s.ifaces, s.vlans
 	s.mu.Unlock()
-	if len(lldp) == 0 {
-		return
-	}
-	for i := range hosts {
-		h := &hosts[i]
-		for j := range h.Ports {
-			p := &h.Ports[j]
-			if p.LLDPPort != "" {
-				continue
-			}
-			if e, ok := lldp[strings.ToLower(h.Hostname)+"|"+strings.ToLower(p.Netdev)]; ok {
-				p.LLDPSwitch, p.LLDPPort = e.Switch, e.Port
-			}
-		}
-	}
+	fillLLDPFrom(hosts, lldp, knownIfaces(ifaces, lldp, vlans), s.switchList())
 }
 
 // switchPollLoop refreshes the switch LLDP and VLAN tables once a minute,
@@ -568,6 +554,19 @@ func (s *Server) switchPollLoop(ctx context.Context) {
 			report("vlans", nil, len(m))
 		} else {
 			report("vlans", err, 0)
+		}
+		if m, err := s.switchIfaces(ctx); err == nil {
+			s.mu.Lock()
+			s.ifaces = m
+			s.mu.Unlock()
+			report("ports", nil, len(m))
+		} else {
+			report("ports", err, 0)
+		}
+		if m, err := s.switchNaming(ctx); err == nil {
+			s.mu.Lock()
+			s.naming = m
+			s.mu.Unlock()
 		}
 		s.refreshQoS(ctx)
 		s.pushPortInfo()
@@ -741,9 +740,15 @@ func (s *Server) topology(w http.ResponseWriter, r *http.Request) {
 	t := buildTopology(hosts, s.switchList(), ports, source, s.metrics.live, s.metrics.temperatures, s.metrics.hostLive, s.hub.online)
 	t.OpticMax, t.NicMax = s.alerts.hotC, s.alerts.nicHotC
 	s.mu.Lock()
-	vlans, lldp := s.vlans, s.lldp
+	vlans, lldp, ifaces := s.vlans, s.lldp, s.ifaces
 	s.mu.Unlock()
 	applyVLANs(&t, vlans)
+	for i := range t.Switches {
+		sw := &t.Switches[i]
+		for j := range sw.Ports {
+			sw.Ports[j].Descr = ifaces[strings.ToLower(sw.Name)][strings.ToLower(sw.Ports[j].Name)].Descr
+		}
+	}
 	t.Links = switchLinks(lldp, s.switchList())
 	if t.Links == nil {
 		t.Links = []api.TopoLink{}

@@ -55,8 +55,10 @@ type Server struct {
 	// nothing; a changed password hash invalidates the entry by itself.
 	adminOK     [32]byte
 	adminOKHash string
-	lldp        map[string]lldpEntry // switch-side LLDP table, polled by switchPollLoop
-	vlans       map[string]string    // switch|port (lower-cased) -> VLAN id, from the same poll
+	lldp        map[string]lldpEntry              // switch-side LLDP table, polled by switchPollLoop
+	vlans       map[string]string                 // switch|port (lower-cased) -> VLAN id, from the same poll
+	ifaces      map[string]map[string]switchIface // switch (lower-cased) -> ifname (lower-cased) -> the switch's port table, from the same poll
+	naming      map[string]string                 // switch (lower-cased) -> interface naming mode (NATIVE | STANDARD)
 	lldpAt      time.Time
 	qos         map[string]*switchPortCfg // switch|port (lower-cased) -> port settings and queue counters, from the same poll
 	qosErr      string

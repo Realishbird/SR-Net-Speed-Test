@@ -424,9 +424,10 @@ func (s *Server) networkPlan(ctx context.Context) (api.NetworkPlan, []hostRec, e
 		return api.NetworkPlan{}, nil, err
 	}
 	s.mu.Lock()
-	vlans, qos, lldpAt := s.vlans, s.qos, s.lldpAt
+	vlans, qos, lldpAt, lldp, ifaces, naming := s.vlans, s.qos, s.lldpAt, s.lldp, s.ifaces, s.naming
 	s.mu.Unlock()
-	plan := buildNetworkPlan(hosts, s.switchList(), vlans, qos, profiles, s.hub.online)
+	sws := planSwitches{vlans: vlans, qos: qos, known: knownIfaces(ifaces, lldp, vlans), naming: naming}
+	plan := buildNetworkPlan(hosts, s.switchList(), sws, profiles, s.hub.online)
 	if len(s.switchList()) == 0 {
 		plan.Warnings = append(plan.Warnings, "No switch is configured: fabrics come from the switch's VLANs, so add the switch on the Switches page first.")
 	} else if len(vlans) == 0 {
@@ -508,8 +509,11 @@ type planCand struct {
 //   - the MTU is raised to the fabric's host MTU (9000).
 //
 // The twin PCIe function of a Spark port (enP2p1s0f0np0, on the same
-// switch port as enp1s0f0np0) and management ports are left out.
-func buildNetworkPlan(hosts []hostRec, switches []SwitchConfig, vlans map[string]string, qos map[string]*switchPortCfg, profiles []api.FabricProfile, online func(int64) bool) api.NetworkPlan {
+// switch port as enp1s0f0np0) and management ports are left out. Switch
+// lines are only written for interfaces the switch itself lists, under the
+// name its CLI takes.
+func buildNetworkPlan(hosts []hostRec, switches []SwitchConfig, sws planSwitches, profiles []api.FabricProfile, online func(int64) bool) api.NetworkPlan {
+	vlans, qos := sws.vlans, sws.qos
 	plan := api.NetworkPlan{At: time.Now(), Warnings: []string{}, Fabrics: []api.PlanFabric{}, Ports: []api.PlanPort{}, Switch: []api.PlanSwitchFix{}, Commands: []api.PlanCommands{}}
 	byFabric := map[string]api.FabricProfile{}
 	vlanFabric := map[string]string{} // VLAN -> fabric whose profile names it
@@ -547,6 +551,11 @@ func buildNetworkPlan(hosts []hostRec, switches []SwitchConfig, vlans map[string
 			sw := resolveSwitchName(switches, p.LLDPSwitch)
 			if sw == "" || p.LLDPPort == "" {
 				continue
+			}
+			if tab, ok := sws.known[strings.ToLower(sw)]; ok {
+				if _, real := tab[strings.ToLower(p.LLDPPort)]; !real {
+					continue // not an interface of that switch: a stale or misread LLDP report
+				}
 			}
 			c := planCand{h: h, p: p, sw: sw, vln: vlans[strings.ToLower(sw+"|"+p.LLDPPort)]}
 			key := fmt.Sprintf("%d|%s|%s", h.ID, strings.ToLower(sw), strings.ToLower(p.LLDPPort))
@@ -834,9 +843,18 @@ func buildNetworkPlan(hosts []hostRec, switches []SwitchConfig, vlans map[string
 		known[sw][v] = true
 	}
 	bySwitch := map[string][]*api.PlanSwitchFix{}
+	var unchecked []string
 	for _, f := range fixes {
+		ifc, ok := sws.known[strings.ToLower(f.Switch)][strings.ToLower(f.Port)]
+		if !ok {
+			// Fail closed: a name the switch does not list never reaches a
+			// line someone pastes into its CLI.
+			unchecked = append(unchecked, f.Switch+" "+f.Port)
+			plan.Switch = append(plan.Switch, *f)
+			continue
+		}
 		var b strings.Builder
-		fmt.Fprintf(&b, "interface %s\n", f.Port)
+		fmt.Fprintf(&b, "interface %s\n", cliName(sws.naming[strings.ToLower(f.Switch)], ifc))
 		if f.Want != "" {
 			fmt.Fprintf(&b, " switchport access Vlan %s\n", f.Want)
 		}
@@ -847,6 +865,10 @@ func buildNetworkPlan(hosts []hostRec, switches []SwitchConfig, vlans map[string
 		f.Commands = b.String()
 		plan.Switch = append(plan.Switch, *f)
 		bySwitch[f.Switch] = append(bySwitch[f.Switch], f)
+	}
+	if len(unchecked) > 0 {
+		sort.Strings(unchecked)
+		plan.Warnings = append(plan.Warnings, "No switch lines for "+strings.Join(unchecked, ", ")+": the switch's port table does not list that interface (or has not been read yet), so the name cannot be trusted.")
 	}
 	sort.Slice(plan.Switch, func(i, j int) bool {
 		if plan.Switch[i].Switch != plan.Switch[j].Switch {
@@ -876,6 +898,14 @@ func buildNetworkPlan(hosts []hostRec, switches []SwitchConfig, vlans map[string
 		plan.Commands = append(plan.Commands, api.PlanCommands{Switch: sw.Name, Address: sw.Address, Lines: b.String()})
 	}
 	return plan
+}
+
+// planSwitches is what the switch poll knows, as the network plan uses it.
+type planSwitches struct {
+	vlans  map[string]string                 // switch|port -> VLAN
+	qos    map[string]*switchPortCfg         // switch|port -> port settings
+	known  map[string]map[string]switchIface // switch -> ifname -> interface, see knownIfaces
+	naming map[string]string                 // switch -> NATIVE | STANDARD
 }
 
 // applyNetworkPlan creates the ticked fabrics, gives ports their fabric,

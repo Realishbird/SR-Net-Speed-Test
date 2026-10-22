@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -67,11 +69,30 @@ func labVLANs() map[string]string {
 	return v
 }
 
+// labIfaces is the switch's port table for the ports labHosts uses, with
+// made-up aliases in the switch's Eth1/x/y style.
+func labIfaces() map[string]map[string]switchIface {
+	tab := map[string]switchIface{}
+	for i, n := range []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 20, 30, 120, 124, 128, 132} {
+		name := "Ethernet" + strconv.Itoa(n)
+		tab[strings.ToLower(name)] = switchIface{Name: name, Alias: fmt.Sprintf("Eth1/%d/1", i+1)}
+	}
+	return map[string]map[string]switchIface{"z9864f": tab}
+}
+
+func labSwitches(naming string) planSwitches {
+	return planSwitches{
+		vlans:  labVLANs(),
+		qos:    map[string]*switchPortCfg{"z9864f|ethernet11": {MTU: 1500}},
+		known:  labIfaces(),
+		naming: map[string]string{"z9864f": naming},
+	}
+}
+
 func labPlan(t *testing.T) api.NetworkPlan {
 	t.Helper()
 	profiles := []api.FabricProfile{{Fabric: "101", VLAN: "101", SwitchMTU: 9100, HostMTU: 9000}}
-	qos := map[string]*switchPortCfg{"z9864f|ethernet11": {MTU: 1500}}
-	return buildNetworkPlan(labHosts(), []SwitchConfig{{Name: "z9864f", Address: "176.16.9.22"}}, labVLANs(), qos, profiles, func(int64) bool { return true })
+	return buildNetworkPlan(labHosts(), []SwitchConfig{{Name: "z9864f", Address: "176.16.9.22"}}, labSwitches("NATIVE"), profiles, func(int64) bool { return true })
 }
 
 func planRow(t *testing.T, plan api.NetworkPlan, portID int64) api.PlanPort {
