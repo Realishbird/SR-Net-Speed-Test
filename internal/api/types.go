@@ -38,10 +38,11 @@ func IsIP(test string) bool { return test == "tcp" || test == "udp" }
 
 // Task kinds sent from the controller to an agent.
 const (
-	TaskServer = "server"
-	TaskClient = "client"
-	TaskCancel = "cancel"
-	TaskUpdate = "update" // replace the agent binary with Version from URLPath
+	TaskServer  = "server"
+	TaskClient  = "client"
+	TaskCancel  = "cancel"
+	TaskUpdate  = "update"  // replace the agent binary with Version from URLPath
+	TaskNetplan = "netplan" // change the network setup of RDMA ports through the root helper
 )
 
 // Event types sent from an agent to the controller.
@@ -80,6 +81,7 @@ type Port struct {
 	LLDPPort    string        `json:"lldp_port,omitempty"`   // neighbour port id
 	Settings    *PortSettings `json:"settings,omitempty"`    // host-side RoCE settings, for the fabric check
 	PCIe        *PCIeLink     `json:"pcie,omitempty"`        // the NIC function's PCIe link
+	Netplan     *PortNetplan  `json:"netplan,omitempty"`     // how netplan configures the port, from the root helper
 }
 
 // PCIeLink is how a NIC function is attached: the link it trained to, what
@@ -170,6 +172,7 @@ type Inventory struct {
 	MemBytes     uint64            `json:"mem_bytes"`
 	Ports        []Port            `json:"ports"`
 	Tools        map[string]string `json:"tools"`
+	Netplan      *NetplanState     `json:"netplan,omitempty"`
 }
 
 // Task is one unit of work for an agent: one side of one test leg, or a cancel.
@@ -207,13 +210,61 @@ type Task struct {
 	Version string `json:"version,omitempty"`
 	URLPath string `json:"url_path,omitempty"` // controller path serving the binary
 	SHA256  string `json:"sha256,omitempty"`
+
+	// Netplan tasks.
+	Netplan *NetplanChange `json:"netplan,omitempty"`
 }
 
 // Update events sent by agents.
 const (
 	EventUpdateApplied = "update_applied" // binary staged, agent restarting
 	EventUpdateFailed  = "update_failed"
+	EventNetplanResult = "netplan_result" // Event.Netplan holds the outcome
 )
+
+// NetplanPort is the wanted network setup of one RDMA port.
+type NetplanPort struct {
+	Netdev    string   `json:"netdev"`
+	Addresses []string `json:"addresses"`       // CIDR form, e.g. 172.27.101.23/24
+	MTU       int      `json:"mtu,omitempty"`   // 0 leaves the MTU as netplan defaults it
+	DHCP4     bool     `json:"dhcp4,omitempty"` //
+	Peers     []string `json:"peers,omitempty"` // fabric peers one of which must answer a ping from the port; the controller fills it
+}
+
+// NetplanChange is one requested change to some of a host's RDMA ports.
+type NetplanChange struct {
+	ID         int64         `json:"id"`
+	Ports      []NetplanPort `json:"ports"`
+	TimeoutSec int           `json:"timeout_sec,omitempty"` // how long the helper waits for the ports to come up before rolling back
+}
+
+// NetplanResult is the outcome of a change: applied, rolled_back (the
+// change was made, failed its checks and was undone), refused (nothing was
+// touched) or failed.
+type NetplanResult struct {
+	ID      int64     `json:"id"`
+	Status  string    `json:"status"`
+	Message string    `json:"message,omitempty"`
+	Steps   []string  `json:"steps,omitempty"` // what the helper did, in order
+	At      time.Time `json:"at"`
+}
+
+// NetplanState is what a host reports about its netplan helper.
+type NetplanState struct {
+	Helper string         `json:"helper"`          // helper version; "" when install.sh has not added it
+	At     time.Time      `json:"at"`              // when the helper last looked
+	File   string         `json:"file,omitempty"`  // the controller-managed netplan file
+	Error  string         `json:"error,omitempty"` // why the helper could not read the setup
+	Last   *NetplanResult `json:"last,omitempty"`  // the last change it processed
+}
+
+// PortNetplan is how netplan configures one port today.
+type PortNetplan struct {
+	Managed bool     `json:"managed"`         // defined in the controller-managed file
+	Files   []string `json:"files,omitempty"` // every netplan file that defines the port
+	YAML    string   `json:"yaml,omitempty"`  // the port's stanzas as found (secrets left out)
+	Mgmt    bool     `json:"mgmt,omitempty"`  // carries the default route or the controller connection: never editable
+}
 
 // Latency is the perftest latency summary in microseconds.
 type Latency struct {
@@ -227,11 +278,12 @@ type Latency struct {
 }
 
 type Event struct {
-	TaskID  string `json:"task_id"`
-	RunID   int64  `json:"run_id"`
-	LegID   int64  `json:"leg_id"`
-	Type    string `json:"type"`
-	Message string `json:"message,omitempty"`
+	TaskID  string         `json:"task_id"`
+	RunID   int64          `json:"run_id"`
+	LegID   int64          `json:"leg_id"`
+	Type    string         `json:"type"`
+	Message string         `json:"message,omitempty"`
+	Netplan *NetplanResult `json:"netplan,omitempty"`
 }
 
 // LegResult is what one side of a leg reports when its benchmark process ends.
@@ -275,42 +327,44 @@ type SampleBatch struct {
 // Admin API types.
 
 type Host struct {
-	ID           int64      `json:"id"`
-	UID          string     `json:"uid"`
-	Name         string     `json:"name"`
-	Hostname     string     `json:"hostname"`
-	Tags         []string   `json:"tags"`
-	Site         string     `json:"site"`
-	Rack         string     `json:"rack"`
-	Arch         string     `json:"arch"`
-	OS           string     `json:"os"`
-	AgentVersion string     `json:"agent_version"`
-	LastSeen     time.Time  `json:"last_seen"`
-	Online       bool       `json:"online"`
-	Approved     bool       `json:"approved"` // false: enrolled from a subnet without a token, waiting on the Hosts page
-	Ports        []HostPort `json:"ports"`
+	ID           int64         `json:"id"`
+	UID          string        `json:"uid"`
+	Name         string        `json:"name"`
+	Hostname     string        `json:"hostname"`
+	Tags         []string      `json:"tags"`
+	Site         string        `json:"site"`
+	Rack         string        `json:"rack"`
+	Arch         string        `json:"arch"`
+	OS           string        `json:"os"`
+	AgentVersion string        `json:"agent_version"`
+	LastSeen     time.Time     `json:"last_seen"`
+	Online       bool          `json:"online"`
+	Approved     bool          `json:"approved"` // false: enrolled from a subnet without a token, waiting on the Hosts page
+	Ports        []HostPort    `json:"ports"`
+	Netplan      *NetplanState `json:"netplan,omitempty"`
 }
 
 type HostPort struct {
-	ID           int64     `json:"id"`
-	RdmaDev      string    `json:"rdma_dev"`
-	PortNum      int       `json:"port_num"`
-	Netdev       string    `json:"netdev"`
-	Addrs        []string  `json:"addrs"`
-	State        string    `json:"state"`
-	SpeedMbps    int       `json:"speed_mbps"`
-	FWVersion    string    `json:"fw_version"`
-	Transceiver  string    `json:"transceiver"`
-	Label        string    `json:"label"`
-	Fabric       string    `json:"fabric"`
-	ExpectedGbps float64   `json:"expected_gbps"`
-	LLDPSwitch   string    `json:"lldp_switch,omitempty"`
-	LLDPPort     string    `json:"lldp_port,omitempty"`
-	TxGbps       float64   `json:"tx_gbps"`
-	RxGbps       float64   `json:"rx_gbps"`
-	MTU          int       `json:"mtu,omitempty"`
-	Driver       string    `json:"driver,omitempty"`
-	PCIe         *PCIeLink `json:"pcie,omitempty"`
+	ID           int64        `json:"id"`
+	RdmaDev      string       `json:"rdma_dev"`
+	PortNum      int          `json:"port_num"`
+	Netdev       string       `json:"netdev"`
+	Addrs        []string     `json:"addrs"`
+	State        string       `json:"state"`
+	SpeedMbps    int          `json:"speed_mbps"`
+	FWVersion    string       `json:"fw_version"`
+	Transceiver  string       `json:"transceiver"`
+	Label        string       `json:"label"`
+	Fabric       string       `json:"fabric"`
+	ExpectedGbps float64      `json:"expected_gbps"`
+	LLDPSwitch   string       `json:"lldp_switch,omitempty"`
+	LLDPPort     string       `json:"lldp_port,omitempty"`
+	TxGbps       float64      `json:"tx_gbps"`
+	RxGbps       float64      `json:"rx_gbps"`
+	MTU          int          `json:"mtu,omitempty"`
+	Driver       string       `json:"driver,omitempty"`
+	PCIe         *PCIeLink    `json:"pcie,omitempty"`
+	Netplan      *PortNetplan `json:"netplan,omitempty"`
 }
 
 type HostUpdate struct {
@@ -735,6 +789,7 @@ type FabricProfile struct {
 	HostMTU     int        `json:"host_mtu"`     // host netdev MTU at least this (9000; RDMA MTU 4096 needs more than 4200)
 	SpeedMbps   int        `json:"speed_mbps"`   // link speed on both ends (100000)
 	VLAN        string     `json:"vlan"`         // switch VLAN the ports must be in ("100"); empty = the fabric name
+	Subnet      string     `json:"subnet"`       // the fabric's IP subnet ("172.27.100.0/24"), for auto addressing; empty = learned from the ports
 	PFCPriority int        `json:"pfc_priority"` // priority with PFC on, on the switch and the host (3); -1 = PFC off expected
 	ECNQueue    int        `json:"ecn_queue"`    // switch queue with ECN marking (3); -1 = not checked
 	RoCEDSCP    int        `json:"roce_dscp"`    // DSCP the switch maps to the RoCE queue (26); -1 = not checked

@@ -64,6 +64,14 @@ func main() {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		enc.Encode(s.Collect(ctx))
+	case "netplan-helper":
+		// Root only: systemd runs it from srnet-netplan.service.
+		if os.Geteuid() != 0 {
+			log.Fatal("netplan-helper must run as root (srnet-netplan.service runs it)")
+		}
+		if err := agent.NetplanHelper(ctx); err != nil {
+			log.Fatalf("netplan-helper: %v", err)
+		}
 	case "version":
 		fmt.Println(version.Version)
 	default:
@@ -78,6 +86,8 @@ func usage() {
   enroll     register with the controller using a one-time token
   inventory  print the RDMA ports and host facts this agent reports
   sample     print one telemetry sample
+  netplan-helper
+             apply a pending RDMA port network change (root; systemd runs it)
   version    print the agent version`)
 	os.Exit(2)
 }

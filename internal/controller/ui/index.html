@@ -116,6 +116,7 @@ textarea { width:100%; font:12.5px/1.5 var(--mono); resize:vertical; }
 @keyframes in { from { transform:translateY(8px); opacity:0 } }
 .overlay { position:fixed; inset:0; background:rgba(0,0,0,.45); display:flex; align-items:center; justify-content:center; z-index:40; padding:16px; }
 .modal { background:var(--surface); border:1px solid var(--line); border-radius:14px; box-shadow:0 20px 60px rgba(0,0,0,.35); width:min(720px, 100%); max-height:90vh; overflow:auto; }
+.modal.wide { width:min(1240px, 100%); }
 .modal header { display:flex; align-items:center; padding:16px 20px; border-bottom:1px solid var(--line); font-weight:650; font-size:16px; }
 .modal header button { margin-left:auto; }
 .modal .body { padding:18px 20px; }
@@ -193,10 +194,10 @@ function toast(msg, cls = 'info', ms = 5000) {
 }
 const fail = e => toast(e, 'fail', 8000);
 
-function modal({ title, body, actions = [], onClose }) {
+function modal({ title, body, actions = [], onClose, wide }) {
   closeModal();
   const ov = document.createElement('div'); ov.className = 'overlay'; ov.id = 'modal';
-  ov.innerHTML = `<div class="modal" role="dialog"><header>${esc(title)}<button class="sm" onclick="closeModal()">Close</button></header><div class="body">${body}</div>
+  ov.innerHTML = `<div class="modal${wide ? ' wide' : ''}" role="dialog"><header>${esc(title)}<button class="sm" onclick="closeModal()">Close</button></header><div class="body">${body}</div>
     ${actions.length ? `<footer>${actions.map((a, i) => `<button class="${a.cls || ''}" data-i="${i}">${esc(a.label)}</button>`).join('')}</footer>` : ''}</div>`;
   ov.addEventListener('click', e => { if (e.target === ov) closeModal(); });
   ov.querySelectorAll('footer button').forEach(b => b.onclick = async () => { const a = actions[+b.dataset.i]; if (a.run) { b.disabled = true; try { await a.run(); } finally { b.disabled = false; } } if (a.close !== false) closeModal(); });
@@ -311,8 +312,9 @@ async function pageHosts(token) {
   if (!mount(token, `<div class="page-head"><h1>Hosts</h1><span class="sub" id="host-count"></span><span class="spacer"></span>
       <input id="host-filter" placeholder="filter: name, tag, IP, fabric, label, pending, offline" style="width:300px" oninput="hostFilter=this.value;refreshFn?.()">
       <label class="sub">Import CSV <input type="file" id="csv" accept=".csv" style="display:none"></label><button onclick="$('#csv').click()">Import CSV</button>
+      <button onclick="networkPlan()" title="Fabrics from the switch VLANs, and an address for every cabled RDMA port">Auto IP</button>
       <button class="primary" onclick="installCommand()">Agent install command</button></div>
-    <p class="help">Names, tags, labels and expected rates are editable in place; a change saves when you leave the field. CSV columns: host, name, tags, site, rack, ip, label, fabric, expected_gbps.</p>
+    <p class="help">Names, tags, labels and expected rates are editable in place; a change saves when you leave the field. CSV columns: host, name, tags, site, rack, ip, label, fabric, expected_gbps. A port's addresses and MTU change from its Edit button (netplan, with automatic rollback).</p>
     <div class="tbl"><table><thead><tr><th></th><th>Name</th><th>Hostname</th><th>Tags</th><th>Site</th><th>Agent</th><th>Port</th><th>IP</th><th>State</th><th class="num">Speed</th><th>Label</th><th>Fabric</th><th class="num">Expected Gbps</th><th title="PCIe link the NIC negotiated against what the card and the slot can do">PCIe</th><th>Switch port</th><th class="num">Live TX / RX</th></tr></thead><tbody id="hosts"></tbody></table></div>`)) return;
   $('#csv').onchange = async e => {
     const f = e.target.files[0]; if (!f) return;
@@ -343,7 +345,7 @@ async function pageHosts(token) {
         if (!p) { html += '<td colspan="10" class="muted">no RDMA ports found</td></tr>'; return; }
         const sw = p.lldp_switch || p.lldp_port ? `${esc(p.lldp_switch)} <span class="muted">${esc(p.lldp_port)}</span>` : '<span class="muted">-</span>';
         html += `<td><b>${esc(p.rdma_dev)}/${p.port_num}</b> <span class="muted">${esc(p.netdev)}</span></td>
-          <td class="mono">${esc((p.addrs || []).join(', ')) || '<span class="muted">no IP</span>'}</td>
+          <td class="mono">${esc((p.addrs || []).join(', ')) || '<span class="muted">no IP</span>'}${p.netplan?.mgmt ? '' : ` <button class="sm" onclick="netEditor(${h.id},${p.id})" title="Change this port's addresses and MTU (netplan, rolled back automatically if the port does not come up)">Edit</button>`}</td>
           <td>${badge(p.state, p.state === 'ACTIVE' ? 'pass' : 'fail')}</td>
           <td class="num">${p.speed_mbps / 1000}G</td>
           <td><input class="cell" value="${esc(p.label)}" placeholder="label" onchange="patch('/ports/${p.id}',{label:this.value})"></td>
@@ -379,6 +381,98 @@ async function installCommand() {
       <p class="help">Run this as root on each Ubuntu or Debian test host. The token works on up to ${t.hosts} hosts until ${new Date(t.expires_at).toLocaleTimeString()}; the token-less command works for hosts in ${t.enrol_cidrs.length ? 'the enrolment subnets ' + esc(t.enrol_cidrs.join(', ')) : 'no subnet yet (set one under Settings)'}${t.auto_approve ? '' : ' and the host then waits for approval here'}.</p>
       <pre id="cmd">${esc(t.github)}</pre>`, actions: [{ label: 'Copy command', cls: 'primary', close: false, run: function () { copyText(t[$('#cmd').dataset.k || 'github'], $('#modal footer button.primary')); } }, { label: 'Close' }] });
   } catch (e) { fail(e); }
+}
+
+/* ---------- port network (netplan) ---------- */
+const npBadge = st => badge(st.replace('_', ' '), { applied: 'pass', rolled_back: 'warn', refused: 'warn', failed: 'fail', running: 'running', queued: 'queued' }[st] || 'muted');
+function npJobsHTML(jobs) {
+  if (!jobs.length) return '';
+  return `<div class="tbl" style="margin-top:12px"><table><thead><tr><th>When</th><th>Host</th><th>Ports</th><th>Result</th><th>Details</th></tr></thead><tbody>${jobs.slice(0, 8).map(j => `<tr><td class="muted">${ago(j.created)}</td><td>${esc(j.host)}</td>
+    <td class="mono">${j.ports.map(p => esc(p.netdev + ' ' + (p.addresses || []).join(', ') + (p.mtu ? ' mtu ' + p.mtu : ''))).join('<br>')}</td><td>${npBadge(j.status)}</td>
+    <td>${esc(j.message || '')}${j.steps?.length ? `<details><summary class="muted">steps</summary><div class="mono">${j.steps.map(esc).join('<br>')}</div></details>` : ''}</td></tr>`).join('')}</tbody></table></div>`;
+}
+// netEditor changes one port's addresses, MTU and DHCP. The host's root
+// helper applies it and rolls it back unless the port comes up, a fabric
+// peer answers a ping and the agent still reaches the controller.
+async function netEditor(hostID, portID) {
+  let d;
+  try { d = await api('GET', `/hosts/${hostID}/netplan`); } catch (e) { return fail(e); }
+  const p = d.ports.find(x => x.port_id === portID);
+  if (!p) return toast('Port not found', 'warn');
+  const st = d.state, np = p.netplan || {};
+  const helper = st?.helper ? (st.error ? `<span class="delta-bad">${esc(st.error)}</span>` : `helper ${esc(st.helper)}, last looked ${ago(st.at)}`) : '<span class="delta-bad">no netplan helper on this host yet: re-run the Agent install command on it once (it keeps the enrolment), or use Copy netplan</span>';
+  const ov = modal({ title: `Network: ${p.netdev}`, wide: true, body: `<div class="kv"><b>Now</b><span class="mono">${esc(p.addrs.join(', ') || 'no IP')} · MTU ${p.mtu || '?'} · ${esc(p.state)}</span>
+      <b>Netplan</b><span>${np.files?.length ? 'defined in ' + np.files.map(f => `<span class="mono">${esc(f)}</span>`).join(', ') + (np.managed ? '' : '; applying moves it into <span class="mono">90-srnet.yaml</span>, keeping its other settings') : 'not in any netplan file yet'}</span>
+      <b>Helper</b><span>${helper}</span></div>
+    ${np.yaml ? `<details style="margin-top:10px"><summary class="muted">Current netplan for this port</summary><pre>${esc(np.yaml)}</pre></details>` : ''}
+    <div class="row" style="margin-top:14px;flex-wrap:wrap;gap:12px;align-items:flex-end">
+      <label style="flex:1;min-width:260px">Addresses (one per line, with prefix length)<textarea id="np-addrs" rows="2" placeholder="172.27.101.23/24">${esc(p.addrs.join('\n'))}</textarea></label>
+      <label>MTU<input id="np-mtu" type="number" min="576" max="9216" style="width:100px" value="${p.mtu || 9000}"></label>
+      <label class="row" style="gap:6px"><input type="checkbox" id="np-dhcp"> DHCP</label>
+      <label>Rollback after (s)<input id="np-timeout" type="number" min="30" max="300" style="width:90px" value="90"></label></div>
+    <p class="help">Never the management port. Refused while a test runs on this host, and no test starts until it is done. Kept only if ${esc(p.netdev)} shows the address and MTU with link up, a fabric peer answers a ping from it, and the agent still reaches the controller; otherwise the previous files come back.</p>
+    <div id="np-out"></div><div id="np-jobs">${npJobsHTML(d.jobs)}</div>`,
+    actions: [{ label: 'Copy netplan', close: false, run: async () => {
+      try { const pv = await api('POST', `/hosts/${hostID}/netplan/preview`, req()); set('np-out', `${pv.note ? `<p class="delta-bad">${esc(pv.note)}</p>` : ''}<p class="help">To apply by hand on the host (netplan try rolls back unless you press Enter):</p><pre id="np-cmds">${esc(pv.commands)}</pre><button class="sm" style="margin-top:6px" onclick="copyText($('#np-cmds').textContent,this)">Copy</button>`); } catch (e) { fail(e); }
+    } }, { label: 'Close' }, { label: 'Apply', cls: 'primary', close: false, run: async () => {
+      let job;
+      try { job = await api('POST', `/hosts/${hostID}/netplan`, req()); } catch (e) { return fail(e); }
+      set('np-out', `<p>${npBadge('running')} applying; this takes up to a couple of minutes while the helper checks the port</p>`);
+      for (let i = 0; i < 300 && $('#modal') === ov; i++) {
+        await new Promise(r => setTimeout(r, 2000));
+        let cur; try { cur = await api('GET', `/hosts/${hostID}/netplan`); } catch { continue; }
+        const j = cur.jobs.find(x => x.id === job.id);
+        set('np-jobs', npJobsHTML(cur.jobs));
+        if (j && j.status !== 'running' && j.status !== 'queued') {
+          set('np-out', `<p>${npBadge(j.status)} ${esc(j.message || '')}</p>`);
+          toast(`${p.netdev}: ${j.status.replace('_', ' ')}`, j.status === 'applied' ? 'pass' : 'warn', 8000);
+          refreshFn?.();
+          break;
+        }
+      }
+    } }] });
+  const req = () => ({ ports: [{ netdev: p.netdev, addresses: $('#np-addrs').value.split(/[\s,]+/).filter(Boolean), mtu: +$('#np-mtu').value || 0, dhcp4: $('#np-dhcp').checked }], timeout_sec: +$('#np-timeout').value || 90 });
+  if (!st?.helper || st.error) ov.querySelector('footer button.primary').disabled = true;
+}
+
+// networkPlan shows the fabrics read from the switch VLANs and an address
+// for every cabled RDMA port, keeps every address that fits, and applies
+// the ticked ports one host at a time. Switch changes are lines to paste:
+// the service only reads switches.
+async function networkPlan() {
+  let pl;
+  try { pl = await api('GET', '/network/plan'); } catch (e) { return fail(e); }
+  const act = { ok: 'pass', assign: 'info', renumber: 'warn', mtu: 'info', blocked: 'fail' };
+  const fabrics = pl.fabrics.map(f => `<tr><td><b>${esc(f.fabric)}</b></td><td>${esc(f.vlan || '-')}</td><td class="mono">${esc(f.subnet || '')}${f.subnet ? ` <span class="muted">(${f.subnet_from === 'profile' ? 'set on the fabric' : 'from its ports'})</span>` : '<span class="delta-bad">unknown: set it on the Fabric check page</span>'}</td>
+    <td class="num">${f.host_mtu}</td><td class="num">${f.ports}</td><td>${f.exists ? badge('exists', 'muted') : `<label class="row" style="gap:6px"><input type="checkbox" class="np-fab" value="${esc(f.fabric)}" ${f.subnet ? 'checked' : 'disabled'}> create</label>`}</td></tr>`).join('');
+  const ports = pl.ports.map((p, i) => `<tr><td>${p.action === 'blocked' || (p.action === 'ok' && !p.set_fabric) ? '' : `<input type="checkbox" class="np-port" data-i="${i}" ${p.apply ? 'checked' : ''} title="${p.action === 'ok' ? 'store the fabric on the port; the host is not changed' : 'apply on the host'}">`}</td>
+    <td>${esc(p.host)}${p.online ? '' : ' <span class="muted">(offline)</span>'}</td><td><span class="mono">${esc(p.netdev)}</span>${p.label ? ` <span class="muted">${esc(p.label)}</span>` : ''}</td>
+    <td class="mono">${esc(p.switch_port || '')}</td><td>${esc(p.vlan || '-')}</td><td><b>${esc(p.fabric || '-')}</b>${p.set_fabric ? ' <span class="muted" title="the port has no fabric yet; applying stores this one">(new)</span>' : ''}</td>
+    <td class="mono">${esc(p.current.join(', ') || 'no IP')}<br><span class="muted">MTU ${p.current_mtu || '?'}</span></td>
+    <td>${p.action === 'blocked' || p.action === 'ok' ? `<span class="mono">${esc(p.address || '')}</span>` : `<input class="cell mono np-addr" data-i="${i}" style="width:150px" value="${esc(p.address)}">`}${p.mtu ? `<br><span class="muted">MTU ${p.mtu}</span>` : ''}</td>
+    <td>${badge(p.action, act[p.action])}</td><td class="muted" style="white-space:normal;min-width:240px;max-width:360px">${esc([p.rule, p.note].filter(Boolean).join('; '))}</td></tr>`).join('');
+  const sw = pl.commands.map(c => `<p style="margin:10px 0 4px"><b>${esc(c.switch)}</b> <span class="muted">${esc(c.address || '')}: paste into sonic-cli</span> <button class="sm" onclick="copyText(this.parentNode.nextElementSibling.textContent,this)">Copy</button></p><pre>${esc(c.lines)}</pre>`).join('');
+  const fixes = pl.switch.map(f => `<li><span class="mono">${esc(f.switch)} ${esc(f.port)}</span> (${esc(f.host)} ${esc(f.netdev)}): ${esc(f.reason)}</li>`).join('');
+  const ov = modal({ title: 'Auto IP and fabrics', wide: true, body: `${pl.warnings.map(w => `<p class="delta-bad">${esc(w)}</p>`).join('')}
+    <p class="help">Each switch VLAN with hosts on it is a fabric. A port joins the fabric of its switch port's VLAN. An address that fits is kept. A port with none gets the host's number plus 10 per PCI function (servers .1 and .2, Spark port 1 at .1x, port 2 at .2x), or the next free address from .10. Edit any proposed address before applying. Ticked ports are applied one host at a time through the netplan helper, with rollback.</p>
+    <h3 style="margin:8px 0">Fabrics</h3><div class="tbl"><table><thead><tr><th>Fabric</th><th>VLAN</th><th>Subnet</th><th class="num">Host MTU</th><th class="num">Ports</th><th></th></tr></thead><tbody>${fabrics || '<tr><td colspan="6" class="empty">No fabric found: the switch VLAN table is empty and no fabric is set up.</td></tr>'}</tbody></table></div>
+    <h3 style="margin:16px 0 8px">Ports</h3><div class="tbl"><table><thead><tr><th></th><th>Host</th><th>Port</th><th>Switch port</th><th>VLAN</th><th>Fabric</th><th>Now</th><th>Planned</th><th>Action</th><th>Why</th></tr></thead><tbody>${ports || '<tr><td colspan="10" class="empty">No cabled RDMA port seen on the switch yet.</td></tr>'}</tbody></table></div>
+    ${fixes ? `<h3 style="margin:16px 0 8px">Switch ports to fix</h3><ul style="margin:0 0 6px 18px">${fixes}</ul>${sw}<p class="help">The service never writes to the switch. Paste these lines, wait a minute for the next VLAN read, and reload this plan.</p>` : ''}
+    <div id="np-batch"></div>`,
+    actions: [{ label: 'Close' }, { label: 'Apply ticked', cls: 'primary', close: false, run: async () => {
+      const body = { fabrics: [...document.querySelectorAll('#modal .np-fab:checked')].map(c => c.value), ports: [...document.querySelectorAll('#modal .np-port:checked')].map(c => { const p = pl.ports[+c.dataset.i]; return { port_id: p.port_id, address: $(`#modal .np-addr[data-i="${c.dataset.i}"]`)?.value || p.address, mtu: p.mtu || 0 }; }) };
+      if (!body.fabrics.length && !body.ports.length) return toast('Nothing ticked', 'warn');
+      let res; try { res = await api('POST', '/network/plan/apply', body); } catch (e) { return fail(e); }
+      toast(`${res.fabrics.length} fabric(s) created, ${res.labels} port fabric(s) set, ${res.jobs.length} host change(s) queued`, 'pass', 8000);
+      ov.querySelector('footer button.primary').disabled = true;
+      for (let i = 0; i < 600 && $('#modal') === ov && res.jobs.length; i++) {
+        let all; try { all = await api('GET', '/netplan/jobs'); } catch { await new Promise(r => setTimeout(r, 3000)); continue; }
+        const mine = all.filter(j => j.batch === res.batch);
+        set('np-batch', `<h3 style="margin:16px 0 8px">Progress</h3>${npJobsHTML(mine)}`);
+        if (mine.every(j => j.status !== 'running' && j.status !== 'queued')) { refreshFn?.(); break; }
+        await new Promise(r => setTimeout(r, 3000));
+      }
+    } }] });
 }
 
 /* ---------- topology ---------- */
@@ -510,7 +604,7 @@ async function pageTopology(token) {
 const fabricFields = [
   ['mode', 'Mode', 'select', 'lossless = PFC and ECN expected, drops are a fault; lossy = PFC off expected, drops allowed; blank = consistency only'],
   ['switch_mtu', 'Switch MTU at least', 'number', ''], ['host_mtu', 'Host MTU at least', 'number', ''], ['speed_mbps', 'Speed Mbps (0 = any)', 'number', ''],
-  ['vlan', 'VLAN (blank = fabric name)', 'text', ''], ['pfc_priority', 'PFC priority (-1 = off)', 'number', ''], ['ecn_queue', 'ECN queue (-1 = unchecked)', 'number', ''],
+  ['vlan', 'VLAN (blank = fabric name)', 'text', ''], ['subnet', 'Subnet for Auto IP (blank = from its ports)', 'text', ''], ['pfc_priority', 'PFC priority (-1 = off)', 'number', ''], ['ecn_queue', 'ECN queue (-1 = unchecked)', 'number', ''],
   ['roce_dscp', 'RoCE DSCP (-1 = unchecked)', 'number', ''], ['cnp_dscp', 'CNP DSCP (-1 = unchecked)', 'number', ''], ['roce_mode', 'RoCE mode', 'text', ''], ['trust', 'Host trust (dscp, pcp, blank)', 'text', ''],
 ];
 async function pageFabric(token) {
@@ -526,7 +620,7 @@ async function pageFabric(token) {
     set('fb-sum', fc.cables.length ? (fc.issues ? badge(`${fc.issues} of ${fc.cables.length} cables need attention`, 'fail') : badge(`${fc.cables.length} cables ok`, 'pass')) : '');
     const fabrics = [...new Set([...fc.profiles.map(p => p.fabric), ...fc.cables.map(c => c.fabric).filter(Boolean)])].sort();
     set('fb-profiles', (fabrics.length ? fabrics.map(f => { const p = fc.profiles.find(x => x.fabric === f);
-      return `<div class="row" style="margin-bottom:8px"><b style="width:90px">Fabric ${esc(f)}</b><span class="sub" style="width:260px">${p ? `${esc(p.mode || 'consistency only')} · PFC ${p.pfc_priority >= 0 ? 'priority ' + p.pfc_priority : 'off'} · ECN ${p.ecn_queue >= 0 ? 'queue ' + p.ecn_queue : 'unchecked'} · MTU ≥ ${p.switch_mtu}/${p.host_mtu}` : 'no profile: consistency checks only'}</span>
+      return `<div class="row" style="margin-bottom:8px"><b style="width:90px">Fabric ${esc(f)}</b><span class="sub" style="width:260px">${p ? `${esc(p.mode || 'consistency only')} · PFC ${p.pfc_priority >= 0 ? 'priority ' + p.pfc_priority : 'off'} · ECN ${p.ecn_queue >= 0 ? 'queue ' + p.ecn_queue : 'unchecked'} · MTU ≥ ${p.switch_mtu}/${p.host_mtu}${p.subnet ? ' · ' + esc(p.subnet) : ''}` : 'no profile: consistency checks only'}</span>
         <button class="sm" onclick="editFabric('${esc(f)}')">${p ? 'Edit' : 'Set profile'}</button>${p ? ` <button class="sm danger" onclick="delFabric('${esc(f)}')">Remove</button>` : ''}</div>`; }).join('') : '<span class="muted">No fabrics yet: label host ports with a fabric on the Hosts page, or let the switch VLANs name them.</span>')
       + `<p class="help" style="margin:8px 0 0">A profile starts from a preset: <b>lossless RoCE</b> (DSCP 26 to queue 3, PFC on priority 3, ECN on queue 3, CNPs on DSCP 48, host trust dscp with ECN on) or <b>lossy</b> (PFC off, no QoS map, drops allowed). Edit any field afterwards.</p>`);
     set('fb-cables', fc.cables.length ? fc.cables.map(c => {
@@ -545,18 +639,18 @@ async function editFabric(fabric) {
   const cur = (window._fabricProfiles || []).find(p => p.fabric === fabric) || { ...presets.lossy, fabric, mode: '' };
   const field = ([k, label, type, help], v) => type === 'select'
     ? `<label title="${esc(help)}">${esc(label)} <select name="${k}"><option value="" ${!v ? 'selected' : ''}>consistency only</option><option value="lossless" ${v === 'lossless' ? 'selected' : ''}>lossless</option><option value="lossy" ${v === 'lossy' ? 'selected' : ''}>lossy</option></select></label>`
-    : `<label>${esc(label)} <input name="${k}" type="${type}" value="${esc(v ?? '')}" style="width:${type === 'number' ? 90 : 120}px"></label>`;
+    : `<label>${esc(label)} <input name="${k}" type="${type}" value="${esc(v ?? '')}" style="width:${type === 'number' ? 90 : k === 'subnet' ? 150 : 120}px"${k === 'subnet' ? ' placeholder="172.27.100.0/24"' : ''}></label>`;
   const render = p => fabricFields.map(f => field(f, p[f[0]])).join('') + `<label class="inline"><input type="checkbox" name="host_ecn" ${p.host_ecn ? 'checked' : ''}> Host ECN (np and rp) on the PFC priority</label>`;
   modal({ title: `Fabric ${fabric} profile`, body: `<div class="row" style="margin-bottom:10px"><button type="button" class="sm" onclick="fabricPreset('lossless')">Lossless RoCE preset</button><button type="button" class="sm" onclick="fabricPreset('lossy')">Lossy preset</button></div><form id="fb-form" class="row" onsubmit="return false">${render(cur)}</form>`,
     actions: [{ label: 'Cancel' }, { label: 'Save', cls: 'primary', close: false, run: async () => {
       const f = new FormData($('#fb-form')), g = k => f.get(k);
-      const p = { fabric, mode: g('mode'), switch_mtu: +g('switch_mtu'), host_mtu: +g('host_mtu'), speed_mbps: +g('speed_mbps'), vlan: g('vlan').trim(), pfc_priority: +g('pfc_priority'), ecn_queue: +g('ecn_queue'),
+      const p = { fabric, mode: g('mode'), switch_mtu: +g('switch_mtu'), host_mtu: +g('host_mtu'), speed_mbps: +g('speed_mbps'), vlan: g('vlan').trim(), subnet: g('subnet').trim(), pfc_priority: +g('pfc_priority'), ecn_queue: +g('ecn_queue'),
         roce_dscp: +g('roce_dscp'), cnp_dscp: +g('cnp_dscp'), roce_mode: g('roce_mode').trim(), trust: g('trust').trim(), host_ecn: !!g('host_ecn') };
       try { await api('PUT', '/fabrics/' + encodeURIComponent(fabric), p); toast('Profile saved; the check re-runs now', 'pass'); closeModal(); refreshFn?.(); } catch (e) { fail(e); }
     } }] });
   window._fabricPresets = presets; window._fabricRender = render;
 }
-function fabricPreset(mode) { const f = $('#fb-form'); if (f) f.innerHTML = window._fabricRender({ ...window._fabricPresets[mode], fabric: '' }); }
+function fabricPreset(mode) { const f = $('#fb-form'); if (f) { const keep = { vlan: f.elements.vlan?.value || '', subnet: f.elements.subnet?.value || '' }; f.innerHTML = window._fabricRender({ ...window._fabricPresets[mode], fabric: '', ...keep }); } }
 function delFabric(fabric) { confirmBox('Remove profile', `Remove the profile of fabric ${fabric}? Its cables go back to consistency checks only.`, 'Remove', async () => { await api('DELETE', '/fabrics/' + encodeURIComponent(fabric)); refreshFn?.(); }); }
 
 /* ---------- runs ---------- */

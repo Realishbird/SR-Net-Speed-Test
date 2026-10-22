@@ -75,10 +75,11 @@ type Orchestrator struct {
 	portLock map[int64]int64        // port id -> run id
 	tcpPorts map[int64]map[int]bool // agent id -> tcp ports in use
 	active   map[int64]*activeRun
+	netplan  map[int64]bool // agent id -> a network change is being applied: no run starts there
 }
 
 func newOrchestrator(s *Store, h *hub, m *metrics) *Orchestrator {
-	return &Orchestrator{store: s, hub: h, metrics: m, portLock: map[int64]int64{}, tcpPorts: map[int64]map[int]bool{}, active: map[int64]*activeRun{}}
+	return &Orchestrator{store: s, hub: h, metrics: m, portLock: map[int64]int64{}, tcpPorts: map[int64]map[int]bool{}, active: map[int64]*activeRun{}, netplan: map[int64]bool{}}
 }
 
 // errorCounterKeys grow only when something is wrong; CNP and ECN counters are
@@ -570,6 +571,10 @@ func (o *Orchestrator) Start(ctx context.Context, spec api.RunSpec) (int64, erro
 				o.mu.Unlock()
 				return 0, &userError{fmt.Errorf("%s %s is busy in run %d", e.Host, e.IP, r)}
 			}
+			if o.netplan[e.AgentID] {
+				o.mu.Unlock()
+				return 0, &userError{fmt.Errorf("the network setup of %s is being changed; try again in a few minutes", e.Host)}
+			}
 		}
 	}
 	legs := make([]api.Leg, len(plans))
@@ -636,6 +641,31 @@ func (o *Orchestrator) hostBusy(agentID int64) bool {
 		}
 	}
 	return false
+}
+
+// claimNetplan marks a host as having a network change under way, so no run
+// starts on it; it fails while a run uses the host or another change runs.
+func (o *Orchestrator) claimNetplan(agentID int64) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.netplan[agentID] {
+		return errors.New("another network change on this host is still running")
+	}
+	for _, ar := range o.active {
+		for _, p := range ar.plans {
+			if p.client.AgentID == agentID || p.server.AgentID == agentID {
+				return fmt.Errorf("run %d is using this host; change the network when it ends", ar.id)
+			}
+		}
+	}
+	o.netplan[agentID] = true
+	return nil
+}
+
+func (o *Orchestrator) releaseNetplan(agentID int64) {
+	o.mu.Lock()
+	delete(o.netplan, agentID)
+	o.mu.Unlock()
 }
 
 func (o *Orchestrator) allocTCP(agentID int64) int {

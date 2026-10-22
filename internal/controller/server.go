@@ -42,6 +42,7 @@ type Server struct {
 	health  *switchHealth
 	acc     *access   // Phase 7: tokens, SSO sessions, roles
 	notify  *notifier // Phase 7: Slack, Teams and webhook channels
+	netplan *netplanJobs
 
 	mu         sync.Mutex
 	agentCache map[string]int64              // secret hash -> agent id
@@ -95,7 +96,7 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 		rel:    newReleases(filepath.Join(cfg.DataDir, "releases"), store, h, al),
 		alerts: al, suites: newSuiteRunner(store, orch, al), snmp: snmp, health: newSwitchHealth(),
 		agentCache: map[string]int64{}, portCache: map[int64]map[string]portMeta{}, hostName: map[int64]string{},
-		acc: newAccess(),
+		acc: newAccess(), netplan: newNetplanJobs(),
 	}
 	s.notify = newNotifier(store, cfg.PublicURL)
 	s.loadAccess(ctx)
@@ -214,6 +215,7 @@ func (s *Server) Handler() http.Handler {
 	s.routesOps(mux)
 	s.routesScale(mux)
 	s.routesExport(mux)
+	s.routesNetplan(mux)
 	s.routesCleanup(mux)
 	return mux
 }
@@ -803,6 +805,12 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(v)
+}
+
+func writeJSONStatus(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(v)
 }
 

@@ -60,6 +60,18 @@ srnet import hosts.csv                        # bulk: host,name,tags,site,rack,i
 
 Nothing is hard-coded to any model of host. Test plans refer to hosts by name, `tag:<tag>`, RDMA IP or port label.
 
+### Port addresses and MTU (netplan)
+
+Each RDMA port on the Hosts page has an **Edit** button for its addresses, MTU and DHCP. The agent never runs as root, so `install.sh` adds a small root helper (`srnet-netplan.path`, `.service` and `.timer`, running the root-owned `/usr/local/bin/srnet-agent netplan-helper`; hosts installed before this feature need the install command run once more). The helper:
+
+- refuses the management port (the one with the default route or the route to the controller) and anything that is not an RDMA netdev, and refuses while a test runs on the host (no test starts on it until the change is done);
+- moves the port's stanza out of the other files in `/etc/netplan` (keeping its other settings, such as `optional` or `routes`) into `/etc/netplan/90-srnet.yaml`, because netplan adds up the addresses of every file that defines a port;
+- runs `netplan generate`, then `netplan apply`, and keeps the change only if the port shows the address and MTU with link up, a fabric peer answers a ping from it, and the agent still reaches the controller. Otherwise every file goes back as it was and is applied again. Backups of the last 10 changes stay in `/var/lib/srnet-netplan/backups`, and every change is in the audit log.
+
+**Copy netplan** shows the file and the `netplan try` lines to apply it by hand, for hosts without the helper.
+
+**Auto IP** (Hosts page) turns each switch VLAN with hosts on it into a fabric (its subnet from the fabric profile, else from its ports' addresses) and places every cabled RDMA port in the fabric of its switch port's VLAN. Addresses that fit are kept. A port with none gets the host's number plus 10 per PCI function (servers .1, .2 on single-port cards; a Spark's port 1 at .1x and port 2 at .2x), or the next free address from .10. Proposed addresses can be edited before **Apply ticked**, which creates the new fabrics, stores each port's fabric and applies the changes one host at a time through the helper. The twin PCIe function of a Spark port and the management port are left out. A switch port in the wrong VLAN, or below the fabric's switch MTU, comes back as `sonic-cli` lines to paste: the service only ever reads the switch.
+
 ## 4. Run tests
 
 ```bash
