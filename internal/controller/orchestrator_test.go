@@ -271,3 +271,36 @@ func TestScoreLatencyAndUDP(t *testing.T) {
 		t.Errorf("tcp retransmit verdict %s note %q", v, plans[0].leg.Note)
 	}
 }
+
+// TestCounterSideRing: run 19's Spark ring, where every port sends on one
+// leg and receives on the next. Each leg still owns its server port's rx;
+// bidirectional, no port belongs to one leg alone.
+func TestCounterSideRing(t *testing.T) {
+	ep := func(id int64) endpoint { return endpoint{Host: "spark", PortID: id} }
+	var plans []*legPlan
+	for i := int64(1); i <= 4; i++ {
+		plans = append(plans, &legPlan{client: ep(i), server: ep(i%4 + 1)})
+	}
+	ar := &activeRun{spec: api.RunSpec{Test: "write"}, plans: plans, stages: [][]*legPlan{plans}}
+	for i, p := range plans {
+		if id, dir, _, ok := counterSide(ar, p); !ok || dir != dirRx || id != p.server.PortID {
+			t.Errorf("leg %d: counterSide = %d %v %v, want server port %d rx", i, id, dir, ok, p.server.PortID)
+		}
+	}
+	ar.spec.Test = "read"
+	if id, dir, _, ok := counterSide(ar, plans[0]); !ok || dir != dirTx || id != 2 {
+		t.Errorf("read: counterSide = %d %v %v", id, dir, ok)
+	}
+	ar.spec.Test, ar.spec.Bidir = "write", true
+	if _, _, _, ok := counterSide(ar, plans[0]); ok {
+		t.Error("bidir ring: every port carries two legs each way, no per-leg counter")
+	}
+	// Fan-in: two clients into one server port. The server's rx is shared,
+	// each client's tx is its own.
+	ar.spec.Bidir = false
+	fan := []*legPlan{{client: ep(1), server: ep(9)}, {client: ep(2), server: ep(9)}}
+	ar.stages = [][]*legPlan{fan}
+	if id, dir, _, ok := counterSide(ar, fan[1]); !ok || dir != dirTx || id != 2 {
+		t.Errorf("fan-in: counterSide = %d %v %v", id, dir, ok)
+	}
+}

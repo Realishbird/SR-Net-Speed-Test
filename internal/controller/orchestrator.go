@@ -1351,11 +1351,6 @@ const (
 // its stage: the server port in a fan-out, the client port in a fan-in. dir is
 // the direction data flows on that port; nic selects netdev counters for IP tests.
 func counterSide(ar *activeRun, p *legPlan) (portID int64, dir counterDir, nic, ok bool) {
-	uses := map[int64]int{}
-	for _, q := range ar.stages[p.stage] {
-		uses[q.client.PortID]++
-		uses[q.server.PortID]++
-	}
 	nic = api.IsIP(ar.spec.Test)
 	// write/send/tcp/udp: data flows client -> server. read: server -> client.
 	serverDir, clientDir := dirRx, dirTx
@@ -1365,16 +1360,42 @@ func counterSide(ar *activeRun, p *legPlan) (portID int64, dir counterDir, nic, 
 	if ar.spec.Bidir {
 		serverDir, clientDir = dirBoth, dirBoth
 	}
+	// A port's counter in one direction belongs to a leg when no other leg
+	// of the stage moves data through that port in that direction. In a
+	// ring each port sends on one leg and receives on another, so its rx
+	// still counts the leg it serves (run 19 read 0 on every leg when uses
+	// were counted per port).
+	type use struct {
+		port int64
+		dir  counterDir
+	}
+	uses := map[use]int{}
+	for _, q := range ar.stages[p.stage] {
+		for _, u := range []use{{q.client.PortID, clientDir}, {q.server.PortID, serverDir}} {
+			if u.dir == dirBoth {
+				uses[use{u.port, dirRx}]++
+				uses[use{u.port, dirTx}]++
+			} else {
+				uses[u]++
+			}
+		}
+	}
+	free := func(port int64, d counterDir) bool {
+		if d == dirBoth {
+			return uses[use{port, dirRx}] == 1 && uses[use{port, dirTx}] == 1
+		}
+		return uses[use{port, d}] == 1
+	}
 	if api.IsCollective(ar.spec.Test) {
 		// A ring sends each rank's share onward: what a rank transmits over
 		// the collective is its bus bandwidth, so the client port's tx rate
 		// is the figure to hold against NCCL's own.
 		return p.client.PortID, dirTx, nic, true
 	}
-	if uses[p.server.PortID] == 1 {
+	if free(p.server.PortID, serverDir) {
 		return p.server.PortID, serverDir, nic, true
 	}
-	if uses[p.client.PortID] == 1 {
+	if free(p.client.PortID, clientDir) {
 		return p.client.PortID, clientDir, nic, true
 	}
 	return 0, dirRx, nic, false
