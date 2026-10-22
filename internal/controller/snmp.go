@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,9 +28,30 @@ var ifColumns = map[string]string{
 	"1.3.6.1.2.1.2.2.1.19":    "out_discards",
 }
 
+// ifOrder is the walk order: the octet counters first, back to back, so
+// their read time is known to within a fraction of a second.
+var ifOrder = []string{"in_octets", "out_octets", "name", "speed_mbps", "oper_status", "in_errors", "out_errors", "in_discards", "out_discards"}
+
+// snmpPrev is the last octet reading of one port: the values and when they
+// were first seen. For the fast poll it also keeps the recent gaps between
+// counter changes, which give the switch's own counter refresh period.
 type snmpPrev struct {
 	t       time.Time
 	in, out float64
+	gaps    []float64 // seconds between recent changes, newest last
+}
+
+// refreshPeriod is the mean of the recent gaps between counter changes, or
+// 0 until three are known.
+func (p snmpPrev) refreshPeriod() float64 {
+	if len(p.gaps) < 3 {
+		return 0
+	}
+	sum := 0.0
+	for _, g := range p.gaps {
+		sum += g
+	}
+	return sum / float64(len(p.gaps))
 }
 
 // snmpCollector polls every switch that has an SNMP community and writes
@@ -48,15 +70,16 @@ type snmpCollector struct {
 
 	mu       sync.Mutex
 	switches []SwitchConfig
-	prev     map[string]snmpPrev   // switch/ifIndex
+	prev     map[string]snmpPrev   // walk|fast/switch/ifIndex
 	status   map[string]snmpStatus // switch name -> last poll
 	upIdx    map[string][]snmpPort // switch name -> ports that were up at the last full walk
 }
 
-// snmpPort is a port the fast poll reads: its ifIndex and name.
+// snmpPort is a port the fast poll reads: its ifIndex, name and speed.
 type snmpPort struct {
 	Index string
 	Name  string
+	Mbps  int64
 }
 
 // snmpStatus is the outcome of the last poll of one switch.
@@ -160,8 +183,15 @@ func (c *snmpCollector) poll(sw SwitchConfig) ([]byte, int, error) {
 	}
 	defer g.Conn.Close()
 
-	rows := map[string]map[string]any{} // ifIndex -> column -> value
+	colOID := map[string]string{}
 	for oid, col := range ifColumns {
+		colOID[col] = oid
+	}
+	rows := map[string]map[string]any{} // ifIndex -> column -> value
+	start := time.Now()
+	var octetsAt time.Time
+	for _, col := range ifOrder {
+		oid := colOID[col]
 		walk := g.BulkWalk
 		if g.Version == gosnmp.Version1 {
 			walk = g.Walk
@@ -177,17 +207,23 @@ func (c *snmpCollector) poll(sw SwitchConfig) ([]byte, int, error) {
 		if err != nil {
 			return nil, 0, fmt.Errorf("walk %s: %w", col, err)
 		}
+		if col == "out_octets" {
+			// The octet columns were read between start and now.
+			octetsAt = start.Add(time.Since(start) / 2)
+		}
 	}
 	var up []snmpPort
 	for idx, r := range rows {
+		r["_at"] = octetsAt
 		if name, _ := r["name"].(string); name != "" {
 			if st, _ := r["oper_status"].(int64); st == 1 {
-				up = append(up, snmpPort{idx, name})
+				mbps, _ := r["speed_mbps"].(int64)
+				up = append(up, snmpPort{idx, name, mbps})
 			}
 		}
 	}
 	sort.Slice(up, func(i, j int) bool { return up[i].Name < up[j].Name })
-	lines, ports := c.render(sw, rows, time.Now())
+	lines, ports := c.render(sw, rows, time.Now(), "walk")
 	c.mu.Lock()
 	c.upIdx[sw.Name] = up
 	c.mu.Unlock()
@@ -251,8 +287,10 @@ func (c *snmpCollector) pollFast(sw SwitchConfig) ([]byte, error) {
 	oids, byOID := fastOIDs(ports)
 	rows := map[string]map[string]any{}
 	for _, p := range ports {
-		rows[p.Index] = map[string]any{"name": p.Name}
+		rows[p.Index] = map[string]any{"name": p.Name, "_mbps": p.Mbps}
 	}
+	// A chunk is 30 OIDs, five whole ports; each row is stamped with the
+	// time its chunk came back.
 	const chunk = 30
 	for i := 0; i < len(oids); i += chunk {
 		end := i + chunk
@@ -263,6 +301,7 @@ func (c *snmpCollector) pollFast(sw SwitchConfig) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+		at := time.Now()
 		for _, pdu := range res.Variables {
 			if pdu.Type == gosnmp.NoSuchObject || pdu.Type == gosnmp.NoSuchInstance {
 				continue
@@ -272,9 +311,10 @@ func (c *snmpCollector) pollFast(sw SwitchConfig) ([]byte, error) {
 				continue
 			}
 			rows[k.Index][k.Col] = snmpValue(pdu.Value)
+			rows[k.Index]["_at"] = at
 		}
 	}
-	lines, _ := c.render(sw, rows, time.Now())
+	lines, _ := c.render(sw, rows, time.Now(), "fast")
 	return lines, nil
 }
 
@@ -317,19 +357,33 @@ func (c *snmpCollector) connect(sw SwitchConfig) (*gosnmp.GoSNMP, error) {
 }
 
 // render turns walked rows into Prometheus lines, computing rates against
-// the previous reading of each port.
-func (c *snmpCollector) render(sw SwitchConfig, rows map[string]map[string]any, now time.Time) ([]byte, int) {
+// the previous reading of each port. kind is "walk" for the full walk and
+// "fast" for the quick poll during runs, and each keeps its own previous
+// readings: sharing them gave rates over a fraction of a second between a
+// fast read and a walk, which showed as 7 Tbps on a 100G port. A row may
+// carry "_at", the time its octet counters were read, used instead of now.
+//
+// The switch's SNMP agent refreshes its counters every few seconds, so a
+// poll every 2 s sees the counters jump in steps. The fast poll therefore
+// takes a rate only when the counters change, and divides by the switch's
+// refresh period (the mean gap between changes) rather than by the time
+// between reads. Rates never exceed the port's speed.
+func (c *snmpCollector) render(sw SwitchConfig, rows map[string]map[string]any, now time.Time, kind string) ([]byte, int) {
 	var buf bytes.Buffer
 	ports := 0
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	ts := now.UnixMilli()
 	for idx, r := range rows {
 		name, _ := r["name"].(string)
 		if name == "" {
 			continue
 		}
 		ports++
+		at := now
+		if t, ok := r["_at"].(time.Time); ok && !t.IsZero() {
+			at = t
+		}
+		ts := at.UnixMilli()
 		labels := formatLabels(map[string]string{"switch": sw.Name, "port": name})
 		num := func(col string) (float64, bool) {
 			n, ok := r[col].(int64)
@@ -349,15 +403,58 @@ func (c *snmpCollector) render(sw SwitchConfig, rows map[string]map[string]any, 
 		}
 		in, okI := num("in_octets")
 		out, okO := num("out_octets")
-		if okI && okO {
-			key := sw.Name + "/" + idx
-			if p, ok := c.prev[key]; ok {
-				if dt := now.Sub(p.t).Seconds(); dt > 0 && in >= p.in && out >= p.out {
-					fmt.Fprintf(&buf, "srnet_switch_rx_gbps%s %g %d\n", labels, (in-p.in)*8/dt/1e9, ts)
-					fmt.Fprintf(&buf, "srnet_switch_tx_gbps%s %g %d\n", labels, (out-p.out)*8/dt/1e9, ts)
+		if !okI || !okO {
+			continue
+		}
+		limit := math.Inf(1)
+		if n, ok := num("speed_mbps"); ok && n > 0 {
+			limit = n / 1000
+		} else if n, ok := num("_mbps"); ok && n > 0 {
+			limit = n / 1000
+		}
+		emit := func(bytesIn, bytesOut, secs float64) {
+			fmt.Fprintf(&buf, "srnet_switch_rx_gbps%s %g %d\n", labels, math.Min(bytesIn*8/secs/1e9, limit), ts)
+			fmt.Fprintf(&buf, "srnet_switch_tx_gbps%s %g %d\n", labels, math.Min(bytesOut*8/secs/1e9, limit), ts)
+		}
+		key := kind + "/" + sw.Name + "/" + idx
+		p, ok := c.prev[key]
+		since := at.Sub(p.t).Seconds()
+		switch {
+		case !ok || in < p.in || out < p.out:
+			// First reading, or the counters were reset.
+			c.prev[key] = snmpPrev{t: at, in: in, out: out}
+		case since < 0.5:
+			// Too close to the last reading to say anything.
+		case kind != "fast":
+			emit(in-p.in, out-p.out, since)
+			c.prev[key] = snmpPrev{t: at, in: in, out: out}
+		case in == p.in && out == p.out:
+			// No change yet. Once a whole refresh period has gone by
+			// without one, the port really is idle.
+			per := p.refreshPeriod()
+			if per == 0 {
+				per = 6
+			}
+			if since > 1.5*per {
+				emit(0, 0, 1)
+			}
+		default:
+			// The counters moved: that is one refresh period of traffic,
+			// unless the last change is long gone (the poll was paused
+			// between runs), when the time since it is all there is.
+			span := since
+			if since <= 15 {
+				p.gaps = append(p.gaps, since)
+				if len(p.gaps) > 16 {
+					p.gaps = p.gaps[len(p.gaps)-16:]
+				}
+				if per := p.refreshPeriod(); per > 0 {
+					span = per
 				}
 			}
-			c.prev[key] = snmpPrev{now, in, out}
+			emit(in-p.in, out-p.out, span)
+			p.t, p.in, p.out = at, in, out
+			c.prev[key] = p
 		}
 	}
 	return buf.Bytes(), ports

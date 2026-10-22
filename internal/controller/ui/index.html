@@ -1154,7 +1154,7 @@ function switchHealth(h) {
   return [h.cpu_pct ? `<span class="chip" style="color:${h.cpu_pct > 85 ? 'var(--fail)' : 'inherit'}">CPU ${fmt(h.cpu_pct, 0)}%</span>` : '',
     h.mem_pct ? `<span class="chip">mem ${fmt(h.mem_pct, 0)}%</span>` : '',
     (h.temps || []).length ? `<span class="chip" style="color:${hot.length ? 'var(--fail)' : 'inherit'}" title="${esc((h.temps || []).map(t => `${t.name} ${fmt(t.c, 0)}°${t.high_c ? ' (limit ' + fmt(t.high_c, 0) + ')' : ''}`).join(', '))}">${hot.length ? hot.length + ' sensor' + (hot.length === 1 ? '' : 's') + ' over limit' : 'hottest ' + fmt(maxT, 0) + ' °C'}</span>` : '',
-    (h.fans || []).length ? `<span class="chip" style="color:${bad(h.fans).length ? 'var(--fail)' : 'inherit'}" title="${esc(h.fans.map(f => f.name + ' ' + (f.ok ? 'ok' : f.status || 'failed')).join(', '))}">fans ${h.fans.length - bad(h.fans).length}/${h.fans.length}</span>` : '',
+    (h.fans || []).length ? `<span class="chip" style="color:${bad(h.fans).length ? 'var(--fail)' : 'inherit'}" title="${esc(h.fans.map(f => f.name + ' ' + (f.ok ? 'ok' : f.status || 'failed') + (f.rpm ? ' ' + fmt(f.rpm, 0) + ' rpm' : '')).join(', '))}">fans ${h.fans.length - bad(h.fans).length}/${h.fans.length}</span>` : '',
     (h.psus || []).length ? `<span class="chip" style="color:${bad(h.psus).length ? 'var(--fail)' : 'inherit'}" title="${esc(h.psus.map(f => f.name + ' ' + (f.ok ? 'ok' : f.status || 'failed')).join(', '))}">PSU ${h.psus.length - bad(h.psus).length}/${h.psus.length}</span>` : '',
     up ? `<span class="chip" title="${esc(h.last_reboot ? 'Last reboot: ' + h.last_reboot : '')}">up ${up}</span>` : ''].filter(Boolean).join(' ') || '<span class="muted">no readings</span>';
 }

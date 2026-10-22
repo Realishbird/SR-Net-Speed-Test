@@ -556,16 +556,19 @@ type SwitchHealth struct {
 }
 
 type SwitchTemp struct {
-	Name      string  `json:"name"`
+	Name      string  `json:"name"`                // what the switch calls it, e.g. "CPU Temp"
+	Component string  `json:"component,omitempty"` // the gNMI key it was read under, e.g. "TEMP 1"
 	C         float64 `json:"c"`
 	HighC     float64 `json:"high_c,omitempty"`
 	CriticalC float64 `json:"critical_c,omitempty"`
 }
 
 type SwitchPart struct {
-	Name   string `json:"name"`
-	OK     bool   `json:"ok"`
-	Status string `json:"status,omitempty"`
+	Name      string  `json:"name"`
+	Component string  `json:"component,omitempty"`
+	OK        bool    `json:"ok"`
+	Status    string  `json:"status,omitempty"`
+	RPM       float64 `json:"rpm,omitempty"` // fans only
 }
 
 // SwitchProbe is the latest evidence that a collection path works.

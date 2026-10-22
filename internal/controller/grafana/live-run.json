@@ -307,12 +307,12 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "rate({__name__=~\"srnet_nic_(rx|tx)_(prio[0-9]_pause|pause_ctrl_phy|global_pause)\",configured=\"yes\",run_id=~\"(^|.*,)$run_id(,.*|$)\"}[30s] keep_metric_names)",
+     "expr": "rate({__name__=~\"srnet_nic_(rx|tx)_(prio[0-9]_pause|pause_ctrl_phy|global_pause)\",configured=\"yes\",run_id=~\"(^|.*,)$run_id(,.*|$)\"}[30s]) keep_metric_names",
      "legendFormat": "{{host}} {{netdev}} {{__name__}}"
     },
     {
      "refId": "B",
-     "expr": "rate(srnet_nic_rx_discards_phy{configured=\"yes\",run_id=~\"(^|.*,)$run_id(,.*|$)\"}[30s] keep_metric_names)",
+     "expr": "rate(srnet_nic_rx_discards_phy{configured=\"yes\",run_id=~\"(^|.*,)$run_id(,.*|$)\"}[30s]) keep_metric_names",
      "legendFormat": "{{host}} {{netdev}} {{__name__}}"
     }
    ]
@@ -392,12 +392,12 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "rate(srnet_rdma_hw_np_cnp_sent{configured=\"yes\",run_id=~\"(^|.*,)$run_id(,.*|$)\"}[30s] keep_metric_names)",
+     "expr": "rate(srnet_rdma_hw_np_cnp_sent{configured=\"yes\",run_id=~\"(^|.*,)$run_id(,.*|$)\"}[30s]) keep_metric_names",
      "legendFormat": "{{host}} {{rdma_dev}} {{__name__}}"
     },
     {
      "refId": "B",
-     "expr": "rate(srnet_rdma_hw_np_ecn_marked_roce_packets{configured=\"yes\",run_id=~\"(^|.*,)$run_id(,.*|$)\"}[30s] keep_metric_names)",
+     "expr": "rate(srnet_rdma_hw_np_ecn_marked_roce_packets{configured=\"yes\",run_id=~\"(^|.*,)$run_id(,.*|$)\"}[30s]) keep_metric_names",
      "legendFormat": "{{host}} {{rdma_dev}} {{__name__}}"
     }
    ]
@@ -447,12 +447,12 @@
     },
     {
      "refId": "C",
-     "expr": "rate({__name__=~\"srnet_gnmi_.*_in_octets\"}[2m] keep_metric_names)*8/1e9 > 0.05",
+     "expr": "rate({__name__=~\"srnet_gnmi_.*_in_octets\"}[2m]) keep_metric_names*8/1e9 > 0.05",
      "legendFormat": "{{source}} {{interface_name}} in"
     },
     {
      "refId": "D",
-     "expr": "rate({__name__=~\"srnet_gnmi_.*_out_octets\"}[2m] keep_metric_names)*8/1e9 > 0.05",
+     "expr": "rate({__name__=~\"srnet_gnmi_.*_out_octets\"}[2m]) keep_metric_names*8/1e9 > 0.05",
      "legendFormat": "{{source}} {{interface_name}} out"
     }
    ]

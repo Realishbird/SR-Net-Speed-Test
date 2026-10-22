@@ -81,6 +81,7 @@ func (sc rawScope) matchers() (hosts string, switches []string) {
 		}
 		switches = append(switches, fmt.Sprintf(`{__name__=~"srnet_gnmi_.+",source=~"%s",interface_name=~"%s"}`, src, ports))
 		switches = append(switches, fmt.Sprintf(`{__name__=~"srnet_gnmi_.+",source=~"%s",interface_interface_id=~"%s"}`, src, ports))
+		switches = append(switches, fmt.Sprintf(`{__name__=~"srnet_gnmi_.+",source=~"%s",component_name=~"%s"}`, src, ports))
 		switches = append(switches, fmt.Sprintf(`{__name__=~"srnet_gnmi_.+",source=~"%s",name=~"%s"}`, src, ports))
 	}
 	return hosts, switches
@@ -156,11 +157,16 @@ func rawRows(l vmLine, switches []SwitchConfig, w func(row []string) error) erro
 		if who == "" {
 			who = lab["source"]
 		}
-		port = lab["interface_name"]
-		if port == "" {
-			port = lab["name"]
+		// gnmic labels the port by its list key: interface_name for the
+		// interface counters, interface_interface_id for QoS, component_name
+		// for optics (older builds wrote plain name).
+		for _, k := range []string{"interface_name", "interface_interface_id", "component_name", "name"} {
+			if port == "" && lab[k] != "" {
+				port = lab[k]
+			}
+			known[k] = true
 		}
-		known["source"], known["interface_name"], known["name"] = true, true, true
+		known["source"] = true
 	}
 	var rest []string
 	for k, v := range lab {

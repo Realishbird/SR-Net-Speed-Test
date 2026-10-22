@@ -1140,6 +1140,17 @@ func (s *Server) refreshQoS(ctx context.Context) {
 	}
 }
 
+// dot1p is the PFC priority of a QoS series: gnmic labels it
+// pfc_priority_dot1p on this SONiC, plain dot1p on older builds.
+func dot1p(labels map[string]string) string {
+	for _, k := range []string{"pfc_priority_dot1p", "priority_dot1p", "dot1p"} {
+		if v := labels[k]; v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // qosCounterRe picks the gnmic series of the per-port QoS subscription that
 // matter for a leg: queue drops and ECN marks, PFC pause frames.
 const qosCounterRe = `srnet_gnmi_.*qos.*(dropped_pkts|ecn_marked_pkts|pause_frames_rx|pause_frames_tx)$`
@@ -1179,7 +1190,7 @@ func (m *metrics) qosDeltas(ctx context.Context, sw SwitchConfig, port string, f
 			}
 			if strings.Contains(q, ":") {
 				where = "queue " + q[strings.LastIndex(q, ":")+1:] + " "
-			} else if p := row.Labels["dot1p"]; p != "" {
+			} else if p := dot1p(row.Labels); p != "" {
 				where = "prio " + p + " "
 			}
 			r[port+" "+where+leaf] += row.Value
