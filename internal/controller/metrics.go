@@ -25,6 +25,7 @@ type portMeta struct {
 	Label   string
 	Fabric  string
 	HasIP   bool // an address is configured, so the port is meant to be in use
+	PCIe    *api.PCIeLink
 }
 
 type bytesPoint struct {
@@ -48,7 +49,13 @@ type metrics struct {
 	mu     sync.Mutex
 	ring   map[int64][]bytesPoint
 	latest map[int64]liveRate
+	temps  map[int64]portTemps    // latest optic and NIC chip temperatures per port
 	hosts  map[string][]hostPoint // host-level samples (CPU, load, memory) by host name
+}
+
+type portTemps struct {
+	opticAt, nicAt time.Time
+	optic, nic     float64
 }
 
 type hostPoint struct {
@@ -60,7 +67,7 @@ type hostPoint struct {
 const ringAge = 2 * time.Hour
 
 func newMetrics(vmURL string) *metrics {
-	return &metrics{vmURL: strings.TrimRight(vmURL, "/"), out: make(chan []byte, 256), ring: map[int64][]bytesPoint{}, latest: map[int64]liveRate{}, hosts: map[string][]hostPoint{}}
+	return &metrics{vmURL: strings.TrimRight(vmURL, "/"), out: make(chan []byte, 256), ring: map[int64][]bytesPoint{}, latest: map[int64]liveRate{}, temps: map[int64]portTemps{}, hosts: map[string][]hostPoint{}}
 }
 
 // ingest records a batch from one agent. ports maps "dev/port" to its metadata;
@@ -128,6 +135,16 @@ func (m *metrics) track(portID int64, s api.Sample) {
 	rx, okR := s.Values["rdma_rx_bytes"]
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if t, ok := s.Values["dom_temp_c"]; ok {
+		pt := m.temps[portID]
+		pt.optic, pt.opticAt = t, s.Time
+		m.temps[portID] = pt
+	}
+	if t, ok := s.Values["nic_temp_c"]; ok {
+		pt := m.temps[portID]
+		pt.nic, pt.nicAt = t, s.Time
+		m.temps[portID] = pt
+	}
 	if okT && okR {
 		pt := bytesPoint{t: s.Time, tx: tx, rx: rx, nicTx: s.Values["nic_tx_bytes"], nicRx: s.Values["nic_rx_bytes"]}
 		r := m.ring[portID]
@@ -213,6 +230,22 @@ func (m *metrics) live(portID int64) (tx, rx float64) {
 		return 0, 0
 	}
 	return r.tx, r.rx
+}
+
+// temperatures returns a port's latest optic and NIC chip readings (0 when
+// none, or none in the last 10 minutes: the DOM read runs every 5 s during
+// a test and with the idle sample otherwise).
+func (m *metrics) temperatures(portID int64) (optic, nic float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t := m.temps[portID]
+	if time.Since(t.opticAt) < 10*time.Minute {
+		optic = t.optic
+	}
+	if time.Since(t.nicAt) < 10*time.Minute {
+		nic = t.nic
+	}
+	return optic, nic
 }
 
 // liveNIC is live for the netdev (IP) counters.

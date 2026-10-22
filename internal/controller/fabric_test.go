@@ -188,3 +188,25 @@ func TestFabricPresets(t *testing.T) {
 		t.Fatalf("%+v", y)
 	}
 }
+
+// A Spark's ConnectX-7 shows its one cabled port as two PCIe functions; the
+// switch lists both on the same switch port. Only the configured half is a
+// cable the fabric check holds to a profile.
+func TestCableInUseSkipsTwinsAndUnusedPorts(t *testing.T) {
+	h := hostRec{Host: api.Host{Name: "Dell Spark 1", Ports: []api.HostPort{
+		{Netdev: "enp1s0f0np0", Addrs: []string{"172.27.100.10/24"}, Label: "P1-B1-A", Fabric: "100", State: "ACTIVE", LLDPSwitch: "z9864f", LLDPPort: "Ethernet0"},
+		{Netdev: "enP2p1s0f0np0", State: "ACTIVE", LLDPSwitch: "z9864f", LLDPPort: "Ethernet0"},
+		{Netdev: "enp2s0f1np1", State: "DOWN"},
+		{Netdev: "eth9", Label: "spare", State: "DOWN", LLDPSwitch: "z9864f", LLDPPort: "Ethernet9"},
+	}}}
+	want := []bool{true, false, false, false}
+	for i, p := range h.Ports {
+		if got := cableInUse(h, p); got != want[i] {
+			t.Errorf("cableInUse(%s) = %v, want %v", p.Netdev, got, want[i])
+		}
+	}
+	// A labelled port without an address on its own cable is still checked.
+	if !cableInUse(hostRec{}, api.HostPort{Netdev: "x", Label: "P2", State: "ACTIVE", LLDPSwitch: "sw", LLDPPort: "Ethernet4"}) {
+		t.Error("labelled port on its own cable should be checked")
+	}
+}

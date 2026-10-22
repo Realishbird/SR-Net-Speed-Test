@@ -101,7 +101,7 @@ func TestBuildTopologyMapsLLDPToSwitchPorts(t *testing.T) {
 		}
 		return api.HostStats{}, false
 	}
-	tp := buildTopology(hosts, switches, ports, map[string]string{"Z9864F": "gnmi"}, live, stats, func(int64) bool { return true })
+	tp := buildTopology(hosts, switches, ports, map[string]string{"Z9864F": "gnmi"}, live, nil, stats, func(int64) bool { return true })
 	if len(tp.Switches) != 1 || tp.Switches[0].Source != "gnmi" {
 		t.Fatalf("switches = %+v", tp.Switches)
 	}

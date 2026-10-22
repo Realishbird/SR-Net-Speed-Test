@@ -22,6 +22,7 @@ type alerter struct {
 	webhook    string
 	notifier   *notifier // Phase 7 channels; nil in tests
 	hotC       float64
+	nicHotC    float64
 	offlineFor time.Duration
 
 	mu        sync.Mutex
@@ -42,7 +43,11 @@ func newAlerter(s *Store, h *hub, cfg Config) *alerter {
 	if hot == 0 {
 		hot = 70
 	}
-	return &alerter{store: s, hub: h, webhook: cfg.AlertWebhookURL, hotC: hot, offlineFor: 2 * time.Minute, wasOnline: map[int64]bool{}, idleErr: map[string]float64{}, idleGrew: map[string]time.Time{}}
+	nicHot := cfg.NicMaxC
+	if nicHot == 0 {
+		nicHot = 100
+	}
+	return &alerter{store: s, hub: h, webhook: cfg.AlertWebhookURL, hotC: hot, nicHotC: nicHot, offlineFor: 2 * time.Minute, wasOnline: map[int64]bool{}, idleErr: map[string]float64{}, idleGrew: map[string]time.Time{}}
 }
 
 func (a *alerter) open(ctx context.Context, al api.Alert) {
@@ -118,6 +123,21 @@ func (a *alerter) onSamples(ctx context.Context, host string, ports map[string]p
 				a.open(ctx, api.Alert{Kind: "transceiver_hot", Host: host, Port: port, Message: fmt.Sprintf("%s %s transceiver at %.1f C (limit %.0f C)", host, port, t, a.hotC)})
 			} else if t < a.hotC-5 {
 				a.resolve(ctx, "transceiver_hot", host, port)
+			}
+		}
+		if g, ok := s.Values["pcie_link_gen"]; ok && meta.PCIe != nil && meta.PCIe.MaxGen > 0 {
+			wd := s.Values["pcie_link_width"]
+			if int(g) < meta.PCIe.MaxGen || (wd > 0 && int(wd) < meta.PCIe.MaxWidth) {
+				a.open(ctx, api.Alert{Kind: "pcie_degraded", Host: host, Port: port, Message: fmt.Sprintf("%s %s PCIe link is Gen%.0f x%.0f, the card supports Gen%d x%d (reseat the card, check the riser or slot)", host, port, g, wd, meta.PCIe.MaxGen, meta.PCIe.MaxWidth)})
+			} else {
+				a.resolve(ctx, "pcie_degraded", host, port)
+			}
+		}
+		if t, ok := s.Values["nic_temp_c"]; ok {
+			if t > a.nicHotC {
+				a.open(ctx, api.Alert{Kind: "nic_hot", Host: host, Port: port, Message: fmt.Sprintf("%s %s NIC chip at %.1f C (limit %.0f C)", host, port, t, a.nicHotC)})
+			} else if t < a.nicHotC-5 {
+				a.resolve(ctx, "nic_hot", host, port)
 			}
 		}
 		total := 0.0

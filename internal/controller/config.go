@@ -28,8 +28,11 @@ type Config struct {
 	GnmicConfigPath    string  `json:"gnmic_config_path"`
 	GnmicPath          string  `json:"gnmic_path"` // gnmic binary, used for gNMI Get requests (LLDP table)
 	GrafanaDashDir     string  `json:"grafana_dashboard_dir"`
-	AlertWebhookURL    string  `json:"alert_webhook_url,omitempty"` // POSTed a JSON body when an alert opens or resolves
-	TransceiverMaxC    float64 `json:"transceiver_max_c,omitempty"` // alert when a module reports this temperature or more (default 70)
+	AlertWebhookURL    string  `json:"alert_webhook_url,omitempty"`    // POSTed a JSON body when an alert opens or resolves
+	TransceiverMaxC    float64 `json:"transceiver_max_c,omitempty"`    // alert when a module reports this temperature or more (default 70)
+	NicMaxC            float64 `json:"nic_max_c,omitempty"`            // alert when a NIC chip reports more than this (default 100; ConnectX-7 and Broadcom Thor both rate 105)
+	ReleaseKeep        int     `json:"release_keep,omitempty"`         // mirrored agent releases to keep besides the ones in use (default 3, 0 = never prune)
+	SwitchFastPollSec  int     `json:"switch_fast_poll_sec,omitempty"` // SNMP poll of the ports in use while a run is active (default 2, 0 = off)
 
 	// Switches to collect port counters from: gNMI through gnmic when GNMIUser
 	// is set, SNMP v1/v2c from the controller itself when SNMPCommunity is set.

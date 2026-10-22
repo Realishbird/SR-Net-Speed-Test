@@ -232,6 +232,7 @@ func (s *Store) Hosts(ctx context.Context) ([]hostRec, error) {
 		hp.RdmaDev, hp.PortNum, hp.Netdev, hp.Addrs = p.RdmaDev, p.PortNum, p.Netdev, p.Addrs
 		hp.State, hp.SpeedMbps, hp.FWVersion, hp.Transceiver = p.State, p.SpeedMbps, p.FWVersion, p.Transceiver
 		hp.LLDPSwitch, hp.LLDPPort = p.LLDPSwitch, p.LLDPPort
+		hp.MTU, hp.Driver, hp.PCIe = p.MTU, p.Driver, p.PCIe
 		if hp.Addrs == nil {
 			hp.Addrs = []string{} // a port with no IP configured yet
 		}

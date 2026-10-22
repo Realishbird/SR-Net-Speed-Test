@@ -79,6 +79,68 @@ type Port struct {
 	LLDPSwitch  string        `json:"lldp_switch,omitempty"` // neighbour chassis name from lldpd
 	LLDPPort    string        `json:"lldp_port,omitempty"`   // neighbour port id
 	Settings    *PortSettings `json:"settings,omitempty"`    // host-side RoCE settings, for the fabric check
+	PCIe        *PCIeLink     `json:"pcie,omitempty"`        // the NIC function's PCIe link
+}
+
+// PCIeLink is how a NIC function is attached: the link it trained to, what
+// the card supports and what the slot offers. Gen 1..6, width in lanes.
+type PCIeLink struct {
+	Address    string  `json:"address"`              // PCI address, e.g. 0000:01:00.0
+	Gen        int     `json:"gen"`                  // current generation
+	Width      int     `json:"width"`                // current lanes
+	MaxGen     int     `json:"max_gen"`              // the card's maximum
+	MaxWidth   int     `json:"max_width"`            //
+	SlotGen    int     `json:"slot_gen,omitempty"`   // the upstream port's maximum (the slot)
+	SlotWidth  int     `json:"slot_width,omitempty"` //
+	UsableGbps float64 `json:"usable_gbps"`          // rough data throughput the current link allows
+}
+
+// PCIeUsableGbps estimates the payload bandwidth of a link: the raw rate per
+// lane (128b/130b encoding from Gen3 on, 8b/10b before) times the lanes,
+// less about 15% for TLP headers, flow control and completions, which is
+// what a NIC sees in practice (Gen5 x16 about 430 Gbps, Gen5 x4 about 108,
+// Gen4 x16 about 215, Gen4 x8 about 108).
+func PCIeUsableGbps(gen, width int) float64 {
+	perLane := map[int]float64{1: 2.5 * 0.8, 2: 5 * 0.8, 3: 8 * 128 / 130, 4: 16 * 128 / 130, 5: 32 * 128 / 130, 6: 64 * 242 / 256}[gen]
+	if perLane == 0 || width <= 0 {
+		return 0
+	}
+	return perLane * float64(width) * 0.85
+}
+
+// Downtrained says whether the link runs below the card's maximum.
+func (l *PCIeLink) Downtrained() bool {
+	if l == nil {
+		return false
+	}
+	return (l.MaxGen > 0 && l.Gen < l.MaxGen) || (l.MaxWidth > 0 && l.Width < l.MaxWidth)
+}
+
+// String renders "Gen5 x4".
+func (l *PCIeLink) String() string {
+	if l == nil || l.Gen == 0 {
+		return ""
+	}
+	return "Gen" + strconvItoa(l.Gen) + " x" + strconvItoa(l.Width)
+}
+
+func strconvItoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var b []byte
+	for n > 0 {
+		b = append([]byte{byte('0' + n%10)}, b...)
+		n /= 10
+	}
+	if neg {
+		b = append([]byte{'-'}, b...)
+	}
+	return string(b)
 }
 
 // PortSettings is how the host has the port set up for RoCE: what the
@@ -230,22 +292,25 @@ type Host struct {
 }
 
 type HostPort struct {
-	ID           int64    `json:"id"`
-	RdmaDev      string   `json:"rdma_dev"`
-	PortNum      int      `json:"port_num"`
-	Netdev       string   `json:"netdev"`
-	Addrs        []string `json:"addrs"`
-	State        string   `json:"state"`
-	SpeedMbps    int      `json:"speed_mbps"`
-	FWVersion    string   `json:"fw_version"`
-	Transceiver  string   `json:"transceiver"`
-	Label        string   `json:"label"`
-	Fabric       string   `json:"fabric"`
-	ExpectedGbps float64  `json:"expected_gbps"`
-	LLDPSwitch   string   `json:"lldp_switch,omitempty"`
-	LLDPPort     string   `json:"lldp_port,omitempty"`
-	TxGbps       float64  `json:"tx_gbps"`
-	RxGbps       float64  `json:"rx_gbps"`
+	ID           int64     `json:"id"`
+	RdmaDev      string    `json:"rdma_dev"`
+	PortNum      int       `json:"port_num"`
+	Netdev       string    `json:"netdev"`
+	Addrs        []string  `json:"addrs"`
+	State        string    `json:"state"`
+	SpeedMbps    int       `json:"speed_mbps"`
+	FWVersion    string    `json:"fw_version"`
+	Transceiver  string    `json:"transceiver"`
+	Label        string    `json:"label"`
+	Fabric       string    `json:"fabric"`
+	ExpectedGbps float64   `json:"expected_gbps"`
+	LLDPSwitch   string    `json:"lldp_switch,omitempty"`
+	LLDPPort     string    `json:"lldp_port,omitempty"`
+	TxGbps       float64   `json:"tx_gbps"`
+	RxGbps       float64   `json:"rx_gbps"`
+	MTU          int       `json:"mtu,omitempty"`
+	Driver       string    `json:"driver,omitempty"`
+	PCIe         *PCIeLink `json:"pcie,omitempty"`
 }
 
 type HostUpdate struct {
@@ -373,12 +438,26 @@ type Release struct {
 	Arches   []string          `json:"arches"`
 	SHA256   map[string]string `json:"sha256"` // arch -> checksum
 	Mirrored time.Time         `json:"mirrored_at"`
+	InUse    int               `json:"in_use,omitempty"` // agents running this version
 }
 
 type ReleaseList struct {
 	Current  string    `json:"controller_version"`
 	Latest   string    `json:"latest_on_github,omitempty"`
 	Mirrored []Release `json:"mirrored"`
+	Keep     int       `json:"keep"` // newest versions kept by the daily prune, besides those in use
+}
+
+// DeleteResult is the outcome of a run deletion.
+type DeleteResult struct {
+	Deleted      []int64      `json:"deleted"`
+	Skipped      []DeleteSkip `json:"skipped"`
+	SampleErrors int          `json:"sample_errors,omitempty"`
+}
+
+type DeleteSkip struct {
+	ID     int64  `json:"id"`
+	Reason string `json:"reason"`
 }
 
 // UpdateJob tracks one fleet update: hosts are updated one at a time.
@@ -450,16 +529,43 @@ type Alert struct {
 // Switch is a SONiC switch the controller reads port counters from, as shown
 // in the UI and CLI. Secrets are never returned; Has* says whether one is set.
 type Switch struct {
-	Name            string       `json:"name"`
-	Address         string       `json:"address"`
-	SNMPVersion     string       `json:"snmp_version,omitempty"`
-	HasSNMP         bool         `json:"has_snmp"`
-	GNMIPort        int          `json:"gnmi_port,omitempty"`
-	GNMIUser        string       `json:"gnmi_user,omitempty"`
-	HasGNMIPassword bool         `json:"has_gnmi_password"`
-	GNMITLS         bool         `json:"gnmi_tls"`
-	SNMP            *SwitchProbe `json:"snmp,omitempty"`
-	GNMI            *SwitchProbe `json:"gnmi,omitempty"`
+	Name            string        `json:"name"`
+	Address         string        `json:"address"`
+	SNMPVersion     string        `json:"snmp_version,omitempty"`
+	HasSNMP         bool          `json:"has_snmp"`
+	GNMIPort        int           `json:"gnmi_port,omitempty"`
+	GNMIUser        string        `json:"gnmi_user,omitempty"`
+	HasGNMIPassword bool          `json:"has_gnmi_password"`
+	GNMITLS         bool          `json:"gnmi_tls"`
+	SNMP            *SwitchProbe  `json:"snmp,omitempty"`
+	GNMI            *SwitchProbe  `json:"gnmi,omitempty"`
+	Health          *SwitchHealth `json:"health,omitempty"`
+}
+
+// SwitchHealth is the switch's own state: CPU, memory, temperature
+// sensors, fans and PSUs, polled over gNMI once a minute.
+type SwitchHealth struct {
+	At         time.Time    `json:"at"`
+	CPUPct     float64      `json:"cpu_pct,omitempty"`
+	MemPct     float64      `json:"mem_pct,omitempty"`
+	UptimeSec  float64      `json:"uptime_sec,omitempty"`
+	LastReboot string       `json:"last_reboot,omitempty"`
+	Temps      []SwitchTemp `json:"temps"`
+	Fans       []SwitchPart `json:"fans"`
+	PSUs       []SwitchPart `json:"psus"`
+}
+
+type SwitchTemp struct {
+	Name      string  `json:"name"`
+	C         float64 `json:"c"`
+	HighC     float64 `json:"high_c,omitempty"`
+	CriticalC float64 `json:"critical_c,omitempty"`
+}
+
+type SwitchPart struct {
+	Name   string `json:"name"`
+	OK     bool   `json:"ok"`
+	Status string `json:"status,omitempty"`
 }
 
 // SwitchProbe is the latest evidence that a collection path works.
@@ -502,6 +608,8 @@ type HostStats struct {
 type Topology struct {
 	At       time.Time    `json:"at"`
 	Warning  string       `json:"warning,omitempty"`
+	OpticMax float64      `json:"optic_max_c"` // transceiver alert limit (controller.json transceiver_max_c)
+	NicMax   float64      `json:"nic_max_c"`   // NIC chip alert limit (controller.json nic_max_c)
 	Switches []TopoSwitch `json:"switches"`
 	Links    []TopoLink   `json:"links"` // switch to switch
 	Hosts    []TopoHost   `json:"hosts"`
@@ -566,6 +674,8 @@ type TopoHostPort struct {
 	Switch     string  `json:"switch,omitempty"`      // configured switch the LLDP neighbour resolved to
 	SwitchPort string  `json:"switch_port,omitempty"` // its port
 	TwinOf     string  `json:"twin_of,omitempty"`     // netdev of the port this one shares a cable with (a second PCIe function of the same physical port); drawn once, under that port
+	OpticC     float64 `json:"optic_c,omitempty"`     // transceiver temperature from DOM, latest reading
+	NicC       float64 `json:"nic_c,omitempty"`       // NIC chip temperature from the port's hwmon sensor, latest reading
 }
 
 type TopoRun struct {

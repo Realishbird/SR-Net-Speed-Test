@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,10 +41,22 @@ type snmpCollector struct {
 	interval time.Duration
 	kick     chan struct{}
 
+	// fast is the interval of the quick poll of the ports that are up while
+	// a run is active (0 = off); active says whether a run is on.
+	fast   time.Duration
+	active func() bool
+
 	mu       sync.Mutex
 	switches []SwitchConfig
 	prev     map[string]snmpPrev   // switch/ifIndex
 	status   map[string]snmpStatus // switch name -> last poll
+	upIdx    map[string][]snmpPort // switch name -> ports that were up at the last full walk
+}
+
+// snmpPort is a port the fast poll reads: its ifIndex and name.
+type snmpPort struct {
+	Index string
+	Name  string
 }
 
 // snmpStatus is the outcome of the last poll of one switch.
@@ -54,7 +67,7 @@ type snmpStatus struct {
 }
 
 func newSNMPCollector(sw []SwitchConfig, m *metrics) *snmpCollector {
-	c := &snmpCollector{m: m, interval: 30 * time.Second, kick: make(chan struct{}, 1), prev: map[string]snmpPrev{}, status: map[string]snmpStatus{}}
+	c := &snmpCollector{m: m, interval: 30 * time.Second, kick: make(chan struct{}, 1), prev: map[string]snmpPrev{}, status: map[string]snmpStatus{}, upIdx: map[string][]snmpPort{}}
 	c.set(sw)
 	return c
 }
@@ -141,17 +154,8 @@ func (c *snmpCollector) loop(ctx context.Context) {
 }
 
 func (c *snmpCollector) poll(sw SwitchConfig) ([]byte, int, error) {
-	host, port := sw.Address, uint16(161)
-	if h, p, ok := strings.Cut(sw.Address, ":"); ok {
-		if n, err := strconv.Atoi(p); err == nil {
-			host, port = h, uint16(n)
-		}
-	}
-	g := &gosnmp.GoSNMP{Target: host, Port: port, Community: sw.SNMPCommunity, Version: gosnmp.Version2c, Timeout: 5 * time.Second, Retries: 1, MaxRepetitions: 50}
-	if sw.SNMPVersion == "1" {
-		g.Version = gosnmp.Version1
-	}
-	if err := g.Connect(); err != nil {
+	g, err := c.connect(sw)
+	if err != nil {
 		return nil, 0, err
 	}
 	defer g.Conn.Close()
@@ -167,21 +171,154 @@ func (c *snmpCollector) poll(sw SwitchConfig) ([]byte, int, error) {
 			if rows[idx] == nil {
 				rows[idx] = map[string]any{}
 			}
-			switch v := pdu.Value.(type) {
-			case []byte:
-				rows[idx][col] = string(v)
-			case string:
-				rows[idx][col] = v
-			default:
-				rows[idx][col] = gosnmp.ToBigInt(pdu.Value).Int64()
-			}
+			rows[idx][col] = snmpValue(pdu.Value)
 			return nil
 		})
 		if err != nil {
 			return nil, 0, fmt.Errorf("walk %s: %w", col, err)
 		}
 	}
-	now := time.Now()
+	var up []snmpPort
+	for idx, r := range rows {
+		if name, _ := r["name"].(string); name != "" {
+			if st, _ := r["oper_status"].(int64); st == 1 {
+				up = append(up, snmpPort{idx, name})
+			}
+		}
+	}
+	sort.Slice(up, func(i, j int) bool { return up[i].Name < up[j].Name })
+	lines, ports := c.render(sw, rows, time.Now())
+	c.mu.Lock()
+	c.upIdx[sw.Name] = up
+	c.mu.Unlock()
+	return lines, ports, nil
+}
+
+func snmpValue(v any) any {
+	switch x := v.(type) {
+	case []byte:
+		return string(x)
+	case string:
+		return x
+	default:
+		return gosnmp.ToBigInt(v).Int64()
+	}
+}
+
+// fastColumns are the counters the quick poll reads per port.
+var fastColumns = []string{"in_octets", "out_octets", "in_errors", "out_errors", "in_discards", "out_discards"}
+
+// fastLoop polls only the ports that were up at the last full walk, every
+// c.fast, while a run is active. Enterprise SONiC refuses gNMI sample
+// intervals under 30 s, so this is how a run page gets 2 s switch counters.
+func (c *snmpCollector) fastLoop(ctx context.Context) {
+	if c.fast <= 0 {
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(c.fast):
+		}
+		if c.active == nil || !c.active() {
+			continue
+		}
+		for _, sw := range c.current() {
+			lines, err := c.pollFast(sw)
+			if err != nil {
+				log.Printf("snmp %s fast poll: %v", sw.Name, err)
+				continue
+			}
+			c.m.push(lines)
+		}
+	}
+}
+
+// pollFast GETs the fast columns for every up port of one switch in chunks.
+func (c *snmpCollector) pollFast(sw SwitchConfig) ([]byte, error) {
+	c.mu.Lock()
+	ports := append([]snmpPort(nil), c.upIdx[sw.Name]...)
+	c.mu.Unlock()
+	if len(ports) == 0 {
+		return nil, nil
+	}
+	g, err := c.connect(sw)
+	if err != nil {
+		return nil, err
+	}
+	defer g.Conn.Close()
+	oids, byOID := fastOIDs(ports)
+	rows := map[string]map[string]any{}
+	for _, p := range ports {
+		rows[p.Index] = map[string]any{"name": p.Name}
+	}
+	const chunk = 30
+	for i := 0; i < len(oids); i += chunk {
+		end := i + chunk
+		if end > len(oids) {
+			end = len(oids)
+		}
+		res, err := g.Get(oids[i:end])
+		if err != nil {
+			return nil, err
+		}
+		for _, pdu := range res.Variables {
+			if pdu.Type == gosnmp.NoSuchObject || pdu.Type == gosnmp.NoSuchInstance {
+				continue
+			}
+			k, ok := byOID[strings.TrimPrefix(pdu.Name, ".")]
+			if !ok {
+				continue
+			}
+			rows[k.Index][k.Col] = snmpValue(pdu.Value)
+		}
+	}
+	lines, _ := c.render(sw, rows, time.Now())
+	return lines, nil
+}
+
+type snmpCell struct{ Index, Col string }
+
+// fastOIDs builds the instance OIDs for the fast poll and a map back to
+// (ifIndex, column).
+func fastOIDs(ports []snmpPort) ([]string, map[string]snmpCell) {
+	colOID := map[string]string{}
+	for oid, col := range ifColumns {
+		colOID[col] = oid
+	}
+	var oids []string
+	back := map[string]snmpCell{}
+	for _, p := range ports {
+		for _, col := range fastColumns {
+			oid := colOID[col] + "." + p.Index
+			oids = append(oids, oid)
+			back[oid] = snmpCell{p.Index, col}
+		}
+	}
+	return oids, back
+}
+
+func (c *snmpCollector) connect(sw SwitchConfig) (*gosnmp.GoSNMP, error) {
+	host, port := sw.Address, uint16(161)
+	if h, p, ok := strings.Cut(sw.Address, ":"); ok {
+		if n, err := strconv.Atoi(p); err == nil {
+			host, port = h, uint16(n)
+		}
+	}
+	g := &gosnmp.GoSNMP{Target: host, Port: port, Community: sw.SNMPCommunity, Version: gosnmp.Version2c, Timeout: 5 * time.Second, Retries: 1, MaxRepetitions: 50}
+	if sw.SNMPVersion == "1" {
+		g.Version = gosnmp.Version1
+	}
+	if err := g.Connect(); err != nil {
+		return nil, err
+	}
+	return g, nil
+}
+
+// render turns walked rows into Prometheus lines, computing rates against
+// the previous reading of each port.
+func (c *snmpCollector) render(sw SwitchConfig, rows map[string]map[string]any, now time.Time) ([]byte, int) {
 	var buf bytes.Buffer
 	ports := 0
 	c.mu.Lock()
@@ -223,5 +360,5 @@ func (c *snmpCollector) poll(sw SwitchConfig) ([]byte, int, error) {
 			c.prev[key] = snmpPrev{now, in, out}
 		}
 	}
-	return buf.Bytes(), ports, nil
+	return buf.Bytes(), ports
 }

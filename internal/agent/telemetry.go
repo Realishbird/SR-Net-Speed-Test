@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -135,11 +136,20 @@ func (s *Sampler) portValues(ctx context.Context, p api.Port, now time.Time, doD
 			}
 		}
 	}
-	for _, name := range []string{"port_xmit_packets", "port_rcv_packets", "port_rcv_errors", "port_xmit_discards", "symbol_error", "link_downed"} {
-		if n, ok := readNum(filepath.Join(pdir, "counters", name)); ok {
-			v["rdma_"+name] = n
+	// Every port counter the device exposes (packets, errors, discards,
+	// link_downed, port_xmit_wait, VL15 drops and so on), not a fixed list.
+	if ents, err := os.ReadDir(filepath.Join(pdir, "counters")); err == nil {
+		for _, e := range ents {
+			name := e.Name()
+			if name == "port_xmit_data" || name == "port_rcv_data" {
+				continue
+			}
+			if n, ok := readNum(filepath.Join(pdir, "counters", name)); ok {
+				v["rdma_"+name] = n
+			}
 		}
 	}
+	pcieValues(p, v)
 	for k, n := range HWCounters(p.RdmaDev, p.PortNum) {
 		v["rdma_hw_"+k] = n
 	}
@@ -166,6 +176,9 @@ func (s *Sampler) portValues(ctx context.Context, p api.Port, now time.Time, doD
 		}
 		for k, n := range ethtoolStats(ctx, p.Netdev) {
 			v["nic_"+k] = n
+		}
+		if t, ok := nicTemp(p); ok {
+			v["nic_temp_c"] = t
 		}
 		if doDOM {
 			d := ParseModuleDOM(ethtoolModule(ctx, p.Netdev))
@@ -277,6 +290,35 @@ func (s *Sampler) hostValues() map[string]float64 {
 		}
 	}
 	return v
+}
+
+// nicTemp is the NIC chip temperature behind a port: the hwmon chip that
+// the port's PCI device registers (mlx5 labels it "asic", bnxt_en "temp1"),
+// so on a host with several NICs each reading is tied to its port rather
+// than listed as an anonymous hwmon entry. A module/optic sensor on the
+// same chip is skipped, since DOM already reports the optic.
+func nicTemp(p api.Port) (float64, bool) {
+	for _, dev := range []string{filepath.Join(sysRoot, "class/infiniband", p.RdmaDev, "device"), filepath.Join(sysRoot, "class/net", p.Netdev, "device")} {
+		if p.Netdev == "" && strings.HasSuffix(dev, "/net//device") {
+			continue
+		}
+		real, err := filepath.EvalSymlinks(dev)
+		if err != nil {
+			continue
+		}
+		inputs, _ := filepath.Glob(filepath.Join(real, "hwmon/hwmon*/temp*_input"))
+		sort.Strings(inputs)
+		for _, in := range inputs {
+			label := strings.ToLower(strings.TrimSpace(readFile(strings.TrimSuffix(in, "_input") + "_label")))
+			if strings.HasPrefix(label, "module") || strings.HasPrefix(label, "optic") || strings.HasPrefix(label, "transceiver") {
+				continue
+			}
+			if n, ok := readNum(in); ok {
+				return n / 1000, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func sanitize(s string) string {

@@ -39,6 +39,7 @@ type Server struct {
 	alerts  *alerter
 	suites  *suiteRunner
 	snmp    *snmpCollector
+	health  *switchHealth
 	acc     *access   // Phase 7: tokens, SSO sessions, roles
 	notify  *notifier // Phase 7: Slack, Teams and webhook channels
 
@@ -72,13 +73,27 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	m := newMetrics(cfg.VictoriaMetricsURL)
 	go m.writer(ctx)
 	snmp := newSNMPCollector(cfg.Switches, m)
+	fast := cfg.SwitchFastPollSec
+	if fast == 0 {
+		fast = 2
+	}
+	if fast > 0 {
+		snmp.fast = time.Duration(fast) * time.Second
+	}
 	go snmp.loop(ctx)
 	orch := newOrchestrator(store, h, m)
+	snmp.active = func() bool {
+		orch.mu.Lock()
+		n := len(orch.active)
+		orch.mu.Unlock()
+		return n > 0
+	}
+	go snmp.fastLoop(ctx)
 	al := newAlerter(store, h, cfg)
 	s := &Server{
 		cfg: cfg, store: store, hub: h, metrics: m, orch: orch,
 		rel:    newReleases(filepath.Join(cfg.DataDir, "releases"), store, h, al),
-		alerts: al, suites: newSuiteRunner(store, orch, al), snmp: snmp,
+		alerts: al, suites: newSuiteRunner(store, orch, al), snmp: snmp, health: newSwitchHealth(),
 		agentCache: map[string]int64{}, portCache: map[int64]map[string]portMeta{}, hostName: map[int64]string{},
 		acc: newAccess(),
 	}
@@ -100,6 +115,7 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	go s.gnmicLoop(ctx)
 	go s.switchPollLoop(ctx)
 	go s.backupLoop(ctx)
+	go s.pruneLoop(ctx)
 	return s, nil
 }
 
@@ -197,6 +213,8 @@ func (s *Server) Handler() http.Handler {
 	s.routesAccess(mux)
 	s.routesOps(mux)
 	s.routesScale(mux)
+	s.routesExport(mux)
+	s.routesCleanup(mux)
 	return mux
 }
 
@@ -342,7 +360,7 @@ func (s *Server) refreshPortCache(ctx context.Context) {
 		names[h.ID] = h.Name
 		m := map[string]portMeta{}
 		for _, p := range h.Ports {
-			m[p.RdmaDev+"/"+strconv.Itoa(p.PortNum)] = portMeta{PortID: p.ID, Host: h.Name, RdmaDev: p.RdmaDev, PortNum: p.PortNum, Netdev: p.Netdev, Label: p.Label, Fabric: p.Fabric, HasIP: len(p.Addrs) > 0}
+			m[p.RdmaDev+"/"+strconv.Itoa(p.PortNum)] = portMeta{PortID: p.ID, Host: h.Name, RdmaDev: p.RdmaDev, PortNum: p.PortNum, Netdev: p.Netdev, Label: p.Label, Fabric: p.Fabric, HasIP: len(p.Addrs) > 0, PCIe: p.PCIe}
 		}
 		pc[h.ID] = m
 	}
