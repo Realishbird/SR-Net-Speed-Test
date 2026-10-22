@@ -402,7 +402,7 @@ async function netEditor(hostID, portID) {
   const st = d.state, np = p.netplan || {};
   const helper = st?.helper ? (st.error ? `<span class="delta-bad">${esc(st.error)}</span>` : `helper ${esc(st.helper)}, last looked ${ago(st.at)}`) : '<span class="delta-bad">no netplan helper on this host yet: re-run the Agent install command on it once (it keeps the enrolment), or use Copy netplan</span>';
   const ov = modal({ title: `Network: ${p.netdev}`, wide: true, body: `<div class="kv"><b>Now</b><span class="mono">${esc(p.addrs.join(', ') || 'no IP')} · MTU ${p.mtu || '?'} · ${esc(p.state)}</span>
-      <b>Netplan</b><span>${np.files?.length ? 'defined in ' + np.files.map(f => `<span class="mono">${esc(f)}</span>`).join(', ') + (np.managed ? '' : '; applying moves it into <span class="mono">90-srnet.yaml</span>, keeping its other settings') : 'not in any netplan file yet'}</span>
+      <b>Netplan</b><span>${np.files?.length ? 'defined in ' + np.files.map(f => `<span class="mono">${esc(f)}</span>`).join(', ') + (np.managed ? '' : '; applying moves it into <span class="mono">90-srnet.yaml</span>, keeping its other settings') : st?.helper ? 'not in any netplan file yet' : '<span class="muted">unknown until the helper is installed</span>'}</span>
       <b>Helper</b><span>${helper}</span></div>
     ${np.yaml ? `<details style="margin-top:10px"><summary class="muted">Current netplan for this port</summary><pre>${esc(np.yaml)}</pre></details>` : ''}
     <div class="row" style="margin-top:14px;flex-wrap:wrap;gap:12px;align-items:flex-end">
@@ -578,7 +578,7 @@ async function pageTopology(token) {
     const rows = t.switches.flatMap(s => s.ports.map(p => {
       const m = byPort[(s.name + '/' + p.name).toLowerCase()];
       const bad = (p.in_discards || 0) + (p.out_discards || 0) + (p.in_errors || 0) + (p.out_errors || 0) + (p.fcs_errors || 0) > 0;
-      return `<tr><td>${esc(s.name)}</td><td class="mono">${esc(p.name)}</td><td>${p.up == null ? '<span class="muted">?</span>' : badge(p.up ? 'up' : 'down', p.up ? 'pass' : 'fail')}${p.speed_mbps ? ` <span class="muted">${p.speed_mbps / 1000}G</span>` : ''}</td>
+      return `<tr><td>${esc(s.name)}</td><td class="mono">${esc(p.name)}${p.descr ? ` <span class="muted" title="The port's description on the switch">${esc(p.descr)}</span>` : ''}</td><td>${p.up == null ? '<span class="muted">?</span>' : badge(p.up ? 'up' : 'down', p.up ? 'pass' : 'fail')}${p.speed_mbps ? ` <span class="muted">${p.speed_mbps / 1000}G</span>` : ''}</td>
         <td>${m ? `<b>${esc(m.h.name)}</b>` : peer[(s.name + '/' + p.name).toLowerCase()] ? `<span class="muted" title="Cable to another switch">switch ${esc(peer[(s.name + '/' + p.name).toLowerCase()])}</span>` : '<span class="muted">-</span>'}</td><td class="mono">${m ? esc(m.p.label || m.p.netdev) : ''}</td><td class="mono">${m?.p.ip ? esc(m.p.ip) : ''}</td><td>${p.vlan ? `${esc(p.vlan)}${m?.p.fabric && m.p.fabric !== p.vlan ? ` <span class="badge fail" title="The host port's fabric label does not match the VLAN the switch has this port in">host says ${esc(m.p.fabric)}</span>` : ''}` : esc(m?.p.fabric || '')}</td>
         <td class="num">${fmt(p.rx_gbps)}</td><td class="num">${fmt(p.tx_gbps)}</td><td class="num" style="color:${bad ? 'var(--warn)' : 'inherit'}">${fmt(p.in_discards, 0)} / ${fmt(p.out_discards, 0)}</td><td class="num" style="color:${bad ? 'var(--warn)' : 'inherit'}">${fmt(p.in_errors, 0)} / ${fmt(p.out_errors, 0)}</td><td class="num">${fmt(p.fcs_errors, 0)}</td></tr>`;
     }));

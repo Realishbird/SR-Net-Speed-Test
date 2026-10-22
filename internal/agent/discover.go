@@ -37,7 +37,7 @@ func Inventory(ctx context.Context) api.Inventory {
 	inv.CPUModel = cpuModel()
 	inv.MemBytes = memTotal()
 	inv.Ports = DiscoverPorts(ctx)
-	addLLDP(ctx, inv.Ports)
+	addLLDP(ctx, inv.Ports, inv.Hostname)
 	addSettings(ctx, inv.Ports)
 	inv.Tools = toolVersions(ctx)
 	addNetplan(&inv)
@@ -232,7 +232,7 @@ func toolVersions(ctx context.Context) map[string]string {
 
 // addLLDP fills each port's switch neighbour from lldpd, so the controller can
 // match host ports to switch ports without anyone typing cable maps.
-func addLLDP(ctx context.Context, ports []api.Port) {
+func addLLDP(ctx context.Context, ports []api.Port, hostname string) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	// lldpcli is setuid _lldpd and executable by group adm only, so install.sh
@@ -250,46 +250,92 @@ func addLLDP(ctx context.Context, ports []api.Port) {
 		}
 	}
 	lldpOK.Do(func() { log.Printf("lldp: neighbours read from lldpctl") })
-	neigh := ParseLLDP(string(out))
+	local := map[string]bool{}
+	if ifs, err := net.Interfaces(); err == nil {
+		for _, ifc := range ifs {
+			local[strings.ToLower(ifc.Name)] = true
+		}
+	}
+	for _, p := range ports {
+		local[strings.ToLower(p.Netdev)] = true
+	}
+	neigh := ParseLLDP(string(out), hostname, local)
 	for i := range ports {
 		if n, ok := neigh[ports[i].Netdev]; ok {
-			ports[i].LLDPSwitch, ports[i].LLDPPort = n[0], n[1]
+			ports[i].LLDPSwitch, ports[i].LLDPPort, ports[i].LLDPDescr = n.Chassis, n.Port, n.Descr
 		}
 	}
 }
 
 var lldpWarn, lldpOK sync.Once
 
-// ParseLLDP reads `lldpctl -f keyvalue` into netdev -> {chassis name, port id}.
-func ParseLLDP(out string) map[string][2]string {
-	res := map[string][2]string{}
+// LLDPNeighbour is the switch lldpd heard on one interface.
+type LLDPNeighbour struct {
+	Chassis string // system name
+	Port    string // port id when it is a name (ifname or local subtype), else the description
+	Descr   string // port description, when Port is the id
+}
+
+// ParseLLDP reads `lldpctl -f keyvalue` into netdev -> the neighbour on it.
+// lldpctl prints every neighbour of an interface under the same key
+// prefix, each one starting with its "via" line, so the lines are split
+// into neighbours before any field is read. A neighbour that is this host
+// (a ConnectX-7 on a Spark exposes each cable as two PCIe functions that
+// hear each other) or that names one of the host's own interfaces is not
+// a switch and is skipped. The port is the id when the switch sends a
+// name, else the description: SONiC sends its port alias as a local id and
+// whatever description an operator typed, so the controller resolves both
+// against the switch's port table.
+func ParseLLDP(out, self string, local map[string]bool) map[string]LLDPNeighbour {
+	blocks := map[string][]map[string]string{}
+	var order []string
 	for _, line := range strings.Split(out, "\n") {
-		k, v, ok := strings.Cut(line, "=")
+		k, v, ok := strings.Cut(strings.TrimRight(line, "\r"), "=")
 		if !ok || !strings.HasPrefix(k, "lldp.") {
 			continue
 		}
 		parts := strings.Split(k, ".")
-		if len(parts) < 4 {
+		if len(parts) < 3 {
 			continue
 		}
-		dev := parts[1]
-		n := res[dev]
-		switch strings.Join(parts[2:], ".") {
-		case "chassis.name":
-			n[0] = v
-		case "port.ifname":
-			n[1] = v
-		case "port.descr":
-			if n[1] == "" {
-				n[1] = v
-			}
+		dev, field := parts[1], strings.Join(parts[2:], ".")
+		bs := blocks[dev]
+		if bs == nil {
+			order = append(order, dev)
 		}
-		res[dev] = n
+		if _, again := lastBlock(bs)[field]; len(bs) == 0 || field == "via" || field == "rid" && again {
+			bs = append(bs, map[string]string{})
+		}
+		bs[len(bs)-1][field] = v
+		blocks[dev] = bs
 	}
-	for dev, n := range res {
-		if n[0] == "" && n[1] == "" {
-			delete(res, dev)
+	res := map[string]LLDPNeighbour{}
+	for _, dev := range order {
+		for _, b := range blocks[dev] {
+			n := LLDPNeighbour{Chassis: b["chassis.name"], Descr: b["port.descr"]}
+			n.Port = b["port.ifname"]
+			if n.Port == "" {
+				n.Port = b["port.local"]
+			}
+			if n.Port == "" {
+				n.Port, n.Descr = n.Descr, ""
+			}
+			if n.Chassis == "" && n.Port == "" {
+				continue
+			}
+			if self != "" && strings.EqualFold(n.Chassis, self) || local[strings.ToLower(n.Port)] || local[strings.ToLower(n.Descr)] {
+				continue
+			}
+			res[dev] = n
+			break
 		}
 	}
 	return res
+}
+
+func lastBlock(bs []map[string]string) map[string]string {
+	if len(bs) == 0 {
+		return nil
+	}
+	return bs[len(bs)-1]
 }
