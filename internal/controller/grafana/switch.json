@@ -253,8 +253,8 @@
   },
   {
    "type": "stat",
-   "title": "Queue drops /s",
-   "description": "Packets dropped in egress queues of the selected ports. Any value above 0 under load means the fabric is lossy for that traffic.",
+   "title": "Queue drops /min",
+   "description": "Packets dropped per minute in egress queues of the selected ports, over the last 2 minutes. Any value above 0 under load means the fabric is lossy for that traffic.",
    "datasource": {
     "type": "prometheus",
     "uid": "srnet-vm"
@@ -267,7 +267,7 @@
    },
    "fieldConfig": {
     "defaults": {
-     "unit": "pps",
+     "unit": "suffix: /min",
      "thresholds": {
       "mode": "absolute",
       "steps": [
@@ -277,10 +277,11 @@
        },
        {
         "color": "red",
-        "value": 0.001
+        "value": 0.01
        }
       ]
-     }
+     },
+     "decimals": 1
     },
     "overrides": []
    },
@@ -296,14 +297,14 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "sum(rate({__name__=~\"srnet_gnmi_.*queues.*_dropped_pkts\",source=~\"(?i)$switch\",interface_interface_id=~\"$port\"}[2m]) keep_metric_names) or vector(0)"
+     "expr": "sum(rate({__name__=~\"srnet_gnmi_.*queues.*_dropped_pkts\",source=~\"(?i)$switch\",interface_interface_id=~\"$port\"}[2m]) keep_metric_names) * 60 or vector(0)"
     }
    ]
   },
   {
    "type": "stat",
-   "title": "PFC pause /s",
-   "description": "Priority flow control pause frames received plus sent. 0 on this fabric means PFC is off or never needed.",
+   "title": "PFC pause /min",
+   "description": "Priority flow control pause frames received plus sent, per minute. Pauses received while PFC is off on the switch come from hosts set up for lossless RoCE; the switch ignores them.",
    "datasource": {
     "type": "prometheus",
     "uid": "srnet-vm"
@@ -316,7 +317,7 @@
    },
    "fieldConfig": {
     "defaults": {
-     "unit": "pps",
+     "unit": "suffix: /min",
      "thresholds": {
       "mode": "absolute",
       "steps": [
@@ -326,10 +327,11 @@
        },
        {
         "color": "orange",
-        "value": 0.001
+        "value": 0.01
        }
       ]
-     }
+     },
+     "decimals": 1
     },
     "overrides": []
    },
@@ -345,14 +347,14 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "sum(rate({__name__=~\"srnet_gnmi_.*pfc.*pause_frames_(rx|tx)\",source=~\"(?i)$switch\",interface_interface_id=~\"$port\"}[2m]) keep_metric_names) or vector(0)"
+     "expr": "sum(rate({__name__=~\"srnet_gnmi_.*pfc.*pause_frames_(rx|tx)\",source=~\"(?i)$switch\",interface_interface_id=~\"$port\"}[2m]) keep_metric_names) * 60 or vector(0)"
     }
    ]
   },
   {
    "type": "stat",
-   "title": "CRC errors /s",
-   "description": "Frames failing the CRC: a bad cable or optic.",
+   "title": "CRC errors /min",
+   "description": "Frames failing the CRC per minute: a bad cable or optic.",
    "datasource": {
     "type": "prometheus",
     "uid": "srnet-vm"
@@ -365,7 +367,7 @@
    },
    "fieldConfig": {
     "defaults": {
-     "unit": "pps",
+     "unit": "suffix: /min",
      "thresholds": {
       "mode": "absolute",
       "steps": [
@@ -375,10 +377,11 @@
        },
        {
         "color": "red",
-        "value": 0.001
+        "value": 0.01
        }
       ]
-     }
+     },
+     "decimals": 1
     },
     "overrides": []
    },
@@ -394,7 +397,7 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "sum(rate({__name__=~\"srnet_gnmi_.*ethernet.*in_crc_errors\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m]) keep_metric_names) or vector(0)"
+     "expr": "sum(rate({__name__=~\"srnet_gnmi_.*ethernet.*in_crc_errors\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m]) keep_metric_names) * 60 or vector(0)"
     }
    ]
   },
@@ -769,7 +772,7 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "(rate({__name__=~\"srnet_gnmi_.*interface_state_counters_in_octets\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m]) keep_metric_names * 8 / 1e9) * on(interface_name) group_left(host, host_port, fabric) max by (interface_name, host, host_port, fabric) (label_replace(srnet_switch_port_info{switch=~\"(?i)$switch\"}, \"interface_name\", \"$1\", \"port\", \"(.*)\")) or (rate({__name__=~\"srnet_gnmi_.*interface_state_counters_in_octets\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m]) keep_metric_names * 8 / 1e9) unless on(interface_name) max by (interface_name, host, host_port, fabric) (label_replace(srnet_switch_port_info{switch=~\"(?i)$switch\"}, \"interface_name\", \"$1\", \"port\", \"(.*)\"))",
+     "expr": "(rate({__name__=~\"srnet_gnmi_.*interface_state_counters_in_octets\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m]) keep_metric_names * 8 / 1e9) * on(interface_name) group_left(host, host_port, fabric) max by (interface_name, host, host_port, fabric) (label_replace(sgn(tlast_over_time(srnet_switch_port_info{switch=~\"(?i)$switch\"}[15m] @ end()) == on(switch, port) group_left() max by (switch, port) (tlast_over_time(srnet_switch_port_info{switch=~\"(?i)$switch\"}[15m] @ end()))), \"interface_name\", \"$1\", \"port\", \"(.*)\")) or (rate({__name__=~\"srnet_gnmi_.*interface_state_counters_in_octets\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m]) keep_metric_names * 8 / 1e9) unless on(interface_name) max by (interface_name, host, host_port, fabric) (label_replace(sgn(tlast_over_time(srnet_switch_port_info{switch=~\"(?i)$switch\"}[15m] @ end()) == on(switch, port) group_left() max by (switch, port) (tlast_over_time(srnet_switch_port_info{switch=~\"(?i)$switch\"}[15m] @ end()))), \"interface_name\", \"$1\", \"port\", \"(.*)\"))",
      "legendFormat": "{{interface_name}} {{host}} {{host_port}}"
     }
    ]
@@ -817,15 +820,15 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "(rate({__name__=~\"srnet_gnmi_.*interface_state_counters_out_octets\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m]) keep_metric_names * 8 / 1e9) * on(interface_name) group_left(host, host_port, fabric) max by (interface_name, host, host_port, fabric) (label_replace(srnet_switch_port_info{switch=~\"(?i)$switch\"}, \"interface_name\", \"$1\", \"port\", \"(.*)\")) or (rate({__name__=~\"srnet_gnmi_.*interface_state_counters_out_octets\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m]) keep_metric_names * 8 / 1e9) unless on(interface_name) max by (interface_name, host, host_port, fabric) (label_replace(srnet_switch_port_info{switch=~\"(?i)$switch\"}, \"interface_name\", \"$1\", \"port\", \"(.*)\"))",
+     "expr": "(rate({__name__=~\"srnet_gnmi_.*interface_state_counters_out_octets\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m]) keep_metric_names * 8 / 1e9) * on(interface_name) group_left(host, host_port, fabric) max by (interface_name, host, host_port, fabric) (label_replace(sgn(tlast_over_time(srnet_switch_port_info{switch=~\"(?i)$switch\"}[15m] @ end()) == on(switch, port) group_left() max by (switch, port) (tlast_over_time(srnet_switch_port_info{switch=~\"(?i)$switch\"}[15m] @ end()))), \"interface_name\", \"$1\", \"port\", \"(.*)\")) or (rate({__name__=~\"srnet_gnmi_.*interface_state_counters_out_octets\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m]) keep_metric_names * 8 / 1e9) unless on(interface_name) max by (interface_name, host, host_port, fabric) (label_replace(sgn(tlast_over_time(srnet_switch_port_info{switch=~\"(?i)$switch\"}[15m] @ end()) == on(switch, port) group_left() max by (switch, port) (tlast_over_time(srnet_switch_port_info{switch=~\"(?i)$switch\"}[15m] @ end()))), \"interface_name\", \"$1\", \"port\", \"(.*)\"))",
      "legendFormat": "{{interface_name}} {{host}} {{host_port}}"
     }
    ]
   },
   {
    "type": "timeseries",
-   "title": "Port Gbps during runs (SNMP, 2 s)",
-   "description": "While a run is active the controller polls the ports that are up every 2 s over SNMP; between runs every 30 s. This is the view to compare with the host NIC counters second by second. Idle ports are left out.",
+   "title": "Port Gbps during runs (SNMP every 2 s, 20 s average)",
+   "description": "While a run is active the controller polls the ports that are up every 2 s over SNMP; between runs every 30 s. The switch refreshes its SNMP counters only every 3 to 6 s and in uneven steps, so each point is a line fitted through the last 20 s of counter changes; the first point of a run comes about 12 s in. Idle ports are left out.",
    "datasource": {
     "type": "prometheus",
     "uid": "srnet-vm"
@@ -879,7 +882,7 @@
   {
    "type": "timeseries",
    "title": "Utilisation (% of line rate)",
-   "description": "Ingress and egress rate against the port's configured speed (ifHighSpeed, from SNMP). A 100G port carrying 98 Gbps is at 98%. Idle ports are left out.",
+   "description": "Ingress and egress rate against the port's configured speed (ifHighSpeed, from SNMP). A 100G port carrying 98 Gbps is at 98%. Capped at 100: a port at line rate can read a point or two over it because the 30 s samples do not land exactly 30 s apart. Idle ports are left out.",
    "datasource": {
     "type": "prometheus",
     "uid": "srnet-vm"
@@ -936,7 +939,7 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "label_replace(rate({__name__=~\"srnet_gnmi_.*interface_state_counters_(in|out)_octets\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m]) keep_metric_names, \"dir\", \"$1\", \"__name__\", \".*_counters_(in|out)_octets\") * 8 / 1e6 / on(interface_name) group_left() max by (interface_name) (label_replace(srnet_switch_speed_mbps{switch=~\"(?i)$switch\"}, \"interface_name\", \"$1\", \"port\", \"(.*)\")) * 100 > 0.1",
+     "expr": "clamp_max(label_replace(rate({__name__=~\"srnet_gnmi_.*interface_state_counters_(in|out)_octets\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m]) keep_metric_names, \"dir\", \"$1\", \"__name__\", \".*_counters_(in|out)_octets\") * 8 / 1e6 / on(interface_name) group_left() max by (interface_name) (label_replace(srnet_switch_speed_mbps{switch=~\"(?i)$switch\"}, \"interface_name\", \"$1\", \"port\", \"(.*)\")) * 100, 100) > 0.1",
      "legendFormat": "{{interface_name}} {{dir}}"
     }
    ]
@@ -1052,8 +1055,8 @@
   },
   {
    "type": "timeseries",
-   "title": "Queue drops per second",
-   "description": "Packets dropped per egress queue (tail drops and WRED drops); queues that dropped nothing are left out. The 400G to 100G step from the 770AP into the Sparks shows here as queue 0 drops on the Spark ports.",
+   "title": "Queue drops per minute",
+   "description": "Packets dropped per egress queue per minute (tail drops and WRED drops); queues that dropped nothing are left out. The 400G to 100G step from the 770AP into the Sparks shows here as queue 0 drops on the Spark ports.",
    "datasource": {
     "type": "prometheus",
     "uid": "srnet-vm"
@@ -1066,7 +1069,7 @@
    },
    "fieldConfig": {
     "defaults": {
-     "unit": "pps",
+     "unit": "suffix: /min",
      "custom": {
       "lineWidth": 1,
       "fillOpacity": 8,
@@ -1085,7 +1088,7 @@
        },
        {
         "color": "red",
-        "value": 0.001
+        "value": 0.01
        }
       ]
      },
@@ -1110,7 +1113,7 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "label_replace(label_replace(rate({__name__=~\"srnet_gnmi_.*queues.*_dropped_pkts\",source=~\"(?i)$switch\",interface_interface_id=~\"$port\"}[2m]) keep_metric_names, \"kind\", \"$1\", \"__name__\", \".*_state_(.*)\"), \"q\", \"$1\", \"queue_name\", \".*:(.*)\") > 0",
+     "expr": "label_replace(label_replace(rate({__name__=~\"srnet_gnmi_.*queues.*_dropped_pkts\",source=~\"(?i)$switch\",interface_interface_id=~\"$port\"}[2m]) keep_metric_names, \"kind\", \"$1\", \"__name__\", \".*_state_(.*)\"), \"q\", \"$1\", \"queue_name\", \".*:(.*)\") * 60 > 0",
      "legendFormat": "{{interface_interface_id}} q{{q}} {{kind}}"
     }
    ]
@@ -1397,8 +1400,8 @@
   },
   {
    "type": "timeseries",
-   "title": "PFC pause frames received per second",
-   "description": "Pause frames the switch received from hosts (the host asked the switch to stop), per priority.",
+   "title": "PFC pause frames received per minute",
+   "description": "Pause frames the switch received from hosts (the host asked the switch to stop), per priority. If PFC is off for that priority on the switch (table below), the switch ignores them: the host is set up for lossless RoCE and the switch is not.",
    "datasource": {
     "type": "prometheus",
     "uid": "srnet-vm"
@@ -1411,7 +1414,7 @@
    },
    "fieldConfig": {
     "defaults": {
-     "unit": "pps",
+     "unit": "suffix: /min",
      "custom": {
       "lineWidth": 1,
       "fillOpacity": 8,
@@ -1439,14 +1442,14 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "rate({__name__=~\"srnet_gnmi_.*pfc.*pause_frames_rx\",source=~\"(?i)$switch\",interface_interface_id=~\"$port\"}[2m]) keep_metric_names > 0",
+     "expr": "rate({__name__=~\"srnet_gnmi_.*pfc.*pause_frames_rx\",source=~\"(?i)$switch\",interface_interface_id=~\"$port\"}[2m]) keep_metric_names * 60 > 0",
      "legendFormat": "{{interface_interface_id}} prio {{pfc_priority_dot1p}}"
     }
    ]
   },
   {
    "type": "timeseries",
-   "title": "PFC pause frames sent per second",
+   "title": "PFC pause frames sent per minute",
    "description": "Pause frames the switch sent to hosts (the switch asked the host to stop), per priority.",
    "datasource": {
     "type": "prometheus",
@@ -1460,7 +1463,7 @@
    },
    "fieldConfig": {
     "defaults": {
-     "unit": "pps",
+     "unit": "suffix: /min",
      "custom": {
       "lineWidth": 1,
       "fillOpacity": 8,
@@ -1488,7 +1491,7 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "rate({__name__=~\"srnet_gnmi_.*pfc.*pause_frames_tx\",source=~\"(?i)$switch\",interface_interface_id=~\"$port\"}[2m]) keep_metric_names > 0",
+     "expr": "rate({__name__=~\"srnet_gnmi_.*pfc.*pause_frames_tx\",source=~\"(?i)$switch\",interface_interface_id=~\"$port\"}[2m]) keep_metric_names * 60 > 0",
      "legendFormat": "{{interface_interface_id}} prio {{pfc_priority_dot1p}}"
     }
    ]
@@ -1654,7 +1657,7 @@
   },
   {
    "type": "timeseries",
-   "title": "CRC errors per second",
+   "title": "CRC errors per minute",
    "description": "Any CRC error at steady rate points at the cable or the optic on that port. Compare with the host's symbol errors on the same leg.",
    "datasource": {
     "type": "prometheus",
@@ -1668,7 +1671,7 @@
    },
    "fieldConfig": {
     "defaults": {
-     "unit": "pps",
+     "unit": "suffix: /min",
      "custom": {
       "lineWidth": 1,
       "fillOpacity": 8,
@@ -1687,7 +1690,7 @@
        },
        {
         "color": "red",
-        "value": 0.001
+        "value": 0.01
        }
       ]
      }
@@ -1711,14 +1714,14 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "(rate({__name__=~\"srnet_gnmi_.*ethernet.*in_crc_errors\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m]) keep_metric_names) * on(interface_name) group_left(host, host_port, fabric) max by (interface_name, host, host_port, fabric) (label_replace(srnet_switch_port_info{switch=~\"(?i)$switch\"}, \"interface_name\", \"$1\", \"port\", \"(.*)\")) or (rate({__name__=~\"srnet_gnmi_.*ethernet.*in_crc_errors\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m]) keep_metric_names) unless on(interface_name) max by (interface_name, host, host_port, fabric) (label_replace(srnet_switch_port_info{switch=~\"(?i)$switch\"}, \"interface_name\", \"$1\", \"port\", \"(.*)\"))",
+     "expr": "(rate({__name__=~\"srnet_gnmi_.*ethernet.*in_crc_errors\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m]) keep_metric_names * 60) * on(interface_name) group_left(host, host_port, fabric) max by (interface_name, host, host_port, fabric) (label_replace(sgn(tlast_over_time(srnet_switch_port_info{switch=~\"(?i)$switch\"}[15m] @ end()) == on(switch, port) group_left() max by (switch, port) (tlast_over_time(srnet_switch_port_info{switch=~\"(?i)$switch\"}[15m] @ end()))), \"interface_name\", \"$1\", \"port\", \"(.*)\")) or (rate({__name__=~\"srnet_gnmi_.*ethernet.*in_crc_errors\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m]) keep_metric_names * 60) unless on(interface_name) max by (interface_name, host, host_port, fabric) (label_replace(sgn(tlast_over_time(srnet_switch_port_info{switch=~\"(?i)$switch\"}[15m] @ end()) == on(switch, port) group_left() max by (switch, port) (tlast_over_time(srnet_switch_port_info{switch=~\"(?i)$switch\"}[15m] @ end()))), \"interface_name\", \"$1\", \"port\", \"(.*)\"))",
      "legendFormat": "{{interface_name}} {{host}} {{host_port}}"
     }
    ]
   },
   {
    "type": "timeseries",
-   "title": "Malformed frames per second",
+   "title": "Malformed frames per minute",
    "description": "Fragments and undersize frames: a bad link. Oversize and jabber: an MTU mismatch (a 9000 byte frame into a 1500 byte port). Ports without any are left out.",
    "datasource": {
     "type": "prometheus",
@@ -1732,7 +1735,7 @@
    },
    "fieldConfig": {
     "defaults": {
-     "unit": "pps",
+     "unit": "suffix: /min",
      "custom": {
       "lineWidth": 1,
       "fillOpacity": 8,
@@ -1760,15 +1763,15 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "label_replace(rate({__name__=~\"srnet_gnmi_.*ethernet.*_(in|out)_(fragment|jabber|oversize|undersize)_frames\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m]) keep_metric_names, \"kind\", \"$1\", \"__name__\", \".*_((?:in|out)_[a-z]+_frames)\") > 0",
+     "expr": "label_replace(rate({__name__=~\"srnet_gnmi_.*ethernet.*_(in|out)_(fragment|jabber|oversize|undersize)_frames\",source=~\"(?i)$switch\",interface_name=~\"$port\"}[2m]) keep_metric_names, \"kind\", \"$1\", \"__name__\", \".*_((?:in|out)_[a-z]+_frames)\") * 60 > 0",
      "legendFormat": "{{interface_name}} {{kind}}"
     }
    ]
   },
   {
    "type": "timeseries",
-   "title": "Discards and errors (SNMP)",
-   "description": "Interface-level discards (buffer full) and errors from IF-MIB; ports without any are left out. Out discards on a 100G port fed from a 400G port are the speed-mismatch drops.",
+   "title": "Discards and errors per minute (SNMP)",
+   "description": "Interface-level discards (buffer full) and errors from IF-MIB, per minute; ports without any are left out. Out discards on a 100G port fed from a 400G port are the speed-mismatch drops.",
    "datasource": {
     "type": "prometheus",
     "uid": "srnet-vm"
@@ -1781,7 +1784,7 @@
    },
    "fieldConfig": {
     "defaults": {
-     "unit": "pps",
+     "unit": "suffix: /min",
      "custom": {
       "lineWidth": 1,
       "fillOpacity": 8,
@@ -1809,22 +1812,22 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "rate(srnet_switch_in_discards{switch=~\"(?i)$switch\",port=~\"$port\"}[2m]) > 0",
+     "expr": "rate(srnet_switch_in_discards{switch=~\"(?i)$switch\",port=~\"$port\"}[2m]) * 60 > 0",
      "legendFormat": "{{port}} in discards"
     },
     {
      "refId": "B",
-     "expr": "rate(srnet_switch_out_discards{switch=~\"(?i)$switch\",port=~\"$port\"}[2m]) > 0",
+     "expr": "rate(srnet_switch_out_discards{switch=~\"(?i)$switch\",port=~\"$port\"}[2m]) * 60 > 0",
      "legendFormat": "{{port}} out discards"
     },
     {
      "refId": "C",
-     "expr": "rate(srnet_switch_in_errors{switch=~\"(?i)$switch\",port=~\"$port\"}[2m]) > 0",
+     "expr": "rate(srnet_switch_in_errors{switch=~\"(?i)$switch\",port=~\"$port\"}[2m]) * 60 > 0",
      "legendFormat": "{{port}} in errors"
     },
     {
      "refId": "D",
-     "expr": "rate(srnet_switch_out_errors{switch=~\"(?i)$switch\",port=~\"$port\"}[2m]) > 0",
+     "expr": "rate(srnet_switch_out_errors{switch=~\"(?i)$switch\",port=~\"$port\"}[2m]) * 60 > 0",
      "legendFormat": "{{port}} out errors"
     }
    ]

@@ -110,12 +110,26 @@ func TestScoreUsesCountersAndErrorDeltas(t *testing.T) {
 	if sum.ToolGbps != 292 || sum.ByFabric["100"] != 191 || sum.ByFabric["101"] != 101 {
 		t.Errorf("summary = %+v", sum)
 	}
-	// Only a counter error, not a bandwidth miss: warn.
+	// Two packets resent out of some 357 million: a pass that says so.
 	plans[1].clientRes.AvgGbps = 195
 	fill(30, 195)
 	_, verdict = o.score(ar)
-	if verdict != "warn" || !strings.Contains(plans[1].leg.Note, "out_of_sequence +2") {
+	if verdict != "pass" || !strings.Contains(plans[1].leg.Note, "out_of_sequence +2, about 1 in 179 million") {
 		t.Errorf("verdict = %s, leg = %+v", verdict, plans[1].leg)
+	}
+	// Above 1 in a million: warn.
+	plans[1].clientRes.ErrorDeltas = map[string]int64{"out_of_sequence": 2000, "packet_seq_err": 9}
+	_, verdict = o.score(ar)
+	if verdict != "warn" || plans[1].leg.Note != "error counters grew: out_of_sequence +2000, packet_seq_err +9" {
+		t.Errorf("verdict = %s, leg = %+v", verdict, plans[1].leg)
+	}
+	// Any other error counter warns at once; on a send test the teardown
+	// counters are named as normal next to it.
+	ar.spec.Test = "send"
+	plans[1].clientRes.ErrorDeltas = map[string]int64{"out_of_sequence": 3, "local_ack_timeout_err": 1, "resp_cqe_error": 270}
+	_, verdict = o.score(ar)
+	if want := "error counters grew: local_ack_timeout_err +1; a few packets lost and resent (out_of_sequence +3, about 1 in 119 million, under 1 in a million); normal for a send test: resp_cqe_error +270"; verdict != "warn" || plans[1].leg.Note != want {
+		t.Errorf("verdict = %s, note = %q\nwant %q", verdict, plans[1].leg.Note, want)
 	}
 }
 

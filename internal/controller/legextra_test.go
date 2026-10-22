@@ -45,10 +45,18 @@ func TestLegSwitchFromVictoriaMetrics(t *testing.T) {
 	qosRe := regexp.MustCompile(`^last_over_time\(\{__name__=~"srnet_gnmi_\.\*qos[^"]*",source=~"[^"]*",interface_interface_id="(Ethernet\d+)"\}\[90s\] @ (\d+)\) or last_over_time\(\{[^}]*interface_id="Ethernet\d+"\}\[90s\] @ \d+\)$`)
 	// times are the switch's sample times; values per counter follow them.
 	times := []float64{t0, t1}
+	pfcRe := regexp.MustCompile(`^last_over_time\(\{__name__=~"srnet_gnmi_\.\*pfc\.\*priority\.\*state_enable",source=~"[^"]*",interface_interface_id="(Ethernet\d+)"\}\[10m\] @ (\d+)\) or `)
 	var queries []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query().Get("query")
 		queries = append(queries, q)
+		if pm := pfcRe.FindStringSubmatch(q); pm != nil {
+			// PFC off on priority 3, the one the host paused on, on at 4.
+			fmt.Fprintf(w, `{"status":"success","data":{"result":[
+				{"metric":{"__name__":"srnet_gnmi_openconfig_qos_qos_interfaces_interface_pfc_pfc_priorities_pfc_priority_state_enable","interface_id":%q,"dot1p":"3"},"value":[%s,"0"]},
+				{"metric":{"__name__":"srnet_gnmi_openconfig_qos_qos_interfaces_interface_pfc_pfc_priorities_pfc_priority_state_enable","interface_id":%q,"dot1p":"4"},"value":[%s,"1"]}]}}`, pm[1], pm[2], pm[1], pm[2])
+			return
+		}
 		if qm := qosRe.FindStringSubmatch(q); qm != nil {
 			// The QoS subscription (Phase 5): queue 0 on the server port dropped
 			// 40 packets during the test and its PFC priority 3 saw 5 pauses.
@@ -145,6 +153,9 @@ func TestLegSwitchFromVictoriaMetrics(t *testing.T) {
 	}
 	if ls.Note != "" {
 		t.Errorf("note = %q", ls.Note)
+	}
+	if ls.PFCIgnored != "Ethernet64 priority 3 (5)" {
+		t.Errorf("pfc ignored = %q", ls.PFCIgnored)
 	}
 
 	// A read test flows server -> client, so the server port's "in" counts.

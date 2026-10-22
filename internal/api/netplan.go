@@ -7,6 +7,21 @@ import (
 	"time"
 )
 
+// RoutableAddrs drops the link-local addresses (169.254.0.0/16) a host puts
+// on a port of its own accord, e.g. NetworkManager or avahi on a port left
+// without an address after a move. They never carry a test, and counting
+// them would pair every such port across hosts on one made-up subnet.
+func RoutableAddrs(addrs []string) []string {
+	out := addrs[:0:0]
+	for _, a := range addrs {
+		if pf, err := netip.ParsePrefix(a); err == nil && pf.Addr().IsLinkLocalUnicast() {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
 // NetplanMaxPorts is the most ports one change may cover.
 const NetplanMaxPorts = 16
 

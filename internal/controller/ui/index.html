@@ -795,6 +795,7 @@ async function pageRun(token, id) {
       <b>Thresholds</b><span>${s.pass_pct}% of line rate${s.max_lat_p99_us ? ' · p99 ≤ ' + s.max_lat_p99_us + ' µs' : ''}${s.test === 'udp' ? ' · loss ≤ ' + s.max_loss_pct + '%' : ''} · warn ${s.regress_pct || 5}% behind baseline</span>
       <b>Baseline</b><span id="run-baseline"></span>
       <b>Fabric</b><span id="run-fabric"></span>
+      <b id="run-spread-k" style="display:none">Ports</b><span id="run-spread" style="display:none"></span>
       <b>When</b><span id="run-when"></span></div></div>
     <div class="tbl"><table><thead><tr><th>#</th><th>Client</th><th>Server</th><th>Fabric</th><th class="num">Size</th>${head}${headBl}${headSw}<th>Error counters</th><th>Verdict</th><th>Note</th></tr></thead><tbody id="legs"></tbody></table></div>`)) return;
   const paint = r => {
@@ -806,6 +807,9 @@ async function pageRun(token, id) {
       : r.status === 'done' ? 'no baseline run of this shape yet; mark this run or another finished one with "Set as baseline"' : '-');
     const fi = b.fabric_issues || [];
     set('run-fabric', fi.length ? `<span class="delta-bad">${fi.length} finding${fi.length === 1 ? '' : 's'} on the run's cables when it started</span> (<a href="#fabric">Fabric check</a>): ${esc(fi.join('; '))}` : r.status === 'queued' ? '-' : 'cables matched their fabric profiles when the run started');
+    const ps = b.port_spread || [];
+    for (const id of ['run-spread', 'run-spread-k']) { const el = $('#' + id); if (el) el.style.display = ps.length ? '' : 'none'; }
+    set('run-spread', ps.length ? `<span class="delta-bad">${ps.length === 1 ? 'one port ran slower than its sibling' : ps.length + ' ports ran slower than their siblings'}</span>: ${esc(ps.join('; '))}` : '');
     set('run-actions', `${live ? `<button class="danger" onclick="cancelRun(${r.id})">Cancel run</button> ` : ''}
       ${r.status === 'done' ? `<button onclick="setBaseline(${r.id}, ${!r.baseline})" title="${r.baseline ? 'Stop using this run as the reference' : 'Compare later runs of the same shape with this one'}">${r.baseline ? 'Unset baseline' : 'Set as baseline'}</button>` : ''}
       <button onclick='sessionStorage.setItem("spec", ${JSON.stringify(JSON.stringify(s))}); location.hash="#new"'>Run again</button>

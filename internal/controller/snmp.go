@@ -33,12 +33,73 @@ var ifColumns = map[string]string{
 var ifOrder = []string{"in_octets", "out_octets", "name", "speed_mbps", "oper_status", "in_errors", "out_errors", "in_discards", "out_discards"}
 
 // snmpPrev is the last octet reading of one port: the values and when they
-// were first seen. For the fast poll it also keeps the recent gaps between
-// counter changes, which give the switch's own counter refresh period.
+// were first seen. For the fast poll it also keeps when the port was last
+// read, the recent gaps between counter changes, which give the switch's own
+// counter refresh period, and the recent changes themselves.
 type snmpPrev struct {
 	t       time.Time
 	in, out float64
-	gaps    []float64 // seconds between recent changes, newest last
+	polled  time.Time
+	gaps    []float64   // seconds between recent changes, newest last
+	hist    []snmpPoint // recent changes seen within a poll of happening, oldest first
+}
+
+// snmpPoint is one change of a port's octet counters: the values and when
+// the fast poll first saw them.
+type snmpPoint struct {
+	t       time.Time
+	in, out float64
+}
+
+// The fast poll's rate is a straight-line fit over the counter changes of the
+// last snmpRateWindow, once they span snmpRateMinSpan.
+const (
+	snmpRateWindow  = 20 * time.Second
+	snmpRateMinSpan = 12 * time.Second
+)
+
+// fastRate fits a line through the recent changes and returns its slope in
+// bytes per second, in and out. The Z9864F's SNMP agent hands out counters it
+// refreshed some seconds before, so one step between two polls holds one to
+// three of the switch's own refreshes: in run 17 a rate per step swung from
+// 198 to 588 Gbps on a port gNMI read at 399. A line fitted through 12 to 20 s
+// of the same changes stays within 10% of it.
+func (p snmpPrev) fastRate() (in, out float64, ok bool) {
+	n := len(p.hist)
+	if n < 2 {
+		return 0, 0, false
+	}
+	last := p.hist[n-1].t
+	from := 0
+	for k := n - 2; k >= 0; k-- {
+		if last.Sub(p.hist[k].t) >= snmpRateWindow {
+			from = k
+			break
+		}
+	}
+	pts := p.hist[from:]
+	if last.Sub(pts[0].t) < snmpRateMinSpan {
+		return 0, 0, false
+	}
+	var mt, mi, mo float64
+	for _, q := range pts {
+		mt += q.t.Sub(last).Seconds()
+		mi += q.in - pts[0].in
+		mo += q.out - pts[0].out
+	}
+	k := float64(len(pts))
+	mt, mi, mo = mt/k, mi/k, mo/k
+	var den, ni, no float64
+	for _, q := range pts {
+		dt := q.t.Sub(last).Seconds() - mt
+		den += dt * dt
+		ni += dt * (q.in - pts[0].in - mi)
+		no += dt * (q.out - pts[0].out - mo)
+	}
+	if den == 0 {
+		return 0, 0, false
+	}
+	return ni / den, no / den, true
 }
 
 // refreshPeriod is the mean of the recent gaps between counter changes, or
@@ -364,10 +425,10 @@ func (c *snmpCollector) connect(sw SwitchConfig) (*gosnmp.GoSNMP, error) {
 // carry "_at", the time its octet counters were read, used instead of now.
 //
 // The switch's SNMP agent refreshes its counters every few seconds, so a
-// poll every 2 s sees the counters jump in steps. The fast poll therefore
-// takes a rate only when the counters change, and divides by the switch's
-// refresh period (the mean gap between changes) rather than by the time
-// between reads. Rates never exceed the port's speed.
+// poll every 2 s sees the counters jump in uneven steps. The fast poll
+// therefore takes a rate only when the counters change, from a line fitted
+// through the changes of the last 20 s (see fastRate). Rates never exceed
+// the port's speed.
 func (c *snmpCollector) render(sw SwitchConfig, rows map[string]map[string]any, now time.Time, kind string) ([]byte, int) {
 	var buf bytes.Buffer
 	ports := 0
@@ -422,7 +483,7 @@ func (c *snmpCollector) render(sw SwitchConfig, rows map[string]map[string]any, 
 		switch {
 		case !ok || in < p.in || out < p.out:
 			// First reading, or the counters were reset.
-			c.prev[key] = snmpPrev{t: at, in: in, out: out}
+			c.prev[key] = snmpPrev{t: at, in: in, out: out, polled: at}
 		case since < 0.5:
 			// Too close to the last reading to say anything.
 		case kind != "fast":
@@ -431,6 +492,8 @@ func (c *snmpCollector) render(sw SwitchConfig, rows map[string]map[string]any, 
 		case in == p.in && out == p.out:
 			// No change yet. Once a whole refresh period has gone by
 			// without one, the port really is idle.
+			p.polled = at
+			c.prev[key] = p
 			per := p.refreshPeriod()
 			if per == 0 {
 				per = 6
@@ -439,21 +502,30 @@ func (c *snmpCollector) render(sw SwitchConfig, rows map[string]map[string]any, 
 				emit(0, 0, 1)
 			}
 		default:
-			// The counters moved: that is one refresh period of traffic,
-			// unless the last change is long gone (the poll was paused
-			// between runs), when the time since it is all there is.
-			span := since
+			// The counters moved. The change is a point on the line only
+			// if the port was read just before; after a pause between
+			// runs nobody knows when it happened, so the line starts over.
 			if since <= 15 {
 				p.gaps = append(p.gaps, since)
 				if len(p.gaps) > 16 {
 					p.gaps = p.gaps[len(p.gaps)-16:]
 				}
-				if per := p.refreshPeriod(); per > 0 {
-					span = per
+			}
+			fresh := at.Sub(p.polled) <= 5*time.Second
+			p.t, p.in, p.out, p.polled = at, in, out, at
+			keep := p.hist[:0]
+			for _, q := range p.hist {
+				if fresh && at.Sub(q.t) <= snmpRateWindow+25*time.Second {
+					keep = append(keep, q)
 				}
 			}
-			emit(in-p.in, out-p.out, span)
-			p.t, p.in, p.out = at, in, out
+			p.hist = keep
+			if fresh {
+				p.hist = append(p.hist, snmpPoint{t: at, in: in, out: out})
+			}
+			if ri, ro, ok := p.fastRate(); ok {
+				emit(math.Max(ri, 0), math.Max(ro, 0), 1)
+			}
 			c.prev[key] = p
 		}
 	}

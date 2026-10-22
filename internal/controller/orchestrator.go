@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -100,6 +101,46 @@ var errorCounterKeys = map[string]bool{
 // posted are flushed with an error completion (resp_cqe_error, one per
 // buffer). On a one-sided write or read test both still mean trouble.
 var sendExpectedKeys = map[string]bool{"rnr_nak_retry_err": true, "resp_cqe_error": true}
+
+// dropCounterKeys count packets lost on the way and resent. On a lossy
+// fabric a busy link loses a few now and then (run 18: 1 to 17 per leg in a
+// minute at 190 Gbps, about 1 in 10 million), which costs nothing visible,
+// so they warn only above maxDropRate per packet carried. The other error
+// counters (timeouts, error completions) warn on any growth.
+var dropCounterKeys = map[string]bool{"out_of_sequence": true, "packet_seq_err": true, "implied_nak_seq_err": true, "duplicate_request": true}
+
+const maxDropRate = 1e-6
+
+// legPackets estimates the packets a leg carried: its rate over the test in
+// RoCE MTU (4096 byte) packets. Both directions count on a bidirectional leg,
+// whose rate is already the sum of the two.
+func legPackets(gbps float64, durationSec int) float64 {
+	return gbps * 1e9 / 8 * float64(durationSec) / 4096
+}
+
+// oneIn renders a ratio like "1 in 9 million".
+func oneIn(n float64) string {
+	switch {
+	case n >= 1e9:
+		return fmt.Sprintf("1 in %.0f billion", n/1e9)
+	case n >= 1e6:
+		return fmt.Sprintf("1 in %.0f million", n/1e6)
+	case n >= 1e3:
+		return fmt.Sprintf("1 in %.0f thousand", n/1e3)
+	}
+	return fmt.Sprintf("1 in %.0f", n)
+}
+
+// joinNote appends b to the note a, either of which may be empty.
+func joinNote(a, b string) string {
+	switch {
+	case a == "":
+		return b
+	case b == "":
+		return a
+	}
+	return a + "; " + b
+}
 
 // counterIsError says whether a grown counter is a fault for this test.
 func counterIsError(test, key string) bool {
@@ -1354,7 +1395,7 @@ func (o *Orchestrator) score(ar *activeRun) (api.RunSummary, string) {
 	minRate, maxRate := -1.0, 0.0
 	for _, p := range ar.plans {
 		l := &p.leg
-		l.ErrorDeltas = map[string]int64{}
+		l.ErrorDeltas, l.Note = map[string]int64{}, ""
 		for _, r := range []*api.LegResult{p.clientRes, p.serverRes} {
 			if r == nil {
 				continue
@@ -1410,28 +1451,52 @@ func (o *Orchestrator) score(ar *activeRun) (api.RunSummary, string) {
 			l.Note = fmt.Sprintf("%.1f Gbps is below %.0f%% of %.0f Gbps", measured, ar.spec.PassPct, l.ExpectedGbps)
 		}
 		if l.Verdict == "pass" {
-			var bad, expected []string
+			var bad, drops, expected []string
+			var dropped int64
 			for k, v := range l.ErrorDeltas {
 				switch {
 				case v <= 0 || !errorCounterKeys[k]:
+				case dropCounterKeys[k]:
+					drops = append(drops, fmt.Sprintf("%s +%d", k, v))
+					dropped += v
 				case counterIsError(ar.spec.Test, k):
 					bad = append(bad, fmt.Sprintf("%s +%d", k, v))
 				default:
 					expected = append(expected, fmt.Sprintf("%s +%d", k, v))
 				}
 			}
+			sort.Strings(bad)
+			sort.Strings(drops)
+			sort.Strings(expected)
+			var notes []string
+			pkts := legPackets(measured, ar.spec.DurationSec)
+			switch {
+			case len(drops) == 0:
+			case lat || pkts <= 0 || float64(dropped)/pkts > maxDropRate:
+				bad = append(drops, bad...)
+			default:
+				notes = append(notes, fmt.Sprintf("a few packets lost and resent (%s, about %s, under 1 in a million)", strings.Join(drops, ", "), oneIn(pkts/float64(dropped))))
+			}
 			if len(bad) > 0 {
-				sort.Strings(bad)
-				l.Verdict, l.Note = "warn", "error counters grew: "+strings.Join(bad, ", ")
-			} else if len(expected) > 0 {
-				sort.Strings(expected)
-				l.Note = "normal for a send test: " + strings.Join(expected, ", ")
-			} else if ar.spec.Test == "tcp" && l.Retransmits > 0 {
-				l.Verdict, l.Note = "warn", fmt.Sprintf("%d TCP retransmits", l.Retransmits)
+				l.Verdict = "warn"
+				notes = append([]string{"error counters grew: " + strings.Join(bad, ", ")}, notes...)
+			}
+			if len(expected) > 0 {
+				notes = append(notes, "normal for a send test: "+strings.Join(expected, ", "))
+			}
+			if len(notes) == 0 && ar.spec.Test == "tcp" && l.Retransmits > 0 {
+				l.Verdict = "warn"
+				notes = append(notes, fmt.Sprintf("%d TCP retransmits", l.Retransmits))
+			}
+			if len(notes) > 0 {
+				l.Note = joinNote(l.Note, strings.Join(notes, "; "))
 			}
 		}
 		if hint := dropHint(l); hint != "" && l.Verdict != "pass" {
-			l.Note += "; " + hint
+			l.Note = joinNote(l.Note, hint)
+		}
+		if l.Switch != nil && l.Switch.PFCIgnored != "" {
+			l.Note = joinNote(l.Note, "the host sent PFC pause frames on "+l.Switch.PFCIgnored+" but the switch has PFC off there and ignored them: the host is set up for lossless, the switch is not")
 		}
 		if rank[l.Verdict] > rank[worst] {
 			worst = l.Verdict
@@ -1499,7 +1564,79 @@ func (o *Orchestrator) score(ar *activeRun) (api.RunSummary, string) {
 	if len(sum.Congestion) == 0 {
 		sum.Congestion = nil
 	}
+	if !lat && !collective {
+		legs := ar.plans
+		if len(ar.spec.Sizes) > 1 {
+			legs = ar.stages[len(ar.stages)-1] // a sweep compares like with like: the largest size
+		}
+		sum.PortSpread = portSpread(legs)
+	}
 	return sum, worst
+}
+
+// portSpread finds hosts whose legs ran consistently slower through one of
+// their ports than through another: at least two legs on each port, every
+// leg on the slow port behind every leg on the fast one, and more than 2%
+// apart on average. Rates count against each leg's expected rate, so fair
+// shares of different sizes compare. Run 18 showed it on the 770AP: four
+// NIC-2 legs at 186 Gbps, four NIC-1 legs at 193, while the Sparks on the
+// far end of those legs ran their other port at full speed.
+func portSpread(plans []*legPlan) []string {
+	type group struct {
+		name         string
+		ratios, gbps []float64
+	}
+	byHost := map[string]map[int64]*group{}
+	add := func(e endpoint, ratio, gbps float64) {
+		if e.Host == "" || e.PortID == 0 {
+			return
+		}
+		if byHost[e.Host] == nil {
+			byHost[e.Host] = map[int64]*group{}
+		}
+		g := byHost[e.Host][e.PortID]
+		if g == nil {
+			g = &group{name: nonEmpty(e.Label, e.Netdev)}
+			byHost[e.Host][e.PortID] = g
+		}
+		g.ratios, g.gbps = append(g.ratios, ratio), append(g.gbps, gbps)
+	}
+	for _, p := range plans {
+		if l := p.leg; l.ToolGbps > 0 && l.ExpectedGbps > 0 {
+			add(p.client, l.ToolGbps/l.ExpectedGbps, l.ToolGbps)
+			add(p.server, l.ToolGbps/l.ExpectedGbps, l.ToolGbps)
+		}
+	}
+	mean := func(v []float64) float64 {
+		s := 0.0
+		for _, x := range v {
+			s += x
+		}
+		return s / float64(len(v))
+	}
+	var out []string
+	for host, ports := range byHost {
+		var gs []*group
+		for _, g := range ports {
+			if len(g.ratios) >= 2 {
+				gs = append(gs, g)
+			}
+		}
+		if len(gs) < 2 {
+			continue
+		}
+		sort.Slice(gs, func(a, b int) bool { return mean(gs[a].ratios) > mean(gs[b].ratios) })
+		best := gs[0]
+		for _, g := range gs[1:] {
+			if mean(g.ratios) > 0.98*mean(best.ratios) || slices.Max(g.ratios) >= slices.Min(best.ratios) {
+				continue
+			}
+			out = append(out, fmt.Sprintf("%s %s: its %d legs averaged %.1f Gbps, %.1f%% below %s's %.1f", host, g.name, len(g.gbps), mean(g.gbps),
+				(1-mean(g.ratios)/mean(best.ratios))*100, best.name, mean(best.gbps)))
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Live fills in current per-leg rates for a running test.

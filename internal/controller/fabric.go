@@ -779,7 +779,15 @@ func checkCable(v hostPortView, fabric, swName, swPort string, spc *switchPortCf
 		if v.settings != nil && v.settings.PFC != "" {
 			c.Host = v.settings.PFC
 		}
+		// A host whose PFC setting the agent cannot read (bnxt) still gives
+		// itself away by sending pause frames.
+		pausing := c.Host == "" && c.Switch == "none" && spc != nil && spc.PauseRead && spc.PauseRx > 0
+		if pausing {
+			c.Host = "sends pause frames"
+		}
 		switch {
+		case pausing:
+			c.State, c.Note = "bad", fmt.Sprintf("the switch has received %.0f PFC pause frames from this host (since its counters were last cleared) but has PFC off, so it ignores them: the host is set up for lossless, the switch is not", spc.PauseRx)
 		case c.Switch != "" && c.Host != "" && c.Switch != c.Host:
 			c.State, c.Note = "bad", fmt.Sprintf("switch has PFC on %s, host on %s", nz(c.Switch), nz(c.Host))
 		case c.Want == "priority "+strconv.Itoa(prof.PFCPriority) && hasProf && prof.PFCPriority >= 0:
@@ -1157,6 +1165,44 @@ func dot1p(labels map[string]string) string {
 		}
 	}
 	return ""
+}
+
+// pfcOff says, per priority, whether the switch port had PFC off at t, from
+// gnmic's PFC enable leaves. It is nil when the switch reports none.
+func (m *metrics) pfcOff(ctx context.Context, sw SwitchConfig, port string, t time.Time) map[string]bool {
+	if m == nil || m.vmURL == "" {
+		return nil
+	}
+	src := gnmiSourceRe(sw)
+	const sel = `last_over_time({__name__=~"srnet_gnmi_.*pfc.*priority.*state_enable",source=~%q,%s=%q}[10m] @ %d)`
+	rows, err := m.vmQuery(ctx, fmt.Sprintf(sel+" or "+sel, src, "interface_interface_id", port, t.Unix(), src, "interface_id", port, t.Unix()))
+	if err != nil || len(rows) == 0 {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, r := range rows {
+		if p := dot1p(r.Labels); p != "" {
+			out[p] = r.Value == 0
+		}
+	}
+	return out
+}
+
+// pfcIgnored picks, from a leg's QoS deltas on one port, the pause frames
+// received on priorities the port has PFC off for.
+func pfcIgnored(port string, deltas map[string]float64, off map[string]bool) []string {
+	var out []string
+	for k, v := range deltas {
+		rest, ok := strings.CutPrefix(k, port+" prio ")
+		if !ok || !strings.HasSuffix(rest, " pause_frames_rx") {
+			continue
+		}
+		if p := strings.TrimSuffix(rest, " pause_frames_rx"); off[p] {
+			out = append(out, fmt.Sprintf("%s priority %s (%.0f)", port, p, v))
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // qosCounterRe picks the gnmic series of the per-port QoS subscription that

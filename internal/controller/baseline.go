@@ -132,7 +132,7 @@ func (o *Orchestrator) applyBaseline(ctx context.Context, ar *activeRun, verdict
 		p.leg.Baseline = run.Legs[i].Baseline
 		if lb := p.leg.Baseline; lb != nil && lb.Regressed && p.leg.Verdict == "pass" {
 			p.leg.Verdict = "warn"
-			p.leg.Note = regressNote(ar.spec.Test, lb)
+			p.leg.Note = joinNote(regressNote(ar.spec.Test, lb), p.leg.Note)
 			if verdict == "pass" {
 				verdict = "warn"
 			}

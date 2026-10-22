@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -388,5 +390,41 @@ func TestDropHint(t *testing.T) {
 	l.Switch = &api.LegSwitch{} // no switch reading: say nothing
 	if h := dropHint(l); h != "" {
 		t.Errorf("no switch figures: %q", h)
+	}
+}
+
+// TestPortSpreadRun18 replays run 18's tool rates: the 770AP's NIC-2 legs
+// trailed its NIC-1 legs by 3.4% while every Spark port and both of the new
+// Dell's NICs ran level. Only the 770AP is named.
+func TestPortSpreadRun18(t *testing.T) {
+	var plans []*legPlan
+	ep := func(host string, id int64, label string) endpoint {
+		return endpoint{Host: host, PortID: id, Label: label}
+	}
+	legs := []struct {
+		client endpoint
+		gbps   []float64
+	}{
+		{ep("Dell 770AP", 1, "NIC-1"), []float64{192.72, 192.75, 192.81, 192.75}},
+		{ep("Dell 770AP", 2, "NIC-2"), []float64{186.16, 186.2, 186.21, 186.31}},
+		{ep("dellr7615", 3, "NIC-1"), []float64{192.98, 192.95, 193, 193.06}},
+		{ep("dellr7615", 4, "NIC-2"), []float64{194.04, 194.05, 194.03, 194.03}},
+	}
+	spark := int64(100)
+	for i, c := range legs {
+		for j, g := range c.gbps {
+			spark++
+			plans = append(plans, &legPlan{client: c.client, server: ep(fmt.Sprintf("Spark %d", j), spark, fmt.Sprintf("P%d", i/2+1)),
+				leg: api.Leg{ToolGbps: g, ExpectedGbps: 200}})
+		}
+	}
+	got := portSpread(plans)
+	if want := []string{"Dell 770AP NIC-2: its 4 legs averaged 186.2 Gbps, 3.4% below NIC-1's 192.8"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %q\nwant %q", got, want)
+	}
+	// One stray slow leg among fast ones is not a pattern.
+	plans[4].leg.ToolGbps = 193
+	if got := portSpread(plans); len(got) != 0 {
+		t.Fatalf("mixed rates flagged: %q", got)
 	}
 }
