@@ -131,6 +131,7 @@ textarea { width:100%; font:12.5px/1.5 var(--mono); resize:vertical; }
 .picker .chip button:hover { color:var(--fail); }
 button.chip { cursor:pointer; }
 button.chip:hover { border-color:var(--accent); }
+button.chip.sm { padding:1px 6px; font-size:11px; margin-left:3px; color:var(--muted); }
 .kv { display:grid; grid-template-columns:max-content 1fr; gap:6px 18px; font-size:13px; }
 .kv b { font-weight:500; color:var(--muted); }
 @media (max-width: 860px) {
@@ -328,11 +329,15 @@ async function pageHosts(token) {
     set('host-count', `${all.length} host${all.length === 1 ? '' : 's'}, ${all.filter(h => h.online).length} online${pending ? `, <span class="delta-bad">${pending} waiting for approval</span>` : ''}${hosts.length !== all.length ? `, ${hosts.length} shown` : ''}`);
     let html = '';
     for (const h of hosts) {
-      // Configured ports (with an address) first; the uncabled and twin
-      // PCIe-function rows follow, so the port a test uses is the first row.
-      const ports = h.ports.length ? [...h.ports].sort((a, b) => (b.addrs?.length ? 1 : 0) - (a.addrs?.length ? 1 : 0)) : [null];
+      // Configured ports (with an address) first, so the port a test uses is
+      // the first row; the second PCIe function of a cable (twin_of) sits
+      // right under the port it shares the cable with.
+      const byNet = Object.fromEntries(h.ports.map(p => [p.netdev, p]));
+      const main = h.ports.filter(p => !p.twin_of || !byNet[p.twin_of]).sort((a, b) => (b.addrs?.length ? 1 : 0) - (a.addrs?.length ? 1 : 0));
+      const ports = h.ports.length ? main.flatMap(p => [p, ...h.ports.filter(t => t.twin_of === p.netdev)]) : [null];
       ports.forEach((p, i) => {
-        html += '<tr>';
+        const twin = p?.twin_of && byNet[p.twin_of];
+        html += twin ? '<tr class="twin" style="opacity:.6">' : '<tr>';
         if (i === 0) {
           const rs = `rowspan="${ports.length}"`;
           html += `<td ${rs}><span class="dot ${h.online ? 'on' : ''}" title="${h.online ? 'online' : 'offline, last seen ' + ago(h.last_seen)}"></span></td>
@@ -344,6 +349,17 @@ async function pageHosts(token) {
         }
         if (!p) { html += '<td colspan="10" class="muted">no RDMA ports found</td></tr>'; return; }
         const sw = p.lldp_switch || p.lldp_port ? `${esc(p.lldp_switch)} <span class="muted">${esc(p.lldp_port)}</span>` : '<span class="muted">-</span>';
+        if (twin) {
+          html += `<td style="padding-left:22px"><b>${esc(p.rdma_dev)}/${p.port_num}</b> <span class="muted">${esc(p.netdev)}</span><div class="help" style="margin:2px 0 0" title="The Spark's ConnectX-7 reaches the CPU over two PCIe x4 links, so Linux shows each cabled port twice. Tests use the half with the address.">2nd PCIe half of ${esc(twin.label || twin.netdev)} (same cable)</div></td>
+          <td class="mono">${esc((p.addrs || []).join(', ')) || '<span class="muted">no IP</span>'} <button class="sm" onclick="netEditor(${h.id},${p.id})" title="Give this half an address too, to drive both PCIe links of the cable">Edit</button></td>
+          <td>${badge(p.state, p.state === 'ACTIVE' ? 'pass' : 'fail')}</td>
+          <td class="num">${p.speed_mbps / 1000}G</td>
+          <td colspan="3" class="muted">label and fabric of ${esc(twin.label || twin.netdev)}</td>
+          <td>${pcieCell(p)}</td>
+          <td>${sw}</td>
+          <td class="num">${fmt(p.tx_gbps)} / ${fmt(p.rx_gbps)}</td></tr>`;
+          return;
+        }
         html += `<td><b>${esc(p.rdma_dev)}/${p.port_num}</b> <span class="muted">${esc(p.netdev)}</span></td>
           <td class="mono">${esc((p.addrs || []).join(', ')) || '<span class="muted">no IP</span>'}${p.netplan?.mgmt ? '' : ` <button class="sm" onclick="netEditor(${h.id},${p.id})" title="Change this port's addresses and MTU (netplan, rolled back automatically if the port does not come up)">Edit</button>`}</td>
           <td>${badge(p.state, p.state === 'ACTIVE' ? 'pass' : 'fail')}</td>
@@ -877,11 +893,17 @@ async function pageNew(token) {
   const hosts = await api('GET', '/hosts');
   const prev = JSON.parse(sessionStorage.getItem('spec') || 'null'); sessionStorage.removeItem('spec');
   const names = hosts.map(h => h.name), tags = [...new Set(hosts.flatMap(h => h.tags || []))].map(t => 'tag:' + t);
-  const opts = [...names, ...tags].map(n => `<option value="${esc(n)}">`).join('');
+  // A port is picked by its label, else as host/netdev; only ports with an
+  // address can carry a leg.
+  const portSel = (h, p) => p.label || `${h.name}/${p.netdev}`;
+  const hostPorts = h => h.ports.filter(p => p.addrs?.length);
+  const fabrics = [...new Set(hosts.flatMap(h => h.ports.map(p => p.fabric).filter(Boolean)))].sort();
+  const opts = [...names, ...hosts.flatMap(h => hostPorts(h).map(p => portSel(h, p))), ...tags].map(n => `<option value="${esc(n)}">`).join('');
+  const chip = (v, text, cls = '') => `<button type="button" class="chip ${cls}" data-v="${esc(v)}" onclick="pickAdd(null, this.dataset.v)">${esc(text)}</button>`;
   const topo = prev ? (prev.mesh ? 'mesh' : prev.legs?.length ? 'legs' : prev.pairs ? 'pairs' : 'cs') : 'cs';
   const v = (k, d = '') => esc(prev?.[k] ?? d);
   if (!mount(token, `<div class="page-head"><h1>New run</h1></div><datalist id="sel">${opts}</datalist>
-  <form id="f" onsubmit="return startRun(event)">
+  <form id="f" onsubmit="return startRun(event)" oninput="legPreview()" onchange="legPreview()">
     <div class="card"><h2>What</h2><div class="row">
       <label>Name <input name="name" value="${v('name')}" placeholder="optional" style="width:220px"></label>
       <label>Test <select name="test" onchange="testChange(this.value)">${Object.entries(tests).map(([k, t]) => `<option value="${k}" ${prev?.test === k ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
@@ -895,7 +917,14 @@ async function pageNew(token) {
         <div class="field">Servers ${picker('servers', prev?.servers, 'host, tag:server, IP or port label', 340)}</div></div>
       <div class="row" id="t-mesh" style="display:none"><div class="field"><span id="hosts-label">Hosts</span> ${picker('hosts', prev?.hosts, 'every ordered pair among these', 520)}</div></div>
       <div class="row" id="t-legs" style="display:none"><label>Legs <input name="legs" style="width:520px" value="${esc((prev?.legs || []).map(l => l.client + '>' + l.server).join(', '))}" placeholder="client>server, client>server"></label></div>
-      <p class="help" style="margin:10px 0 0">Selectors are host names, <span class="mono">tag:&lt;tag&gt;</span>, RDMA IPs or port labels. Legs are paired by shared subnet. Pick from the list, or type and press Enter; add as many as you like. ${hosts.length ? 'Click to add: ' + [...names, ...tags].map(n => `<button type="button" class="chip" data-v="${esc(n)}" onclick="pickAdd(null, this.dataset.v)">${esc(n)}</button>`).join(' ') : 'No hosts enrolled yet.'}</p></div>
+      <div class="row" style="margin-top:10px">
+        <label title="A host or tag selector: test every port it shares a fabric on with the other side (a Spark's P1 and P2), or one link per host pair, spread over the ports">Ports <select name="ports">
+          <option value="all" ${prev?.ports !== 'one' ? 'selected' : ''}>Every port that shares a fabric</option>
+          <option value="one" ${prev?.ports === 'one' ? 'selected' : ''}>One link per host pair</option></select></label>
+        <label title="Only ports on this fabric (a port's fabric label, else the fabric of its subnet)">Fabric <select name="fabric"><option value="">Any</option>${fabrics.map(f => `<option ${prev?.fabric === f ? 'selected' : ''}>${esc(f)}</option>`).join('')}</select></label></div>
+      <p class="help" style="margin:10px 0 0">Selectors are host names, <span class="mono">tag:&lt;tag&gt;</span>, RDMA IPs, port labels or <span class="mono">host/netdev</span>. Legs are paired by shared subnet. Pick from the list, or type and press Enter; add as many as you like.</p>
+      ${hosts.length ? `<div class="help" style="margin:6px 0 0;display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center">Click to add: ${hosts.map(h => `<span style="white-space:nowrap">${chip(h.name, h.name)}${hostPorts(h).map(p => chip(portSel(h, p), p.label || p.netdev, 'sm')).join('')}</span>`).join('')} ${tags.map(t => chip(t, t)).join('')}</div>` : '<p class="help">No hosts enrolled yet.</p>'}
+      <div id="legs-prev" class="help" style="margin:10px 0 0"></div></div>
     <div class="card"><h2>How</h2><div class="row">
       <label>Duration (s) <input name="duration_sec" type="number" min="5" value="${v('duration_sec', 60)}" style="width:90px"></label>
       <label>Message size <input name="msg_size" type="number" min="1" value="${v('msg_size') || ''}" placeholder="per test" style="width:110px"></label>
@@ -911,7 +940,27 @@ async function pageNew(token) {
       <label title="A leg this far behind the same leg of the newest baseline run warns">Warn % behind baseline <input name="regress_pct" type="number" min="0" max="100" step="0.5" value="${v('regress_pct', 5)}" style="width:80px"></label></div></div>
     <div class="row"><button class="primary" type="submit" id="start">Start run</button><span class="sub" id="start-help">Servers start first; all clients start together 3 s later.</span></div>
   </form>`)) return;
-  topoChange(topo); testChange(prev?.test || 'write');
+  topoChange(topo); testChange(prev?.test || 'write'); legPreview();
+}
+// legPreview shows the legs the form would run, refreshed as it changes.
+let legPrevTimer = 0;
+function legPreview() {
+  clearTimeout(legPrevTimer);
+  legPrevTimer = setTimeout(async () => {
+    const f = $('#f'), out = $('#legs-prev');
+    if (!f || !out) return;
+    const spec = specFromForm(f);
+    if (!(spec.clients?.length && spec.servers?.length) && !spec.hosts?.length && !spec.legs?.length) { out.innerHTML = ''; return; }
+    let legs;
+    try { legs = await api('POST', '/runs/preview', spec); } catch (e) { out.innerHTML = `<span class="delta-bad">${esc(e.message || e)}</span>`; return; }
+    if ($('#legs-prev') !== out) return;
+    const byFab = {};
+    for (const l of legs) byFab[l.fabric || ''] = (byFab[l.fabric || ''] || 0) + 1;
+    const stages = new Set(legs.map(l => l.stage)).size;
+    const open = out.querySelector('details')?.open ? 'open' : '';
+    out.innerHTML = `<details ${open}><summary><b>${legs.length} leg${legs.length === 1 ? '' : 's'}</b>: ${Object.entries(byFab).map(([k, n]) => `${n} on ${k ? 'fabric ' + esc(k) : 'no fabric'}`).join(', ')}${stages > 1 ? `, ${stages} stages` : ''}</summary>
+      <div class="tbl" style="margin:6px 0 0;box-shadow:none;max-height:320px;overflow:auto"><table><thead><tr><th class="num">Stage</th><th>Client</th><th>Port</th><th>Server</th><th>Port</th><th>Fabric</th><th class="num">Expected Gbps</th></tr></thead><tbody>${legs.map(l => `<tr><td class="num">${l.stage + 1}</td><td>${esc(l.client)}</td><td class="mono">${esc(l.client_port)} <span class="muted">${esc(l.client_ip)}</span></td><td>${esc(l.server)}</td><td class="mono">${esc(l.server_port)} <span class="muted">${esc(l.server_ip)}</span></td><td>${esc(l.fabric || '-')}</td><td class="num">${fmt(l.expected_gbps)}</td></tr>`).join('')}</tbody></table></div></details>`;
+  }, 350);
 }
 // testChange adapts the form to the test: a collective takes a list of hosts
 // (ranks) instead of clients and servers, and its sweep sizes are far larger.
@@ -937,7 +986,7 @@ function picker(name, values, placeholder, width) {
       onkeydown="pickKey(event, this)"><input type="hidden" name="${name}" value="${esc(vals.join(', '))}"></div>`;
 }
 function pickChip(v) { return `<span class="chip" data-v="${esc(v)}">${esc(v)}<button type="button" title="Remove" onclick="pickDel(this)">×</button></span>`; }
-function pickSync(box) { box.querySelector('input[type=hidden]').value = [...box.querySelectorAll('.chip')].map(c => c.dataset.v).join(', '); }
+function pickSync(box) { box.querySelector('input[type=hidden]').value = [...box.querySelectorAll('.chip')].map(c => c.dataset.v).join(', '); if (box.closest('#f')) legPreview(); }
 function pickAdd(box, text) {
   box = box || lastPicker || [...document.querySelectorAll('.picker')].find(b => b.offsetParent);
   if (!box) return;
@@ -953,18 +1002,23 @@ function pickKey(ev, inp) {
 }
 function pickFlush(box) { const inp = box.querySelector('.pick-in'); if (inp.value.trim()) { pickAdd(box, inp.value); inp.value = ''; } }
 function topoChange(t) { $('#t-cs').style.display = (t === 'cs' || t === 'pairs') ? '' : 'none'; $('#t-mesh').style.display = t === 'mesh' ? '' : 'none'; $('#t-legs').style.display = t === 'legs' ? '' : 'none'; }
-async function startRun(ev) {
-  ev.preventDefault();
-  document.querySelectorAll('.picker').forEach(pickFlush);
-  const f = new FormData(ev.target), g = k => f.get(k);
+// specFromForm reads the New run form into a run spec.
+function specFromForm(form) {
+  const f = new FormData(form), g = k => f.get(k);
   const spec = { name: g('name'), test: g('test'), duration_sec: +g('duration_sec'), msg_size: +g('msg_size') || 0, qps: +g('qps'), streams: +g('streams'),
     pass_pct: +g('pass_pct'), max_lat_p99_us: +g('max_lat_p99_us') || 0, max_loss_pct: +g('max_loss_pct') || 0, regress_pct: +g('regress_pct') || 0, bidir: !!g('bidir'), serial: !!g('serial'),
-    sizes: list(g('sizes')).map(Number).filter(Boolean) };
-  const topo = g('topo');
+    sizes: list(g('sizes')).map(Number).filter(Boolean), ports: g('ports') || '', fabric: g('fabric') || '' };
+  const topo = form.topo.value;
   if (isCollective(spec.test)) spec.hosts = list(g('hosts'));
   else if (topo === 'mesh') { spec.mesh = true; spec.hosts = list(g('hosts')); }
   else if (topo === 'legs') spec.legs = list(g('legs')).map(l => { const [c, s] = l.split('>'); return { client: (c || '').trim(), server: (s || '').trim() }; });
   else { spec.clients = list(g('clients')); spec.servers = list(g('servers')); spec.pairs = topo === 'pairs'; }
+  return spec;
+}
+async function startRun(ev) {
+  ev.preventDefault();
+  document.querySelectorAll('.picker').forEach(pickFlush);
+  const spec = specFromForm(ev.target);
   const b = $('#start'); b.disabled = true;
   try { const r = await api('POST', '/runs', spec); location.hash = '#run/' + r.id; } catch (e) { fail(e); b.disabled = false; }
   return false;

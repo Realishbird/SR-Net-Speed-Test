@@ -207,6 +207,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/admin/password", s.admin(s.changePassword))
 	mux.HandleFunc("GET /api/v1/runs", s.view(s.listRuns))
 	mux.HandleFunc("POST /api/v1/runs", s.admin(s.createRun))
+	mux.HandleFunc("POST /api/v1/runs/preview", s.view(s.previewRun))
 	mux.HandleFunc("GET /api/v1/runs/{id}", s.view(s.getRun))
 	mux.HandleFunc("POST /api/v1/runs/{id}/cancel", s.admin(s.cancelRun))
 	mux.HandleFunc("POST /api/v1/runs/{id}/baseline", s.admin(s.setBaseline))
@@ -428,6 +429,7 @@ func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {
 	s.fillLLDP(r.Context(), hosts)
 	out := make([]api.Host, len(hosts))
 	for i, h := range hosts {
+		markTwins(h.Ports)
 		h.Online = s.hub.online(h.ID)
 		for j := range h.Ports {
 			h.Ports[j].TxGbps, h.Ports[j].RxGbps = s.metrics.live(h.Ports[j].ID)
@@ -687,6 +689,25 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(run)
+}
+
+// previewRun lists the legs a spec would run, without starting it.
+func (s *Server) previewRun(w http.ResponseWriter, r *http.Request) {
+	var spec api.RunSpec
+	if !readJSON(w, r, &spec) {
+		return
+	}
+	legs, err := s.orch.Preview(r.Context(), spec)
+	var ue *userError
+	if errors.As(err, &ue) {
+		httpError(w, http.StatusConflict, ue.Error())
+		return
+	}
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, legs)
 }
 
 func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {

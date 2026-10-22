@@ -361,6 +361,7 @@ type HostPort struct {
 	LLDPSwitch   string       `json:"lldp_switch,omitempty"`
 	LLDPPort     string       `json:"lldp_port,omitempty"`
 	LLDPDescr    string       `json:"lldp_descr,omitempty"`
+	TwinOf       string       `json:"twin_of,omitempty"` // netdev of the port this one shares a cable with (the second PCIe function of a Spark port)
 	TxGbps       float64      `json:"tx_gbps"`
 	RxGbps       float64      `json:"rx_gbps"`
 	MTU          int          `json:"mtu,omitempty"`
@@ -405,6 +406,8 @@ type RunSpec struct {
 	Mesh        bool      `json:"mesh,omitempty"`
 	Pairs       bool      `json:"pairs,omitempty"`
 	Legs        []LegSpec `json:"legs,omitempty"`
+	Ports       string    `json:"ports,omitempty"`  // "" or "all": a host selector tests every port it shares a subnet on; "one": one leg per host pair
+	Fabric      string    `json:"fabric,omitempty"` // only ports on this fabric (its label, else the fabric of its subnet)
 	Serial      bool      `json:"serial,omitempty"`
 	Sizes       []int     `json:"sizes,omitempty"`
 	DurationSec int       `json:"duration_sec"`
@@ -418,6 +421,26 @@ type RunSpec struct {
 	MaxLatP99Us float64   `json:"max_lat_p99_us,omitempty"` // latency tests fail above this when set
 	MaxLossPct  float64   `json:"max_loss_pct,omitempty"`   // udp tests fail above this (default 1)
 	RegressPct  float64   `json:"regress_pct,omitempty"`    // warn when a leg is this much worse than its baseline (default 5)
+}
+
+// Ports choices in a RunSpec.
+const (
+	PortsAll = "all"
+	PortsOne = "one"
+)
+
+// LegPreview is one leg a spec would run, for the New run page.
+type LegPreview struct {
+	Stage        int     `json:"stage"`
+	Client       string  `json:"client"`
+	ClientPort   string  `json:"client_port"` // label, else netdev
+	ClientIP     string  `json:"client_ip"`
+	Server       string  `json:"server"`
+	ServerPort   string  `json:"server_port"`
+	ServerIP     string  `json:"server_ip"`
+	Fabric       string  `json:"fabric,omitempty"`
+	MsgSize      int     `json:"msg_size,omitempty"`
+	ExpectedGbps float64 `json:"expected_gbps"`
 }
 
 type LegSpec struct {
