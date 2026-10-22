@@ -13,8 +13,8 @@ import (
 // Baselines (Phase 4). Any finished run can be marked the baseline for its
 // shape: the same test and the options that move the numbers (bidirectional,
 // QPs, streams, MTU). A later run of that shape is compared leg by leg with
-// the newest baseline: a leg matches when its client, server and message
-// size are the same, so a fan-out to eight hosts compares against a baseline
+// the newest baseline: a leg matches when its client, server, their addresses
+// and message size are the same, so a fan-out to eight hosts compares against a baseline
 // of the same fan-out, and a single-link run against the matching leg of a
 // baseline fan-out just as well.
 
@@ -23,9 +23,10 @@ func sameShape(a, b api.RunSpec) bool {
 	return a.Test == b.Test && a.Bidir == b.Bidir && a.QPs == b.QPs && a.Streams == b.Streams && a.MTU == b.MTU
 }
 
-// legKey identifies a leg across runs.
+// legKey identifies a leg across runs: the two hosts and the addresses
+// they met on, so the P1 and P2 legs between the same two hosts stay apart.
 func legKey(l api.Leg) string {
-	return l.ClientHost + "\x00" + l.ServerHost + "\x00" + strconv.Itoa(l.MsgSize)
+	return l.ClientHost + "\x00" + l.ClientIP + "\x00" + l.ServerHost + "\x00" + l.ServerIP + "\x00" + strconv.Itoa(l.MsgSize)
 }
 
 // legMeasure is the number a leg is compared on: tool Gbps for bandwidth

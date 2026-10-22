@@ -759,3 +759,36 @@ func (s *Server) topology(w http.ResponseWriter, r *http.Request) {
 	t.Runs = s.orch.ActiveLegs()
 	writeJSON(w, t)
 }
+
+// markTwins marks the second PCIe function of a cable on the Hosts page. A
+// ConnectX-7 on a Spark shows each cabled port twice (enp1s0f0np0 and
+// enP2p1s0f0np0), both on the same switch port; the one with an address
+// (else the lower PCI address) is the cable, the other its twin. Two
+// functions that both have addresses are both in use and neither is a twin.
+func markTwins(ports []api.HostPort) {
+	byCable := map[string][]int{}
+	for i, p := range ports {
+		if p.LLDPSwitch != "" && p.LLDPPort != "" {
+			k := strings.ToLower(p.LLDPSwitch + "/" + p.LLDPPort)
+			byCable[k] = append(byCable[k], i)
+		}
+	}
+	for _, idx := range byCable {
+		if len(idx) < 2 {
+			continue
+		}
+		keep := idx[0]
+		for _, i := range idx[1:] {
+			a, b := ports[i], ports[keep]
+			ha, hb := len(a.Addrs) > 0, len(b.Addrs) > 0
+			if ha && !hb || ha == hb && (pciAddress(a) < pciAddress(b) || pciAddress(a) == pciAddress(b) && a.Netdev < b.Netdev) {
+				keep = i
+			}
+		}
+		for _, i := range idx {
+			if i != keep && len(ports[i].Addrs) == 0 {
+				ports[i].TwinOf = ports[keep].Netdev
+			}
+		}
+	}
+}

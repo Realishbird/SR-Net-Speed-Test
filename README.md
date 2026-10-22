@@ -58,7 +58,7 @@ srnet port 20 --label "NIC 1" --fabric 100 --expected-gbps 200
 srnet import hosts.csv                        # bulk: host,name,tags,site,rack,ip,label,fabric,expected_gbps
 ```
 
-Nothing is hard-coded to any model of host. Test plans refer to hosts by name, `tag:<tag>`, RDMA IP or port label.
+Nothing is hard-coded to any model of host. Test plans refer to hosts by name, `tag:<tag>`, RDMA IP, port label or `host/netdev`. A host (or tag) selector tests every port it shares a fabric with the other side, so a Spark with P1 on fabric 100 and P2 on fabric 101 gets a leg on each; `--ports one` keeps one link per host pair, spread over the ports, and `--fabric 101` keeps only ports on that fabric (a port's fabric label, else the fabric of its subnet). The New run page lists each host's ports next to it and previews the legs before the run starts. On the Hosts page the second PCIe function of a Spark port (enP2p1s0f0np0, the ConnectX-7's second x4 link on the same cable) sits under the port it shares the cable with.
 
 ### Port addresses and MTU (netplan)
 
@@ -76,7 +76,9 @@ Each RDMA port on the Hosts page has an **Edit** button for its addresses, MTU a
 
 ```bash
 srnet run --test write --clients "Dell 770AP" --servers tag:server --duration 60   # fan-out, aggregate
-srnet run --test read  --clients tag:spark --servers "Dell 770AP"                  # fan-in
+srnet run --test read  --clients tag:spark --servers "Dell 770AP"                  # fan-in, every Spark port
+srnet run --clients tag:spark --servers "Dell 770AP" --fabric 101                  # fan-in, fabric 101 ports only
+srnet run --clients "Dell 770AP" --servers tag:spark --ports one                   # one link per Spark, spread over both 770AP NICs
 srnet run --legs "Dell 770AP>Dell Spark 1"                                         # single link
 srnet run --clients a,b,c --servers d,e,f --pairs                                  # disjoint pairs
 srnet run --mesh tag:spark                                                         # full mesh, every ordered pair

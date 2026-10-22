@@ -112,6 +112,11 @@ func applyDefaults(s *api.RunSpec) error {
 	if _, ok := api.Tests[s.Test]; !ok {
 		return fmt.Errorf("unknown test %q (write, read, send, write_lat, read_lat, send_lat, tcp, udp, nccl_allreduce, nccl_allgather)", s.Test)
 	}
+	switch s.Ports {
+	case "", api.PortsAll, api.PortsOne:
+	default:
+		return fmt.Errorf("unknown ports choice %q (all or one)", s.Ports)
+	}
 	if s.DurationSec == 0 {
 		s.DurationSec = 60
 	}
@@ -225,31 +230,97 @@ func resolveSelector(hosts []hostRec, sel string) ([]target, error) {
 			}
 		}
 	}
+	// host/port: one port of one host, by label or netdev, for ports that
+	// have no label of their own yet.
+	if h, port, ok := strings.Cut(sel, "/"); ok {
+		for i := range hosts {
+			if !strings.EqualFold(hosts[i].Name, strings.TrimSpace(h)) && !strings.EqualFold(hosts[i].Hostname, strings.TrimSpace(h)) {
+				continue
+			}
+			for j := range hosts[i].Ports {
+				p := &hosts[i].Ports[j]
+				if strings.EqualFold(p.Netdev, strings.TrimSpace(port)) || p.Label != "" && strings.EqualFold(p.Label, strings.TrimSpace(port)) {
+					return []target{{&hosts[i], p}}, nil
+				}
+			}
+			return nil, fmt.Errorf("%s has no port %q", hosts[i].Name, strings.TrimSpace(port))
+		}
+	}
 	return nil, fmt.Errorf("no host, tag, IP or port label matches %q", sel)
 }
 
-// pairPorts picks the client and server ports that share a subnet.
-func pairPorts(c, s target) (endpoint, endpoint, error) {
+// portChoice narrows the ports a run may use: only those on one fabric,
+// when the spec names one. A port's fabric is its label, else the fabric of
+// the labelled ports on its subnet.
+type portChoice struct {
+	fabric  string
+	subnets map[string]string // network (172.27.100.0/24) -> fabric, from labelled ports
+}
+
+func newPortChoice(hosts []hostRec, fabric string) portChoice {
+	pc := portChoice{fabric: fabric, subnets: map[string]string{}}
+	for _, h := range hosts {
+		for _, p := range h.Ports {
+			if p.Fabric == "" {
+				continue
+			}
+			for _, a := range p.Addrs {
+				if _, n, err := net.ParseCIDR(a); err == nil {
+					pc.subnets[n.String()] = p.Fabric
+				}
+			}
+		}
+	}
+	return pc
+}
+
+// fabricOf is the fabric of a port's address.
+func (pc portChoice) fabricOf(p *api.HostPort, addr string) string {
+	if p.Fabric != "" {
+		return p.Fabric
+	}
+	if _, n, err := net.ParseCIDR(addr); err == nil {
+		return pc.subnets[n.String()]
+	}
+	return ""
+}
+
+// portPair is a client port and a server port on one subnet, with the
+// addresses (CIDR form) they meet on.
+type portPair struct {
+	cp, sp     *api.HostPort
+	ca, sa     string
+	bothActive bool
+}
+
+func (pp portPair) cip() string { a, _, _ := strings.Cut(pp.ca, "/"); return a }
+func (pp portPair) sip() string { a, _, _ := strings.Cut(pp.sa, "/"); return a }
+
+// portPairs lists every client and server port pair on a shared subnet, in
+// port order. A host target offers each port with an address (the twin
+// PCIe function of a Spark port has none), never its management port; a
+// port target offers that port alone.
+func (pc portChoice) portPairs(c, s target) []portPair {
 	ports := func(t target) []*api.HostPort {
 		if t.port != nil {
 			return []*api.HostPort{t.port}
 		}
 		var out []*api.HostPort
 		for i := range t.host.Ports {
-			out = append(out, &t.host.Ports[i])
+			if p := &t.host.Ports[i]; p.Netplan == nil || !p.Netplan.Mgmt {
+				out = append(out, p)
+			}
 		}
 		return out
 	}
-	type cand struct {
-		cp, sp     *api.HostPort
-		cip, sip   string
-		bothActive bool
-	}
-	var best *cand
+	var out []portPair
 	for _, cp := range ports(c) {
 		for _, ca := range cp.Addrs {
-			cip, cnet, err := net.ParseCIDR(ca)
+			_, cnet, err := net.ParseCIDR(ca)
 			if err != nil {
+				continue
+			}
+			if pc.fabric != "" && !strings.EqualFold(pc.fabricOf(cp, ca), pc.fabric) {
 				continue
 			}
 			for _, sp := range ports(s) {
@@ -258,28 +329,85 @@ func pairPorts(c, s target) (endpoint, endpoint, error) {
 					if err != nil || !cnet.Contains(sip) {
 						continue
 					}
-					cd := cand{cp, sp, cip.String(), sip.String(), cp.State == "ACTIVE" && sp.State == "ACTIVE"}
-					if best == nil || (cd.bothActive && !best.bothActive) {
-						best = &cd
-					}
+					out = append(out, portPair{cp, sp, ca, sa, cp.State == "ACTIVE" && sp.State == "ACTIVE"})
 				}
 			}
 		}
 	}
+	return out
+}
+
+func (pc portChoice) noPair(c, s target) error {
+	if pc.fabric != "" {
+		return fmt.Errorf("no port on %s shares a subnet with %s on fabric %s", c.host.Name, s.host.Name, pc.fabric)
+	}
+	return fmt.Errorf("no port on %s shares a subnet with %s", c.host.Name, s.host.Name)
+}
+
+func inactive(c, s target, pp portPair) error {
+	return fmt.Errorf("link %s (%s) to %s (%s) is not ACTIVE", c.host.Name, pp.cip(), s.host.Name, pp.sip())
+}
+
+// pairPorts picks one client and server port that share a subnet: an
+// ACTIVE pair first and, among those, the one whose ports carry the fewest
+// legs so far (use, by port id; nil counts nothing), so a fan-out from a
+// server with a NIC on each fabric spreads over both.
+func (pc portChoice) pairPorts(c, s target, use map[int64]int) (endpoint, endpoint, error) {
+	var best *portPair
+	bestLoad := 0
+	for _, pp := range pc.portPairs(c, s) {
+		pp := pp
+		load := use[pp.cp.ID] + use[pp.sp.ID]
+		if best == nil || pp.bothActive && !best.bothActive || pp.bothActive == best.bothActive && load < bestLoad {
+			best, bestLoad = &pp, load
+		}
+	}
 	if best == nil {
-		return endpoint{}, endpoint{}, fmt.Errorf("no port on %s shares a subnet with %s", c.host.Name, s.host.Name)
+		return endpoint{}, endpoint{}, pc.noPair(c, s)
 	}
 	if !best.bothActive {
-		return endpoint{}, endpoint{}, fmt.Errorf("link %s (%s) to %s (%s) is not ACTIVE", c.host.Name, best.cip, s.host.Name, best.sip)
+		return endpoint{}, endpoint{}, inactive(c, s, *best)
 	}
-	mk := func(h *hostRec, p *api.HostPort, ip string) endpoint {
-		exp := p.ExpectedGbps
-		if exp == 0 {
-			exp = float64(p.SpeedMbps) / 1000
+	if use != nil {
+		use[best.cp.ID]++
+		use[best.sp.ID]++
+	}
+	return pc.endpoint(c.host, best.cp, best.ca), pc.endpoint(s.host, best.sp, best.sa), nil
+}
+
+// pairAllPorts gives one leg per subnet the client and server share: each
+// client port meets a server port on its subnet, every port at most once,
+// so a Spark with P1 on fabric 100 and P2 on fabric 101 tests both cables.
+// A configured port whose link is down fails the plan rather than being
+// left out quietly.
+func (pc portChoice) pairAllPorts(c, s target) ([][2]endpoint, error) {
+	used := map[*api.HostPort]bool{}
+	var out [][2]endpoint
+	for _, pp := range pc.portPairs(c, s) {
+		if used[pp.cp] || used[pp.sp] {
+			continue
 		}
-		return endpoint{AgentID: h.ID, Host: h.Name, PortID: p.ID, RdmaDev: p.RdmaDev, PortNum: p.PortNum, Netdev: p.Netdev, IP: ip, Label: p.Label, Fabric: p.Fabric, ExpectedGbps: exp, LLDPSwitch: p.LLDPSwitch, LLDPPort: p.LLDPPort}
+		if !pp.bothActive {
+			return nil, inactive(c, s, pp)
+		}
+		used[pp.cp], used[pp.sp] = true, true
+		out = append(out, [2]endpoint{pc.endpoint(c.host, pp.cp, pp.ca), pc.endpoint(s.host, pp.sp, pp.sa)})
 	}
-	return mk(c.host, best.cp, best.cip), mk(s.host, best.sp, best.sip), nil
+	if len(out) == 0 {
+		return nil, pc.noPair(c, s)
+	}
+	return out, nil
+}
+
+// endpoint is one end of a leg: the port and the address (CIDR form) it
+// uses.
+func (pc portChoice) endpoint(h *hostRec, p *api.HostPort, addr string) endpoint {
+	exp := p.ExpectedGbps
+	if exp == 0 {
+		exp = float64(p.SpeedMbps) / 1000
+	}
+	ip, _, _ := strings.Cut(addr, "/")
+	return endpoint{AgentID: h.ID, Host: h.Name, PortID: p.ID, RdmaDev: p.RdmaDev, PortNum: p.PortNum, Netdev: p.Netdev, IP: ip, Label: p.Label, Fabric: pc.fabricOf(p, addr), ExpectedGbps: exp, LLDPSwitch: p.LLDPSwitch, LLDPPort: p.LLDPPort}
 }
 
 // plan expands a spec into legs: explicit legs, fan-out (one client), fan-in
@@ -369,27 +497,41 @@ func plan(hosts []hostRec, spec api.RunSpec) ([]*legPlan, error) {
 			return nil, errors.New("several clients and several servers: use --pairs, --mesh, or explicit legs")
 		}
 	}
+	pc := newPortChoice(hosts, spec.Fabric)
+	use := map[int64]int{}
 	var base []*legPlan
 	for i, p := range pairs {
 		if p.c.host.ID == p.s.host.ID {
 			return nil, fmt.Errorf("leg %d: client and server are the same host (%s)", i+1, p.c.host.Name)
 		}
-		ce, se, err := pairPorts(p.c, p.s)
-		if err != nil {
-			return nil, fmt.Errorf("leg %d: %w", i+1, err)
+		var eps [][2]endpoint
+		if spec.Ports == api.PortsOne {
+			ce, se, err := pc.pairPorts(p.c, p.s, use)
+			if err != nil {
+				return nil, fmt.Errorf("leg %d: %w", i+1, err)
+			}
+			eps = [][2]endpoint{{ce, se}}
+		} else {
+			var err error
+			if eps, err = pc.pairAllPorts(p.c, p.s); err != nil {
+				return nil, fmt.Errorf("leg %d: %w", i+1, err)
+			}
 		}
-		fabric := se.Fabric
-		if fabric == "" {
-			fabric = ce.Fabric
+		for _, ep := range eps {
+			ce, se := ep[0], ep[1]
+			fabric := se.Fabric
+			if fabric == "" {
+				fabric = ce.Fabric
+			}
+			exp := ce.ExpectedGbps
+			if se.ExpectedGbps > 0 && (exp == 0 || se.ExpectedGbps < exp) {
+				exp = se.ExpectedGbps
+			}
+			base = append(base, &legPlan{
+				client: ce, server: se,
+				leg: api.Leg{ClientHost: ce.Host, ClientIP: ce.IP, ServerHost: se.Host, ServerIP: se.IP, Fabric: fabric, ExpectedGbps: exp},
+			})
 		}
-		exp := ce.ExpectedGbps
-		if se.ExpectedGbps > 0 && (exp == 0 || se.ExpectedGbps < exp) {
-			exp = se.ExpectedGbps
-		}
-		base = append(base, &legPlan{
-			client: ce, server: se,
-			leg: api.Leg{ClientHost: ce.Host, ClientIP: ce.IP, ServerHost: se.Host, ServerIP: se.IP, Fabric: fabric, ExpectedGbps: exp},
-		})
 	}
 	// Expand a size sweep: every leg repeats at each size. Serial mode then
 	// puts every leg in its own stage; otherwise one stage per size.
@@ -455,7 +597,7 @@ func planCollective(hosts []hostRec, spec api.RunSpec) ([]*legPlan, error) {
 	var master endpoint
 	exp := 0.0
 	for i, t := range ranks[1:] {
-		ce, se, err := pairPorts(t, ranks[0])
+		ce, se, err := newPortChoice(hosts, spec.Fabric).pairPorts(t, ranks[0], nil)
 		if err != nil {
 			return nil, fmt.Errorf("rank %d: %w", i+1, err)
 		}
@@ -540,6 +682,37 @@ func stagesOf(plans []*legPlan) [][]*legPlan {
 }
 
 // Start validates and queues a run, then executes it in the background.
+// Preview plans a spec as Start would and returns its legs.
+func (o *Orchestrator) Preview(ctx context.Context, spec api.RunSpec) ([]api.LegPreview, error) {
+	if err := applyDefaults(&spec); err != nil {
+		return nil, &userError{err}
+	}
+	hosts, err := o.store.Hosts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	hosts = approvedHosts(hosts)
+	if o.lldp != nil {
+		o.lldp(ctx, hosts)
+	}
+	plans, err := plan(hosts, spec)
+	if err != nil {
+		return nil, &userError{err}
+	}
+	name := func(e endpoint) string {
+		if e.Label != "" {
+			return e.Label
+		}
+		return e.Netdev
+	}
+	out := make([]api.LegPreview, len(plans))
+	for i, p := range plans {
+		out[i] = api.LegPreview{Stage: p.stage, Client: p.client.Host, ClientPort: name(p.client), ClientIP: p.client.IP,
+			Server: p.server.Host, ServerPort: name(p.server), ServerIP: p.server.IP, Fabric: p.leg.Fabric, MsgSize: p.leg.MsgSize, ExpectedGbps: p.leg.ExpectedGbps}
+	}
+	return out, nil
+}
+
 func (o *Orchestrator) Start(ctx context.Context, spec api.RunSpec) (int64, error) {
 	if err := applyDefaults(&spec); err != nil {
 		return 0, &userError{err}
