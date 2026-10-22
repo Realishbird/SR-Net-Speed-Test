@@ -556,6 +556,10 @@ func (s *Server) switchPollLoop(ctx context.Context) {
 		} else {
 			report("vlans", err, 0)
 		}
+		s.refreshQoS(ctx)
+		if s.alerts != nil {
+			s.fabricAlerts(ctx, s.fabricCheck(ctx))
+		}
 		select {
 		case <-ctx.Done():
 			return

@@ -52,6 +52,7 @@ type activeRun struct {
 	stages  [][]*legPlan
 	cancel  context.CancelFunc
 	summary api.RunSummary // filled by score, extended by applyBaseline
+	fabric  []string       // fabric check findings on the run's cables at start
 }
 
 // Orchestrator turns run specs into agent tasks and collects the results.
@@ -65,6 +66,9 @@ type Orchestrator struct {
 	// lldp completes host ports' switch neighbours from the switch side.
 	// Nil when the server has not wired it (tests).
 	lldp func(ctx context.Context, hosts []hostRec)
+	// fabric lists the fabric check's findings on the ports a run uses, for
+	// its summary. Nil when the server has not wired it (tests).
+	fabric func(ctx context.Context, portIDs map[int64]bool) []string
 
 	mu       sync.Mutex
 	portLock map[int64]int64        // port id -> run id
@@ -469,6 +473,13 @@ func (o *Orchestrator) Start(ctx context.Context, spec api.RunSpec) (int64, erro
 	ar := &activeRun{id: runID, spec: spec, plans: plans, stages: stagesOf(plans), cancel: cancel}
 	o.active[runID] = ar
 	o.mu.Unlock()
+	if o.fabric != nil {
+		ids := map[int64]bool{}
+		for _, p := range plans {
+			ids[p.client.PortID], ids[p.server.PortID] = true, true
+		}
+		ar.fabric = o.fabric(ctx, ids)
+	}
 
 	o.store.Audit(ctx, "run.start", map[string]any{"run_id": runID, "spec": spec})
 	go o.execute(runCtx, ar)
@@ -568,6 +579,7 @@ func (o *Orchestrator) execute(ctx context.Context, ar *activeRun) {
 	o.sendCancels(ar) // stops any stragglers; a no-op on agents with nothing running
 	sum, verdict := o.score(ar)
 	ar.summary = sum
+	ar.summary.FabricIssues = ar.fabric
 	if status != "done" {
 		verdict = "fail"
 	} else {

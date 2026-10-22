@@ -38,6 +38,7 @@ func Inventory(ctx context.Context) api.Inventory {
 	inv.MemBytes = memTotal()
 	inv.Ports = DiscoverPorts(ctx)
 	addLLDP(ctx, inv.Ports)
+	addSettings(ctx, inv.Ports)
 	inv.Tools = toolVersions(ctx)
 	return inv
 }

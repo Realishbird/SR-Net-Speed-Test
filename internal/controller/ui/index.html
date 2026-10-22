@@ -95,6 +95,8 @@ button:disabled { opacity:.5; cursor:default; }
 .badge.warn, .badge.skipped, .badge.canceled { color:var(--warn); background:color-mix(in srgb, var(--warn) 14%, transparent); }
 .badge.fail, .badge.failed, .badge.open, .badge.down { color:var(--fail); background:color-mix(in srgb, var(--fail) 14%, transparent); }
 .badge.running, .badge.queued, .badge.updating, .badge.pending, .badge.info { color:var(--info); background:color-mix(in srgb, var(--info) 14%, transparent); }
+.chk { display:inline-block; padding:1px 7px; border-radius:6px; font-size:12px; margin:1px 0; border:1px solid var(--line); }
+.chk.ok { color:var(--pass); } .chk.bad { color:var(--fail); border-color:color-mix(in srgb, var(--fail) 50%, var(--line)); font-weight:600; } .chk.unknown { color:var(--muted); } .chk.skip { color:var(--muted); opacity:.6; }
 .delta-good { color:var(--pass); font-variant-numeric:tabular-nums; } .delta-flat { color:var(--muted); font-variant-numeric:tabular-nums; } .delta-bad { color:var(--warn); font-weight:600; font-variant-numeric:tabular-nums; }
 .badge.muted { color:var(--muted); background:var(--hover); }
 .dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--fail); box-shadow:0 0 0 3px color-mix(in srgb, var(--fail) 18%, transparent); }
@@ -146,6 +148,7 @@ button.chip:hover { border-color:var(--accent); }
   <a href="#overview" data-page="overview"><svg viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span class="t">Overview</span></a>
   <a href="#hosts" data-page="hosts"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><path d="M7 7h.01M7 17h.01"/></svg><span class="t">Hosts</span></a>
   <a href="#topology" data-page="topology"><svg viewBox="0 0 24 24"><rect x="8" y="3" width="8" height="5" rx="1"/><rect x="2" y="16" width="6" height="5" rx="1"/><rect x="9" y="16" width="6" height="5" rx="1"/><rect x="16" y="16" width="6" height="5" rx="1"/><path d="M12 8v4M5 16v-4h14v4M12 12v4"/></svg><span class="t">Topology</span></a>
+  <a href="#fabric" data-page="fabric"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/><path d="M9 4l-2 3 2 3M15 14l2 3-2 3"/></svg><span class="t">Fabric</span><span class="badge warn" id="fabric-count" style="display:none"></span></a>
   <a href="#runs" data-page="runs"><svg viewBox="0 0 24 24"><path d="M4 19V5M4 15l5-5 4 4 7-8"/></svg><span class="t">Runs</span></a>
   <a href="#new" data-page="new"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg><span class="t">New run</span></a>
   <a href="#suites" data-page="suites"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/></svg><span class="t">Suites</span></a>
@@ -256,6 +259,7 @@ function route() {
   if (h.startsWith('#run/')) return go(t => pageRun(t, +h.slice(5)));
   if (h === '#hosts') return go(pageHosts);
   if (h === '#topology') return go(pageTopology);
+  if (h === '#fabric') return go(pageFabric);
   if (h === '#runs') return go(pageRuns);
   if (h === '#new') return go(pageNew);
   if (h === '#suites') return go(pageSuites);
@@ -463,6 +467,59 @@ async function pageTopology(token) {
   await refresh(); setRefresh(refresh, 3000);
 }
 
+/* ---------- fabric check ---------- */
+const fabricFields = [
+  ['mode', 'Mode', 'select', 'lossless = PFC and ECN expected, drops are a fault; lossy = PFC off expected, drops allowed; blank = consistency only'],
+  ['switch_mtu', 'Switch MTU at least', 'number', ''], ['host_mtu', 'Host MTU at least', 'number', ''], ['speed_mbps', 'Speed Mbps (0 = any)', 'number', ''],
+  ['vlan', 'VLAN (blank = fabric name)', 'text', ''], ['pfc_priority', 'PFC priority (-1 = off)', 'number', ''], ['ecn_queue', 'ECN queue (-1 = unchecked)', 'number', ''],
+  ['roce_dscp', 'RoCE DSCP (-1 = unchecked)', 'number', ''], ['cnp_dscp', 'CNP DSCP (-1 = unchecked)', 'number', ''], ['roce_mode', 'RoCE mode', 'text', ''], ['trust', 'Host trust (dscp, pcp, blank)', 'text', ''],
+];
+async function pageFabric(token) {
+  if (!mount(token, `<div class="page-head"><h1>Fabric check</h1><span id="fb-sum"></span><span class="spacer"></span><span class="sub" id="fb-upd"></span></div>
+    <p class="help">Every cable the controller knows, with each setting on the switch side (read over gNMI once a minute: MTU, speed, FEC, VLAN, PFC, QoS map, queue drops, ECN marks, pause frames) and the host side (reported by the agent: MTU, RoCE mode, PFC, trust, DSCP map, ECN) against the fabric's profile. Without a profile only consistency is checked: both ends agree on speed and PFC, the VLAN matches the fabric, the link is up, and the MTUs carry a 4096-byte RDMA MTU. A failing cable opens a <span class="mono">fabric_mismatch</span> alert, and a run that starts on it carries the findings in its summary.</p>
+    <div id="fb-warn"></div>
+    <div class="card"><h2>Fabric profiles</h2><div id="fb-profiles"></div></div>
+    <div class="tbl"><table><thead><tr><th>Fabric</th><th>Host</th><th>Port</th><th>Switch port</th><th>State</th><th>Checks</th><th>Switch counters</th></tr></thead><tbody id="fb-cables"></tbody></table></div>`)) return;
+  const refresh = async () => {
+    const fc = await api('GET', '/fabric-check');
+    window._fabricProfiles = fc.profiles;
+    set('fb-warn', fc.warning ? `<div class="card" style="border-color:var(--warn);color:var(--warn)">${esc(fc.warning)}</div>` : '');
+    set('fb-sum', fc.cables.length ? (fc.issues ? badge(`${fc.issues} of ${fc.cables.length} cables need attention`, 'fail') : badge(`${fc.cables.length} cables ok`, 'pass')) : '');
+    const fabrics = [...new Set([...fc.profiles.map(p => p.fabric), ...fc.cables.map(c => c.fabric).filter(Boolean)])].sort();
+    set('fb-profiles', (fabrics.length ? fabrics.map(f => { const p = fc.profiles.find(x => x.fabric === f);
+      return `<div class="row" style="margin-bottom:8px"><b style="width:90px">Fabric ${esc(f)}</b><span class="sub" style="width:260px">${p ? `${esc(p.mode || 'consistency only')} · PFC ${p.pfc_priority >= 0 ? 'priority ' + p.pfc_priority : 'off'} · ECN ${p.ecn_queue >= 0 ? 'queue ' + p.ecn_queue : 'unchecked'} · MTU ≥ ${p.switch_mtu}/${p.host_mtu}` : 'no profile: consistency checks only'}</span>
+        <button class="sm" onclick="editFabric('${esc(f)}')">${p ? 'Edit' : 'Set profile'}</button>${p ? ` <button class="sm danger" onclick="delFabric('${esc(f)}')">Remove</button>` : ''}</div>`; }).join('') : '<span class="muted">No fabrics yet: label host ports with a fabric on the Hosts page, or let the switch VLANs name them.</span>')
+      + `<p class="help" style="margin:8px 0 0">A profile starts from a preset: <b>lossless RoCE</b> (DSCP 26 to queue 3, PFC on priority 3, ECN on queue 3, CNPs on DSCP 48, host trust dscp with ECN on) or <b>lossy</b> (PFC off, no QoS map, drops allowed). Edit any field afterwards.</p>`);
+    set('fb-cables', fc.cables.length ? fc.cables.map(c => {
+      const checks = c.checks.map(k => `<span class="chk ${k.state}" title="${esc([k.want ? 'want: ' + k.want : '', k.switch ? 'switch: ' + k.switch : '', k.host ? 'host: ' + k.host : '', k.note].filter(Boolean).join('\n'))}">${esc(k.name)}${k.state === 'ok' ? '' : k.state === 'bad' ? ' ✕' : ' ?'}</span>`).join(' ');
+      const notes = c.checks.filter(k => k.state === 'bad').map(k => `<div class="muted" style="font-size:12px">${esc(k.name)}: ${esc(k.note)}</div>`).join('');
+      const ctr = Object.entries(c.counters || {}).filter(([k, v]) => v > 0 || k.startsWith('pause')).map(([k, v]) => `${esc(k)} ${fmt(v, 0)}`).join(', ');
+      return `<tr><td>${esc(c.fabric || '-')}</td><td>${esc(c.host)}</td><td><span class="mono">${esc(c.netdev)}</span>${c.label ? ` <span class="muted">${esc(c.label)}</span>` : ''}${c.ip ? ` <span class="muted mono">${esc(c.ip)}</span>` : ''}</td>
+        <td class="mono">${c.switch_port ? esc(c.switch + ' ' + c.switch_port) : '<span class="muted">-</span>'}</td><td>${badge(c.ok ? 'ok' : 'mismatch', c.ok ? 'pass' : 'fail')}</td><td class="wrap">${checks}${notes}</td><td class="muted wrap" style="font-size:12px">${ctr || '-'}</td></tr>`;
+    }).join('') : `<tr><td colspan="7" class="empty">No cabled ports yet.</td></tr>`);
+    set('fb-upd', 'checked ' + new Date(fc.at).toLocaleTimeString());
+  };
+  await refresh(); setRefresh(refresh, 15000);
+}
+async function editFabric(fabric) {
+  const presets = await api('GET', '/fabrics/presets');
+  const cur = (window._fabricProfiles || []).find(p => p.fabric === fabric) || { ...presets.lossy, fabric, mode: '' };
+  const field = ([k, label, type, help], v) => type === 'select'
+    ? `<label title="${esc(help)}">${esc(label)} <select name="${k}"><option value="" ${!v ? 'selected' : ''}>consistency only</option><option value="lossless" ${v === 'lossless' ? 'selected' : ''}>lossless</option><option value="lossy" ${v === 'lossy' ? 'selected' : ''}>lossy</option></select></label>`
+    : `<label>${esc(label)} <input name="${k}" type="${type}" value="${esc(v ?? '')}" style="width:${type === 'number' ? 90 : 120}px"></label>`;
+  const render = p => fabricFields.map(f => field(f, p[f[0]])).join('') + `<label class="inline"><input type="checkbox" name="host_ecn" ${p.host_ecn ? 'checked' : ''}> Host ECN (np and rp) on the PFC priority</label>`;
+  modal({ title: `Fabric ${fabric} profile`, body: `<div class="row" style="margin-bottom:10px"><button type="button" class="sm" onclick="fabricPreset('lossless')">Lossless RoCE preset</button><button type="button" class="sm" onclick="fabricPreset('lossy')">Lossy preset</button></div><form id="fb-form" class="row" onsubmit="return false">${render(cur)}</form>`,
+    actions: [{ label: 'Cancel' }, { label: 'Save', cls: 'primary', close: false, run: async () => {
+      const f = new FormData($('#fb-form')), g = k => f.get(k);
+      const p = { fabric, mode: g('mode'), switch_mtu: +g('switch_mtu'), host_mtu: +g('host_mtu'), speed_mbps: +g('speed_mbps'), vlan: g('vlan').trim(), pfc_priority: +g('pfc_priority'), ecn_queue: +g('ecn_queue'),
+        roce_dscp: +g('roce_dscp'), cnp_dscp: +g('cnp_dscp'), roce_mode: g('roce_mode').trim(), trust: g('trust').trim(), host_ecn: !!g('host_ecn') };
+      try { await api('PUT', '/fabrics/' + encodeURIComponent(fabric), p); toast('Profile saved; the check re-runs now', 'pass'); closeModal(); refreshFn?.(); } catch (e) { fail(e); }
+    } }] });
+  window._fabricPresets = presets; window._fabricRender = render;
+}
+function fabricPreset(mode) { const f = $('#fb-form'); if (f) f.innerHTML = window._fabricRender({ ...window._fabricPresets[mode], fabric: '' }); }
+function delFabric(fabric) { confirmBox('Remove profile', `Remove the profile of fabric ${fabric}? Its cables go back to consistency checks only.`, 'Remove', async () => { await api('DELETE', '/fabrics/' + encodeURIComponent(fabric)); refreshFn?.(); }); }
+
 /* ---------- runs ---------- */
 async function pageRuns(token) {
   if (!mount(token, `<div class="page-head"><h1>Runs</h1><span class="spacer"></span><a href="#new"><button class="primary">New run</button></a></div>
@@ -499,6 +556,7 @@ async function pageRun(token, id) {
       <b>Test</b><span>${esc(s.test)} · ${s.duration_sec} s · message size ${s.msg_size}${s.sizes?.length ? ' (sweep ' + s.sizes.join(', ') + ')' : ''} · ${s.qps} QP${s.qps === 1 ? '' : 's'}${s.streams > 1 ? ' · ' + s.streams + ' streams' : ''}${s.bidir ? ' · bidirectional (rates add both directions)' : ''}${s.serial ? ' · serial' : ''}${s.mesh ? ' · full mesh' : ''}</span>
       <b>Thresholds</b><span>${s.pass_pct}% of line rate${s.max_lat_p99_us ? ' · p99 ≤ ' + s.max_lat_p99_us + ' µs' : ''}${s.test === 'udp' ? ' · loss ≤ ' + s.max_loss_pct + '%' : ''} · warn ${s.regress_pct || 5}% behind baseline</span>
       <b>Baseline</b><span id="run-baseline"></span>
+      <b>Fabric</b><span id="run-fabric"></span>
       <b>When</b><span id="run-when"></span></div></div>
     <div class="tbl"><table><thead><tr><th>#</th><th>Client</th><th>Server</th><th>Fabric</th><th class="num">Size</th>${head}${headBl}${headSw}<th>Error counters</th><th>Verdict</th><th>Note</th></tr></thead><tbody id="legs"></tbody></table></div>`)) return;
   const paint = r => {
@@ -508,6 +566,8 @@ async function pageRun(token, id) {
     set('run-baseline', r.baseline ? 'this run is the reference for runs of the same shape (test, direction, QPs, MTU)'
       : b.baseline_run_id ? `compared with <a href="#run/${b.baseline_run_id}">run ${b.baseline_run_id}</a>: ${deltaPct(b.delta_pct, b.regressed > 0)}${lat ? ' (p99, lower is better)' : ` (${fmt(b.baseline_gbps)} Gbps there)`}${b.regressed ? `, ${b.regressed} leg${b.regressed === 1 ? '' : 's'} regressed` : ''}`
       : r.status === 'done' ? 'no baseline run of this shape yet; mark this run or another finished one with "Set as baseline"' : '-');
+    const fi = b.fabric_issues || [];
+    set('run-fabric', fi.length ? `<span class="delta-bad">${fi.length} finding${fi.length === 1 ? '' : 's'} on the run's cables when it started</span> (<a href="#fabric">Fabric check</a>): ${esc(fi.join('; '))}` : r.status === 'queued' ? '-' : 'cables matched their fabric profiles when the run started');
     set('run-actions', `${live ? `<button class="danger" onclick="cancelRun(${r.id})">Cancel run</button> ` : ''}
       ${r.status === 'done' ? `<button onclick="setBaseline(${r.id}, ${!r.baseline})" title="${r.baseline ? 'Stop using this run as the reference' : 'Compare later runs of the same shape with this one'}">${r.baseline ? 'Unset baseline' : 'Set as baseline'}</button>` : ''}
       <button onclick='sessionStorage.setItem("spec", ${JSON.stringify(JSON.stringify(s))}); location.hash="#new"'>Run again</button>
@@ -829,7 +889,7 @@ function delSwitch(name) { confirmBox('Remove switch', `Stop collecting from "${
 async function pageAlerts(token) {
   if (!mount(token, `<div class="page-head"><h1>Alerts</h1><span class="spacer"></span><label class="row inline sub"><input type="checkbox" id="all" onchange="refreshFn()"> include resolved</label>
       <button class="danger" id="clear-all" onclick="clearAlerts()">Clear all</button></div>
-    <p class="help">Opened by the controller for agents that stop reporting, ports with an address that leave ACTIVE, error counters that grow while no test runs (counters that grow during a run belong to that run's result), hot transceivers, failed runs and failed updates. They close themselves when the condition clears, idle-error alerts after 15 minutes without further growth; "Clear" resolves one by hand (an alert whose cause is still present comes back on the next check).</p>
+    <p class="help">Opened by the controller for agents that stop reporting, ports with an address that leave ACTIVE, error counters that grow while no test runs (counters that grow during a run belong to that run's result), hot transceivers, cables whose settings differ from their fabric profile (see Fabric check), failed runs and failed updates. They close themselves when the condition clears, idle-error alerts after 15 minutes without further growth; "Clear" resolves one by hand (an alert whose cause is still present comes back on the next check).</p>
     <div class="tbl"><table><thead><tr><th>State</th><th>Kind</th><th>Host</th><th>Port</th><th>Message</th><th>Opened</th><th>Resolved</th><th></th></tr></thead><tbody id="alerts"></tbody></table></div>`)) return;
   const refresh = async () => {
     const all = $('#all')?.checked;
@@ -852,7 +912,8 @@ function clearAlerts() {
 
 /* ---------- global ---------- */
 async function alertBadge() {
-  try { const n = (await api('GET', '/alerts')).length; const b = $('#alert-count'); b.textContent = n; b.style.display = n ? '' : 'none'; } catch {}
+  try { const alerts = await api('GET', '/alerts'); const n = alerts.length; const b = $('#alert-count'); b.textContent = n; b.style.display = n ? '' : 'none';
+    const f = alerts.filter(a => a.kind === 'fabric_mismatch').length, fb = $('#fabric-count'); fb.textContent = f; fb.style.display = f ? '' : 'none'; } catch {}
 }
 api('GET', '/status').then(s => { $('#ver').textContent = 'controller ' + s.version; $('#grafana').href = s.grafana_url || ('http://' + location.hostname + ':3000'); }).catch(() => {});
 alertBadge(); setInterval(() => { if (!document.hidden) alertBadge(); }, 30000);

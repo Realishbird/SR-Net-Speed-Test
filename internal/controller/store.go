@@ -85,7 +85,7 @@ func OpenStore(ctx context.Context, url string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(ctx, schema+schema3); err != nil {
+	if _, err := db.Exec(ctx, schema+schema3+schemaFabric); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}

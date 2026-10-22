@@ -21,7 +21,7 @@ func TestWriteGnmicConfig(t *testing.T) {
 	}
 	b, _ := os.ReadFile(path)
 	y := string(b)
-	for _, want := range []string{"address: 10.0.0.2:8080", `password: "p\"w"`, "skip-verify: true", `subscriptions: [counters, "transceivers-z9864f"]`, "ethernet/state/port-speed", "encoding: json_ietf", "log: true", "sample-interval: 30s", "sample-interval: 60s", "http://127.0.0.1:8428/api/v1/write", "openconfig-interfaces",
+	for _, want := range []string{"address: 10.0.0.2:8080", `password: "p\"w"`, "skip-verify: true", `subscriptions: [counters, "transceivers-z9864f", "qos-z9864f"]`, "interface[interface-id=Ethernet0]/output/queues", "interface[interface-id=Ethernet8]/pfc", "ethernet/state/port-speed", "encoding: json_ietf", "log: true", "sample-interval: 30s", "sample-interval: 60s", "http://127.0.0.1:8428/api/v1/write", "openconfig-interfaces",
 		"component[name=Ethernet0]/transceiver/state\n      - /openconfig-platform:components/component[name=Ethernet0]/state/temperature\n      - /openconfig-platform:components/component[name=Ethernet8]/transceiver/state"} {
 		if !strings.Contains(y, want) {
 			t.Errorf("missing %q in:\n%s", want, y)

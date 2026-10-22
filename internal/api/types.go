@@ -57,21 +57,38 @@ type EnrollResponse struct {
 
 // Port is one RDMA port and the netdev behind it.
 type Port struct {
-	RdmaDev     string   `json:"rdma_dev"`
-	PortNum     int      `json:"port_num"`
-	Netdev      string   `json:"netdev"`
-	Addrs       []string `json:"addrs"` // CIDR form, e.g. 172.27.100.10/24
-	LinkLayer   string   `json:"link_layer"`
-	State       string   `json:"state"`
-	PhysState   string   `json:"phys_state"`
-	SpeedMbps   int      `json:"speed_mbps"`
-	MTU         int      `json:"mtu"`
-	Driver      string   `json:"driver"`
-	FWVersion   string   `json:"fw_version"`
-	Transceiver string   `json:"transceiver"`
-	NUMANode    int      `json:"numa_node"`
-	LLDPSwitch  string   `json:"lldp_switch,omitempty"` // neighbour chassis name from lldpd
-	LLDPPort    string   `json:"lldp_port,omitempty"`   // neighbour port id
+	RdmaDev     string        `json:"rdma_dev"`
+	PortNum     int           `json:"port_num"`
+	Netdev      string        `json:"netdev"`
+	Addrs       []string      `json:"addrs"` // CIDR form, e.g. 172.27.100.10/24
+	LinkLayer   string        `json:"link_layer"`
+	State       string        `json:"state"`
+	PhysState   string        `json:"phys_state"`
+	SpeedMbps   int           `json:"speed_mbps"`
+	MTU         int           `json:"mtu"`
+	Driver      string        `json:"driver"`
+	FWVersion   string        `json:"fw_version"`
+	Transceiver string        `json:"transceiver"`
+	NUMANode    int           `json:"numa_node"`
+	LLDPSwitch  string        `json:"lldp_switch,omitempty"` // neighbour chassis name from lldpd
+	LLDPPort    string        `json:"lldp_port,omitempty"`   // neighbour port id
+	Settings    *PortSettings `json:"settings,omitempty"`    // host-side RoCE settings, for the fabric check
+}
+
+// PortSettings is how the host has the port set up for RoCE: what the
+// fabric check compares with the fabric profile and the switch port.
+// Empty strings mean the agent could not read that setting.
+type PortSettings struct {
+	RoCEMode string `json:"roce_mode,omitempty"` // "v2" when a RoCE v2 GID exists, "v1" when only v1
+	Trust    string `json:"trust,omitempty"`     // dscp or pcp (what the NIC maps traffic to priorities by)
+	PFC      string `json:"pfc,omitempty"`       // priorities with PFC on, e.g. "3" or "3,4"; "none" when read and all off
+	DSCPPrio string `json:"dscp_prio,omitempty"` // DSCP to priority map in use, e.g. "26:3,48:6"
+	ECNNp    string `json:"ecn_np,omitempty"`    // priorities with ECN notification point (CNP sender) on
+	ECNRp    string `json:"ecn_rp,omitempty"`    // priorities with ECN reaction point (rate limiter) on
+	CNPDSCP  int    `json:"cnp_dscp,omitempty"`  // DSCP the NIC marks CNPs with (-1 unknown)
+	CNPPrio  int    `json:"cnp_prio,omitempty"`  // 802.1p priority of CNPs (-1 unknown)
+	TOS      int    `json:"tos,omitempty"`       // default RoCE traffic class (TOS) of the RDMA device, -1 unknown
+	Source   string `json:"source,omitempty"`    // which tools answered: dcb, mlnx_qos, sysfs
 }
 
 type Inventory struct {
@@ -292,10 +309,11 @@ type RunSummary struct {
 	ByFabric    map[string]float64 `json:"by_fabric,omitempty"`
 	LiveGbps    float64            `json:"live_gbps,omitempty"`
 	// Comparison with the newest baseline run of the same shape, when one exists.
-	BaselineRunID int64   `json:"baseline_run_id,omitempty"`
-	BaselineGbps  float64 `json:"baseline_gbps,omitempty"` // the baseline's aggregate over the legs matched here
-	DeltaPct      float64 `json:"delta_pct,omitempty"`     // aggregate change against the baseline, in percent (+ is faster)
-	Regressed     int     `json:"regressed,omitempty"`     // legs that fell behind their baseline by more than the allowance
+	BaselineRunID int64    `json:"baseline_run_id,omitempty"`
+	BaselineGbps  float64  `json:"baseline_gbps,omitempty"` // the baseline's aggregate over the legs matched here
+	DeltaPct      float64  `json:"delta_pct,omitempty"`     // aggregate change against the baseline, in percent (+ is faster)
+	Regressed     int      `json:"regressed,omitempty"`     // legs that fell behind their baseline by more than the allowance
+	FabricIssues  []string `json:"fabric_issues,omitempty"` // fabric check findings on the run's cables when it started
 }
 
 type Leg struct {
@@ -557,6 +575,61 @@ type LegBaseline struct {
 // BaselineRequest is the body of POST /api/v1/runs/{id}/baseline.
 type BaselineRequest struct {
 	Baseline bool `json:"baseline"`
+}
+
+// FabricProfile says how a fabric is meant to be set up (Phase 5). The
+// fabric check compares every cable of the fabric (host port, switch port)
+// with it. -1 in a number means "not checked"; an empty string the same.
+type FabricProfile struct {
+	Fabric      string     `json:"fabric"`
+	Mode        string     `json:"mode"`         // lossless (PFC and ECN expected, drops are a fault) | lossy (PFC off expected, drops allowed) | "" (consistency only)
+	SwitchMTU   int        `json:"switch_mtu"`   // switch port MTU at least this (9100)
+	HostMTU     int        `json:"host_mtu"`     // host netdev MTU at least this (9000; RDMA MTU 4096 needs more than 4200)
+	SpeedMbps   int        `json:"speed_mbps"`   // link speed on both ends (100000)
+	VLAN        string     `json:"vlan"`         // switch VLAN the ports must be in ("100"); empty = the fabric name
+	PFCPriority int        `json:"pfc_priority"` // priority with PFC on, on the switch and the host (3); -1 = PFC off expected
+	ECNQueue    int        `json:"ecn_queue"`    // switch queue with ECN marking (3); -1 = not checked
+	RoCEDSCP    int        `json:"roce_dscp"`    // DSCP the switch maps to the RoCE queue (26); -1 = not checked
+	CNPDSCP     int        `json:"cnp_dscp"`     // DSCP CNPs are sent with (48); -1 = not checked
+	RoCEMode    string     `json:"roce_mode"`    // v2
+	Trust       string     `json:"trust"`        // host NIC trust mode: dscp or pcp
+	HostECN     bool       `json:"host_ecn"`     // host NIC congestion control (ECN np and rp) on the PFC priority
+	UpdatedAt   *time.Time `json:"updated_at,omitempty"`
+}
+
+// FabricCheck is the fabric check page: every cable the controller knows,
+// each setting on both ends against the fabric's profile.
+type FabricCheck struct {
+	At       time.Time       `json:"at"`
+	Warning  string          `json:"warning,omitempty"`
+	Profiles []FabricProfile `json:"profiles"`
+	Cables   []CableCheck    `json:"cables"`
+	Issues   int             `json:"issues"` // cables with at least one failed check
+}
+
+type CableCheck struct {
+	Host       string             `json:"host"`
+	Netdev     string             `json:"netdev"`
+	Label      string             `json:"label,omitempty"`
+	IP         string             `json:"ip,omitempty"`
+	Fabric     string             `json:"fabric"`
+	Switch     string             `json:"switch,omitempty"`
+	SwitchPort string             `json:"switch_port,omitempty"`
+	OK         bool               `json:"ok"`
+	Checks     []SettingCheck     `json:"checks"`
+	Counters   map[string]float64 `json:"counters,omitempty"` // switch queue drops, ECN marks, pause frames (lifetime)
+}
+
+// SettingCheck is one setting compared across the profile, the switch port
+// and the host port. State is ok, bad, unknown (a side could not be read)
+// or skip (the profile does not check it).
+type SettingCheck struct {
+	Name   string `json:"name"`
+	Want   string `json:"want,omitempty"`
+	Switch string `json:"switch,omitempty"`
+	Host   string `json:"host,omitempty"`
+	State  string `json:"state"`
+	Note   string `json:"note,omitempty"`
 }
 
 // LegCPU is the CPU use of both hosts during the leg, in percent.

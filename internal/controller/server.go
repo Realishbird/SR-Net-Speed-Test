@@ -54,6 +54,9 @@ type Server struct {
 	lldp        map[string]lldpEntry // switch-side LLDP table, polled by switchPollLoop
 	vlans       map[string]string    // switch|port (lower-cased) -> VLAN id, from the same poll
 	lldpAt      time.Time
+	qos         map[string]*switchPortCfg // switch|port (lower-cased) -> port settings and queue counters, from the same poll
+	qosErr      string
+	qosLogged   string
 }
 
 func NewServer(ctx context.Context, cfg Config) (*Server, error) {
@@ -76,6 +79,7 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	}
 	orch.switches = s.switchList
 	orch.lldp = s.fillLLDP
+	orch.fabric = s.fabricIssuesFor
 	s.refreshPortCache(ctx)
 	s.writeGnmic(ctx)
 	go al.loop(ctx)
@@ -172,6 +176,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/runs/{id}/baseline", s.admin(s.setBaseline))
 	s.routes3(mux)
 	s.routesSwitches(mux)
+	s.routesFabric(mux)
 	return mux
 }
 

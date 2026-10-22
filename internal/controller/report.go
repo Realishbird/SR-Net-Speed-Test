@@ -109,6 +109,9 @@ th,td{border:1px solid #ccc;padding:5px 8px;text-align:left}th{background:#f2f2f
 	if !lat {
 		fmt.Fprintf(w, `<b>Aggregate</b><span>%.1f Gbps from the tool, %.1f Gbps from hardware counters%s</span>`, r.Summary.ToolGbps, r.Summary.CounterGbps, fabricHTML(r.Summary.ByFabric))
 	}
+	if fi := r.Summary.FabricIssues; len(fi) > 0 {
+		fmt.Fprintf(w, `<b>Fabric</b><span class="warn">%d finding(s) on the run's cables when it started: %s</span>`, len(fi), e(strings.Join(fi, "; ")))
+	}
 	if r.Baseline {
 		fmt.Fprint(w, `<b>Baseline</b><span>this run is the baseline for runs of its shape</span>`)
 	} else if b := r.Summary; b.BaselineRunID != 0 {

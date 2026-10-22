@@ -62,15 +62,26 @@ func WriteGnmicConfig(cfg Config, path string, ports map[string][]string) (int, 
 			b.WriteString("    subscriptions: [counters]\n")
 			continue
 		}
-		// One transceiver subscription per switch, since the port set is the switch's own.
+		// One transceiver and one QoS subscription per switch, since the
+		// port set is the switch's own. QoS (queue drops, ECN marks, PFC
+		// pause frames) is keyed per port for the same reason as the
+		// transceivers; its counters give a run its per-leg congestion
+		// figures (Phase 5).
 		sub := "transceivers-" + strings.ToLower(sw.Name)
-		fmt.Fprintf(&b, "    subscriptions: [counters, %s]\n", yamlStr(sub))
+		qsub := "qos-" + strings.ToLower(sw.Name)
+		fmt.Fprintf(&b, "    subscriptions: [counters, %s, %s]\n", yamlStr(sub), yamlStr(qsub))
 		fmt.Fprintf(&xcvr, "  %s:\n    paths:\n", yamlStr(sub))
 		for _, p := range names {
 			fmt.Fprintf(&xcvr, "      - /openconfig-platform:components/component[name=%s]/transceiver/state\n", p)
 			fmt.Fprintf(&xcvr, "      - /openconfig-platform:components/component[name=%s]/state/temperature\n", p)
 		}
 		xcvr.WriteString("    mode: stream\n    stream-mode: sample\n    sample-interval: 60s\n    encoding: json_ietf\n")
+		fmt.Fprintf(&xcvr, "  %s:\n    paths:\n", yamlStr(qsub))
+		for _, p := range names {
+			fmt.Fprintf(&xcvr, "      - /openconfig-qos:qos/interfaces/interface[interface-id=%s]/output/queues\n", p)
+			fmt.Fprintf(&xcvr, "      - /openconfig-qos:qos/interfaces/interface[interface-id=%s]/pfc\n", p)
+		}
+		xcvr.WriteString("    mode: stream\n    stream-mode: sample\n    sample-interval: 30s\n    encoding: json_ietf\n")
 	}
 	if n == 0 {
 		os.Remove(path)
