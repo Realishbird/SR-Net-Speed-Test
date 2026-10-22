@@ -361,7 +361,9 @@ type HostPort struct {
 	LLDPSwitch   string       `json:"lldp_switch,omitempty"`
 	LLDPPort     string       `json:"lldp_port,omitempty"`
 	LLDPDescr    string       `json:"lldp_descr,omitempty"`
-	TwinOf       string       `json:"twin_of,omitempty"` // netdev of the port this one shares a cable with (the second PCIe function of a Spark port)
+	TwinOf       string       `json:"twin_of,omitempty"`      // netdev of the port this one shares a cable with (the second PCIe function of a Spark port)
+	PCIeShared   string       `json:"pcie_shared,omitempty"`  // why this port's PCIe link holds it back: other addressed ports share the link and together outrun it
+	PCIeMoveTo   string       `json:"pcie_move_to,omitempty"` // the twin on a PCIe link no addressed port uses, where this port's address could go instead
 	TxGbps       float64      `json:"tx_gbps"`
 	RxGbps       float64      `json:"rx_gbps"`
 	MTU          int          `json:"mtu,omitempty"`
@@ -441,6 +443,7 @@ type LegPreview struct {
 	Fabric       string  `json:"fabric,omitempty"`
 	MsgSize      int     `json:"msg_size,omitempty"`
 	ExpectedGbps float64 `json:"expected_gbps"`
+	Note         string  `json:"note,omitempty"` // what caps the expected rate, when something shared does
 }
 
 type LegSpec struct {
@@ -495,6 +498,7 @@ type Leg struct {
 	Fabric       string             `json:"fabric"`
 	ExpectedGbps float64            `json:"expected_gbps"`
 	SharedPort   string             `json:"shared_port,omitempty"` // "<host> <ip> x<n>": a port this leg shares with n-1 other legs of its stage, which caps its expected rate to a fair share
+	PCIeShare    string             `json:"pcie_share,omitempty"`  // the PCIe link that caps this leg's expected rate ("<host> PCIe 0000:01:00 Gen5 x4 (about 107 Gbps) shared by 2 legs")
 	ToolGbps     float64            `json:"tool_gbps"`
 	CounterGbps  float64            `json:"counter_gbps"`
 	LiveGbps     float64            `json:"live_gbps"`
@@ -597,7 +601,7 @@ type Schedule struct {
 // Alert is a condition the controller noticed; it closes when the condition clears.
 type Alert struct {
 	ID         int64      `json:"id"`
-	Kind       string     `json:"kind"` // agent_offline | link_down | errors_idle | transceiver_hot | run_failed | update_failed
+	Kind       string     `json:"kind"` // agent_offline | link_down | errors_idle | transceiver_hot | run_failed | update_failed | switch_clock
 	Host       string     `json:"host,omitempty"`
 	Port       string     `json:"port,omitempty"`
 	Message    string     `json:"message"`
@@ -619,6 +623,7 @@ type Switch struct {
 	SNMP            *SwitchProbe  `json:"snmp,omitempty"`
 	GNMI            *SwitchProbe  `json:"gnmi,omitempty"`
 	Health          *SwitchHealth `json:"health,omitempty"`
+	ClockOffsetSec  *float64      `json:"clock_offset_sec,omitempty"` // how far the switch's clock is ahead of the controller's (negative: behind), from its system state
 }
 
 // SwitchHealth is the switch's own state: CPU, memory, temperature

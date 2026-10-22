@@ -367,7 +367,7 @@ async function pageHosts(token) {
           <td><input class="cell" value="${esc(p.label)}" placeholder="label" onchange="patch('/ports/${p.id}',{label:this.value})"></td>
           <td><input class="cell" style="width:70px" value="${esc(p.fabric)}" placeholder="fabric" onchange="patch('/ports/${p.id}',{fabric:this.value})"></td>
           <td class="num"><input class="cell" style="width:70px;text-align:right" value="${p.expected_gbps || ''}" placeholder="${p.speed_mbps / 1000}" onchange="patch('/ports/${p.id}',{expected_gbps:+this.value||0})"></td>
-          <td>${pcieCell(p)}</td>
+          <td>${pcieCell(p)}${pcieShareCell(h, p)}</td>
           <td>${sw}</td>
           <td class="num">${fmt(p.tx_gbps)} / ${fmt(p.rx_gbps)}</td></tr>`;
       });
@@ -718,6 +718,43 @@ function pcieCell(p) {
   const usable = l.usable_gbps ? ` About ${fmt(l.usable_gbps, 0)} Gbps usable through this link.` : '';
   return `<span class="mono" style="color:${down ? 'var(--fail)' : 'inherit'}" title="Negotiated ${cur}${max ? ', card supports ' + max : ''}.${slot}${usable}">${cur}${down ? ` <span class="badge fail">below ${max}</span>` : ''}</span>`;
 }
+// pcieShareCell warns when addressed ports share one PCIe link that cannot
+// carry them all, and offers to move this port's address to its twin on a
+// free link (a Spark's second PCIe half of the same cable).
+function pcieShareCell(h, p) {
+  if (!p.pcie_shared) return '';
+  const move = p.pcie_move_to ? ` <button class="sm" onclick="pcieMove(${h.id},'${esc(p.netdev)}','${esc(p.pcie_move_to)}')" title="Move ${esc((p.addrs || []).join(', '))} and this port's label and fabric to ${esc(p.pcie_move_to)}: same cable and switch port, its own PCIe link">Move to ${esc(p.pcie_move_to)}</button>` : '';
+  return `<br><span class="badge warn" title="${esc(p.pcie_shared)}">PCIe shared</span>${move}`;
+}
+// pcieMove moves a port's addresses to its twin in one netplan change
+// (rolled back unless the twin comes up with them and reaches a peer), then
+// carries the label, fabric and expected rate over.
+function pcieMove(hostID, from, to) {
+  const body = preview => ({ from, to, timeout_sec: 120, preview });
+  const ov = modal({ title: `Move ${from} to ${to}`, wide: true, body: `<p>${esc(to)} is the same cable and switch port as ${esc(from)}, on the NIC's other PCIe link. Moving the address there gives this cable its own link instead of sharing one with the host's other port.</p>
+    <p class="help">One netplan change: ${esc(from)} keeps its MTU and no address, ${esc(to)} gets the address and MTU. Kept only if ${esc(to)} shows them with link up, a fabric peer answers a ping from it and the agent still reaches the controller; otherwise both ports go back as they were. Refused while a test runs on the host. The label, fabric and expected rate follow the address once it is kept.</p>
+    <div id="np-out"></div><div id="np-jobs"></div>`,
+    actions: [{ label: 'Copy netplan', close: false, run: async () => {
+      try { const pv = await api('POST', `/hosts/${hostID}/netplan/move`, body(true)); set('np-out', `${pv.note ? `<p class="delta-bad">${esc(pv.note)}</p>` : ''}<p class="help">To apply by hand on the host (netplan try rolls back unless you press Enter), then remove the address from ${esc(from)} with ip addr del if it is still there:</p><pre id="np-cmds">${esc(pv.commands)}</pre><button class="sm" style="margin-top:6px" onclick="copyText($('#np-cmds').textContent,this)">Copy</button>`); } catch (e) { fail(e); }
+    } }, { label: 'Close' }, { label: 'Move', cls: 'primary', close: false, run: async () => {
+      let job;
+      try { job = await api('POST', `/hosts/${hostID}/netplan/move`, body(false)); } catch (e) { return fail(e); }
+      ov.querySelector('footer button.primary').disabled = true;
+      set('np-out', `<p>${npBadge('running')} moving; this takes up to a couple of minutes while the helper checks the port</p>`);
+      for (let i = 0; i < 300 && $('#modal') === ov; i++) {
+        await new Promise(r => setTimeout(r, 2000));
+        let cur; try { cur = await api('GET', `/hosts/${hostID}/netplan`); } catch { continue; }
+        const j = cur.jobs.find(x => x.id === job.id);
+        set('np-jobs', npJobsHTML(cur.jobs));
+        if (j && j.status !== 'running' && j.status !== 'queued') {
+          set('np-out', `<p>${npBadge(j.status)} ${esc(j.message || '')}</p>`);
+          toast(`${from} to ${to}: ${j.status.replace('_', ' ')}`, j.status === 'applied' ? 'pass' : 'warn', 8000);
+          refreshFn?.();
+          break;
+        }
+      }
+    } }] });
+}
 // tempCells: "label NIC 44° · optic 49°" per port; amber near the limit, red above it.
 function tempCells(ports, opticMax, nicMax) {
   if (!ports.length) return '<span class="muted">-</span>';
@@ -788,7 +825,7 @@ async function pageRun(token, id) {
       const sw = l.switch, cpu = l.cpu;
       const swPath = sw ? `<span class="mono">${esc(sw.client_port || '?')}</span> <span class="muted">&gt;</span> <span class="mono">${esc(sw.server_port || '?')}</span>` : '<span class="muted">-</span>';
       const swCell = `<td class="wrap">${swPath}</td>${lat ? '' : `<td class="num">${sw && sw.gbps ? fmt(sw.gbps) : '<span class="muted">-</span>'}</td>`}<td class="num" title="${cpu ? `client avg ${fmt(cpu.client_avg, 0)}% peak ${fmt(cpu.client_peak, 0)}% · server avg ${fmt(cpu.server_avg, 0)}% peak ${fmt(cpu.server_peak, 0)}%` : ''}">${cpu ? `${fmt(cpu.client_avg, 0)} <span class="muted">(${fmt(cpu.client_peak, 0)})</span> / ${fmt(cpu.server_avg, 0)} <span class="muted">(${fmt(cpu.server_peak, 0)})</span>` : '<span class="muted">-</span>'}</td>`;
-      const note = [coll ? `rank ${l.index + 1} to rank 0` : '', l.note, sw?.note, l.shared_port ? `fair share of ${l.shared_port.replace(/ x(\d+)$/, ' shared by $1 legs')}` : ''].filter(Boolean).join('; ');
+      const note = [coll ? `rank ${l.index + 1} to rank 0` : '', l.note, sw?.note, l.shared_port ? `fair share of ${l.shared_port.replace(/ x(\d+)$/, ' shared by $1 legs')}` : '', l.pcie_share ? `limited by ${l.pcie_share}` : ''].filter(Boolean).join('; ');
       const bl = l.baseline, blCell = `<td class="num">${bl ? `${fmt(bl.value, lat ? 2 : 1)} ${deltaPct(bl.delta_pct, bl.regressed)}` : '<span class="muted">-</span>'}</td>`;
       let row = `<tr><td>${l.index + 1}</td><td>${esc(l.client_host)} <span class="muted mono">${esc(l.client_ip)}</span></td><td>${esc(l.server_host)} <span class="muted mono">${esc(l.server_ip)}</span></td><td>${esc(l.fabric)}</td><td class="num">${l.msg_size || ''}</td>`;
       if (lat) { const t = l.latency || {}; row += `<td class="num">${fmt(t.min_us, 2)}</td><td class="num">${fmt(t.typical_us, 2)}</td><td class="num">${fmt(t.avg_us, 2)}</td><td class="num">${fmt(t.p99_us, 2)}</td><td class="num">${fmt(t.p999_us, 2)}</td><td class="num">${fmt(t.max_us, 2)}</td>`; }
@@ -959,8 +996,13 @@ function legPreview() {
     const stages = new Set(legs.map(l => l.stage)).size;
     const open = out.querySelector('details')?.open ? 'open' : '';
     out.innerHTML = `<details ${open}><summary><b>${legs.length} leg${legs.length === 1 ? '' : 's'}</b>: ${Object.entries(byFab).map(([k, n]) => `${n} on ${k ? 'fabric ' + esc(k) : 'no fabric'}`).join(', ')}${stages > 1 ? `, ${stages} stages` : ''}</summary>
-      <div class="tbl" style="margin:6px 0 0;box-shadow:none;max-height:320px;overflow:auto"><table><thead><tr><th class="num">Stage</th><th>Client</th><th>Port</th><th>Server</th><th>Port</th><th>Fabric</th><th class="num">Expected Gbps</th></tr></thead><tbody>${legs.map(l => `<tr><td class="num">${l.stage + 1}</td><td>${esc(l.client)}</td><td class="mono">${esc(l.client_port)} <span class="muted">${esc(l.client_ip)}</span></td><td>${esc(l.server)}</td><td class="mono">${esc(l.server_port)} <span class="muted">${esc(l.server_ip)}</span></td><td>${esc(l.fabric || '-')}</td><td class="num">${fmt(l.expected_gbps)}</td></tr>`).join('')}</tbody></table></div></details>`;
+      <div class="tbl" style="margin:6px 0 0;box-shadow:none;max-height:320px;overflow:auto"><table><thead><tr><th class="num">Stage</th><th>Client</th><th>Port</th><th>Server</th><th>Port</th><th>Fabric</th><th class="num">Expected Gbps</th><th>Why</th></tr></thead><tbody>${legs.map(l => `<tr><td class="num">${l.stage + 1}</td><td>${esc(l.client)}</td><td class="mono">${esc(l.client_port)} <span class="muted">${esc(l.client_ip)}</span></td><td>${esc(l.server)}</td><td class="mono">${esc(l.server_port)} <span class="muted">${esc(l.server_ip)}</span></td><td>${esc(l.fabric || '-')}</td><td class="num">${fmt(l.expected_gbps)}</td><td class="muted wrap">${esc(l.note || '')}</td></tr>`).join('')}</tbody></table></div>${pcieHint(legs)}</details>`;
   }, 350);
+}
+// pcieHint explains, under the preview, legs held back by a shared PCIe link.
+function pcieHint(legs) {
+  const n = legs.filter(l => (l.note || '').startsWith('limited by') && / shared by \d+ legs$/.test(l.note)).length;
+  return n ? `<div class="help" style="margin-top:6px">${n} leg${n === 1 ? '' : 's'} share a PCIe link with another leg, so each expects part of it. On a DGX Spark, put the second port's address on its other PCIe half (enP2p1s0f1np1 rather than enp1s0f1np1, same cable) to give each port its own link.</div>` : '';
 }
 // testChange adapts the form to the test: a collective takes a list of hosts
 // (ranks) instead of clients and servers, and its sweep sizes are far larger.
@@ -1287,11 +1329,18 @@ async function pageSwitches(token) {
     set('switches', list.length ? list.map(sw => `<tr><td><b>${esc(sw.name)}</b></td><td class="mono">${esc(sw.address)}</td>
       <td class="wrap">${probe(sw.snmp)}${sw.has_snmp ? ` <span class="chip">v${esc(sw.snmp_version || '2c')}</span>` : ''}</td>
       <td class="wrap">${probe(sw.gnmi)}${sw.gnmi_user ? ` <span class="chip">${esc(sw.gnmi_user)}@:${sw.gnmi_port || 8080}${sw.gnmi_tls ? ' tls' : ''}</span>` : ''}</td>
-      <td class="wrap">${switchHealth(sw.health)}</td>
+      <td class="wrap">${switchHealth(sw.health)} ${clockChip(sw.clock_offset_sec)}</td>
       <td style="text-align:right;white-space:nowrap"><button class="sm" onclick="testSwitch('${esc(sw.name)}')">Test</button> <button class="sm" onclick="editSwitch('${esc(sw.name)}')">Edit</button> <button class="sm danger" onclick="delSwitch('${esc(sw.name)}')">Remove</button></td></tr>`).join('')
       : `<tr><td colspan="6" class="empty">No switches yet. Click "Add switch"; you need the switch's management IP and a read-only SNMP community, or a gNMI user and password.</td></tr>`);
   };
   await refresh(); setRefresh(refresh, 10000);
+}
+// clockChip flags a switch clock that is off: it is read once a minute
+// against the controller's, and NTP keeps a synced switch within a second.
+function clockChip(off) {
+  if (off == null || Math.abs(off) <= 5) return '';
+  const s = Math.abs(off), t = s >= 120 ? fmt(s / 60, 0) + ' min' : fmt(s, 0) + ' s';
+  return `<span class="chip" style="color:var(--fail)" title="The switch's clock is ${t} ${off < 0 ? 'behind' : 'ahead of'} the controller's. Counter samples are stamped as they arrive, so runs and graphs still line up, but logs and NTP-dependent features do not: point the switch at the hosts' NTP server (sonic-cli: ntp server, then the address).">clock ${t} ${off < 0 ? 'slow' : 'fast'}</span>`;
 }
 // switchHealth: one line of chips; a hot sensor, a failed fan or PSU turns red.
 function switchHealth(h) {

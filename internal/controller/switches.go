@@ -151,6 +151,11 @@ func (s *Server) listSwitches(w http.ResponseWriter, r *http.Request) {
 			}
 			s.health.mu.Unlock()
 		}
+		s.mu.Lock()
+		if off, ok := s.clockOffset[sw.Name]; ok {
+			v.ClockOffsetSec = &off
+		}
+		s.mu.Unlock()
 		out = append(out, v)
 	}
 	writeJSON(w, out)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"path"
 	"sort"
 	"strings"
 	"sync"
@@ -30,6 +31,9 @@ type endpoint struct {
 	ExpectedGbps float64
 	LLDPSwitch   string // neighbour chassis the host's lldpd saw on this port
 	LLDPPort     string
+	PCIeLink     string  // the PCIe link the port's NIC function sits on (domain:bus:device), shared by the functions of one device
+	PCIeGbps     float64 // what that link carries one way
+	PCIeName     string  // "Gen5 x4"
 }
 
 type legPlan struct {
@@ -223,12 +227,47 @@ func resolveSelector(hosts []hostRec, sel string) ([]target, error) {
 			return []target{{host: &hosts[i]}}, nil
 		}
 	}
+	// A port label, or a label pattern (P1-*, *-P2) for every port it fits.
+	// A plain label on ports of several hosts (the 770AP and another
+	// server both calling theirs NIC-1) is refused rather than quietly
+	// taking the first: host/label names the one meant.
+	glob := strings.ContainsAny(sel, "*?[")
+	var hits []target
+	var hitHosts []string
 	for i := range hosts {
+		hit := false
 		for j := range hosts[i].Ports {
-			if hosts[i].Ports[j].Label != "" && strings.EqualFold(hosts[i].Ports[j].Label, sel) {
-				return []target{{&hosts[i], &hosts[i].Ports[j]}}, nil
+			l := hosts[i].Ports[j].Label
+			if l == "" {
+				continue
+			}
+			match := strings.EqualFold(l, sel)
+			if glob {
+				match, _ = path.Match(strings.ToLower(sel), strings.ToLower(l))
+			}
+			if match {
+				hits = append(hits, target{&hosts[i], &hosts[i].Ports[j]})
+				hit = true
 			}
 		}
+		if hit {
+			hitHosts = append(hitHosts, hosts[i].Name)
+		}
+	}
+	switch {
+	case glob && len(hits) == 0:
+		return nil, fmt.Errorf("no port label matches %q", sel)
+	case glob:
+		return hits, nil
+	case len(hitHosts) > 1:
+		return nil, fmt.Errorf("port label %q is on %s; name one as host/label, e.g. %q", sel, strings.Join(hitHosts, " and "), hitHosts[0]+"/"+sel)
+	case len(hits) > 0:
+		for _, t := range hits {
+			if len(t.port.Addrs) > 0 {
+				return []target{t}, nil
+			}
+		}
+		return hits[:1], nil
 	}
 	// host/port: one port of one host, by label or netdev, for ports that
 	// have no label of their own yet.
@@ -407,7 +446,22 @@ func (pc portChoice) endpoint(h *hostRec, p *api.HostPort, addr string) endpoint
 		exp = float64(p.SpeedMbps) / 1000
 	}
 	ip, _, _ := strings.Cut(addr, "/")
-	return endpoint{AgentID: h.ID, Host: h.Name, PortID: p.ID, RdmaDev: p.RdmaDev, PortNum: p.PortNum, Netdev: p.Netdev, IP: ip, Label: p.Label, Fabric: pc.fabricOf(p, addr), ExpectedGbps: exp, LLDPSwitch: p.LLDPSwitch, LLDPPort: p.LLDPPort}
+	e := endpoint{AgentID: h.ID, Host: h.Name, PortID: p.ID, RdmaDev: p.RdmaDev, PortNum: p.PortNum, Netdev: p.Netdev, IP: ip, Label: p.Label, Fabric: pc.fabricOf(p, addr), ExpectedGbps: exp, LLDPSwitch: p.LLDPSwitch, LLDPPort: p.LLDPPort}
+	if l := p.PCIe; l != nil && l.Address != "" && l.UsableGbps > 0 {
+		e.PCIeLink, e.PCIeGbps, e.PCIeName = pcieLinkOf(l.Address), l.UsableGbps, l.String()
+	}
+	return e
+}
+
+// pcieLinkOf is the link a PCI function sits on: its address without the
+// function number. Every function of a device shares the device's link, so
+// both ports of a dual-port card on 0000:01:00.0 and 0000:01:00.1 split one
+// link, while a Spark's second PCIe half (0002:01:00.x) has its own.
+func pcieLinkOf(addr string) string {
+	if i := strings.LastIndexByte(addr, '.'); i > 0 {
+		return addr[:i]
+	}
+	return addr
 }
 
 // plan expands a spec into legs: explicit legs, fan-out (one client), fan-in
@@ -557,7 +611,7 @@ func plan(hosts []hostRec, spec api.RunSpec) ([]*legPlan, error) {
 	if len(plans) > 512 {
 		return nil, fmt.Errorf("%d legs is too many for one run (max 512)", len(plans))
 	}
-	fairShare(plans, spec.Bidir)
+	fairShare(plans, spec.Test, spec.Bidir)
 	return plans, nil
 }
 
@@ -624,44 +678,92 @@ func planCollective(hosts []hostRec, spec api.RunSpec) ([]*legPlan, error) {
 	return plans, nil
 }
 
-// fairShare caps each leg's expected rate by the ports it shares. A port
-// used by n legs of the same stage can give each of them at most 1/n of
-// its line rate: an incast of eight 100G hosts into one 100G port expects
-// 12.5 Gbps per leg, a fan-out from a 400G port to four 100G hosts still
-// expects 100 each. Bidirectional rates add both directions, so line rate
-// counts twice; that is applied last.
-func fairShare(plans []*legPlan, bidir bool) {
+// fairShare caps each leg's expected rate where it shares a bottleneck
+// with other legs of its stage. Two bottlenecks count: a port, whose line
+// rate splits between the legs using it, and a PCIe link, which every
+// function of one device shares (a Spark's ConnectX-7 reaches the CPU over
+// two Gen5 x4 links of about 107 Gbps, so two ports on one link get about
+// half each, and a port faster than its link is capped even alone). Ports
+// and PCIe links are full duplex: a leg uses the direction its data flows
+// (the client sends, except in a read test, where the server does), and a
+// bidirectional leg uses both. The caps are one-way rates; a bidirectional
+// leg's expected figure is then doubled.
+func fairShare(plans []*legPlan, test string, bidir bool) {
 	type use struct {
 		n    int
 		rate float64
 		name string
 	}
-	byStage := map[int]map[int64]*use{}
+	type key struct {
+		res string
+		dir bool // true: data leaves the host here
+	}
+	dirs := func(client bool) []bool {
+		if bidir {
+			return []bool{true, false}
+		}
+		sends := client != (test == "read" || test == "read_lat")
+		return []bool{sends}
+	}
+	// resources lists what an endpoint's data passes through: its port, and
+	// its PCIe link where the agent reported one.
+	resources := func(e endpoint) []key {
+		ks := []key{{res: fmt.Sprintf("port %d", e.PortID)}}
+		if e.PCIeLink != "" {
+			ks = append(ks, key{res: fmt.Sprintf("pcie %d %s", e.AgentID, e.PCIeLink)})
+		}
+		return ks
+	}
+	byStage := map[int]map[key]*use{}
 	for _, p := range plans {
 		m := byStage[p.stage]
 		if m == nil {
-			m = map[int64]*use{}
+			m = map[key]*use{}
 			byStage[p.stage] = m
 		}
-		for _, e := range []endpoint{p.client, p.server} {
-			u := m[e.PortID]
-			if u == nil {
-				u = &use{rate: e.ExpectedGbps, name: e.Host + " " + e.IP}
-				m[e.PortID] = u
+		for i, e := range []endpoint{p.client, p.server} {
+			for _, d := range dirs(i == 0) {
+				for _, k := range resources(e) {
+					k.dir = d
+					u := m[k]
+					if u == nil {
+						u = &use{rate: e.ExpectedGbps, name: e.Host + " " + e.IP}
+						if strings.HasPrefix(k.res, "pcie") {
+							u.rate, u.name = e.PCIeGbps, fmt.Sprintf("%s PCIe %s %s", e.Host, e.PCIeLink, e.PCIeName)
+						}
+						m[k] = u
+					}
+					u.n++
+				}
 			}
-			u.n++
 		}
 	}
 	for _, p := range plans {
-		for _, e := range []endpoint{p.client, p.server} {
-			u := byStage[p.stage][e.PortID]
-			if u == nil || u.n < 2 || u.rate <= 0 {
-				continue
-			}
-			share := u.rate / float64(u.n)
-			if p.leg.ExpectedGbps == 0 || share < p.leg.ExpectedGbps {
-				p.leg.ExpectedGbps = share
-				p.leg.SharedPort = fmt.Sprintf("%s x%d", u.name, u.n)
+		for i, e := range []endpoint{p.client, p.server} {
+			for _, d := range dirs(i == 0) {
+				for _, k := range resources(e) {
+					k.dir = d
+					u := byStage[p.stage][k]
+					pcie := strings.HasPrefix(k.res, "pcie")
+					if u == nil || u.rate <= 0 || (u.n < 2 && !pcie) {
+						continue
+					}
+					share := u.rate / float64(u.n)
+					if p.leg.ExpectedGbps != 0 && share >= p.leg.ExpectedGbps {
+						continue
+					}
+					p.leg.ExpectedGbps = share
+					if pcie {
+						p.leg.SharedPort = ""
+						p.leg.PCIeShare = fmt.Sprintf("%s (about %.0f Gbps)", u.name, u.rate)
+						if u.n > 1 {
+							p.leg.PCIeShare += fmt.Sprintf(" shared by %d legs", u.n)
+						}
+					} else {
+						p.leg.PCIeShare = ""
+						p.leg.SharedPort = fmt.Sprintf("%s x%d", u.name, u.n)
+					}
+				}
 			}
 		}
 		if bidir {
@@ -708,9 +810,39 @@ func (o *Orchestrator) Preview(ctx context.Context, spec api.RunSpec) ([]api.Leg
 	out := make([]api.LegPreview, len(plans))
 	for i, p := range plans {
 		out[i] = api.LegPreview{Stage: p.stage, Client: p.client.Host, ClientPort: name(p.client), ClientIP: p.client.IP,
-			Server: p.server.Host, ServerPort: name(p.server), ServerIP: p.server.IP, Fabric: p.leg.Fabric, MsgSize: p.leg.MsgSize, ExpectedGbps: p.leg.ExpectedGbps}
+			Server: p.server.Host, ServerPort: name(p.server), ServerIP: p.server.IP, Fabric: p.leg.Fabric, MsgSize: p.leg.MsgSize, ExpectedGbps: p.leg.ExpectedGbps,
+			Note: shareNote(p.leg)}
 	}
 	return out, nil
+}
+
+// dropHint says where a slow leg lost packets, when the counters tell: the
+// receiving NIC saw packets out of sequence (each one a drop it asked the
+// sender to slow down for) while the switch, read over the same window,
+// dropped none on the leg's ports. Then the loss is inside the receiving
+// host (its PCIe link or memory), not the network.
+func dropHint(l *api.Leg) string {
+	oos := l.ErrorDeltas["out_of_sequence"]
+	if oos <= 0 || l.Switch == nil || l.Switch.Gbps <= 0 {
+		return ""
+	}
+	for k, v := range l.Switch.Deltas {
+		if v > 0 && (strings.Contains(k, "discard") || strings.Contains(k, "dropped") || strings.Contains(k, "error")) {
+			return ""
+		}
+	}
+	return fmt.Sprintf("the receiver dropped packets (out_of_sequence +%d) while the switch dropped none: the bottleneck is in the receiving host (PCIe or memory), not the network", oos)
+}
+
+// shareNote says what caps a leg's expected rate, in words.
+func shareNote(l api.Leg) string {
+	if l.PCIeShare != "" {
+		return "limited by " + l.PCIeShare
+	}
+	if i := strings.LastIndex(l.SharedPort, " x"); i > 0 {
+		return fmt.Sprintf("fair share of %s, shared by %s legs", l.SharedPort[:i], l.SharedPort[i+2:])
+	}
+	return ""
 }
 
 func (o *Orchestrator) Start(ctx context.Context, spec api.RunSpec) (int64, error) {
@@ -1298,6 +1430,9 @@ func (o *Orchestrator) score(ar *activeRun) (api.RunSummary, string) {
 				l.Verdict, l.Note = "warn", fmt.Sprintf("%d TCP retransmits", l.Retransmits)
 			}
 		}
+		if hint := dropHint(l); hint != "" && l.Verdict != "pass" {
+			l.Note += "; " + hint
+		}
 		if rank[l.Verdict] > rank[worst] {
 			worst = l.Verdict
 		}
@@ -1389,10 +1524,7 @@ func (o *Orchestrator) Live(r *api.Run) {
 			continue // not in the running stage
 		}
 		if id, dir, nic, ok := counterSide(ar, p); ok {
-			tx, rx := o.metrics.live(id)
-			if nic {
-				tx, rx = o.metrics.liveNIC(id)
-			}
+			tx, rx := o.metrics.liveAvg(id, liveWindow, nic)
 			switch dir {
 			case dirTx:
 				r.Legs[i].LiveGbps = tx

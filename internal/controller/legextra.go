@@ -85,6 +85,35 @@ func (m *metrics) switchCountersAt(ctx context.Context, series func(string) stri
 	return out, nil
 }
 
+// switchOctetsInside returns the first and the last switch sample of the
+// octet counters taken inside (from, to], keyed by counter name.
+func (m *metrics) switchOctetsInside(ctx context.Context, series func(string) string, from, to time.Time) (first, last map[string]counterSnap, err error) {
+	rng := int(to.Sub(from).Seconds())
+	if rng < 2 {
+		return nil, nil, nil
+	}
+	first, last = map[string]counterSnap{}, map[string]counterSnap{}
+	for _, end := range []struct {
+		fn, tfn string
+		out     map[string]counterSnap
+	}{{"first_over_time", "tfirst_over_time", first}, {"last_over_time", "tlast_over_time", last}} {
+		ts, err := m.vmQuery(ctx, fmt.Sprintf(`%s(%s[%ds] @ %d)`, end.tfn, series("in_octets"), rng, to.Unix()))
+		if err != nil || len(ts) == 0 {
+			return nil, nil, err
+		}
+		for _, c := range []string{"in_octets", "out_octets"} {
+			rows, err := m.vmQuery(ctx, fmt.Sprintf(`%s(%s[%ds] @ %d)`, end.fn, series(c), rng, to.Unix()))
+			if err != nil {
+				return nil, nil, err
+			}
+			if len(rows) > 0 {
+				end.out[c] = counterSnap{value: rows[0].Value, at: ts[0].Value}
+			}
+		}
+	}
+	return first, last, nil
+}
+
 // legSwitch fills in which switch ports a leg crossed and what the switch saw
 // there during the test: the rate along the data flow, from the switch's own
 // octet counters, and any discards or errors that grew. It is best effort; a
@@ -144,8 +173,34 @@ func (o *Orchestrator) legSwitch(ar *activeRun, p *legPlan, from, to time.Time) 
 			ls.Note = "switch counters unavailable: " + err.Error()
 			break
 		}
+		bytesOf := func(a, b map[string]counterSnap) (float64, float64) { // bytes along the flow, span in seconds
+			d := func(c string) float64 {
+				if x, y := a[c], b[c]; y.value >= x.value {
+					return y.value - x.value
+				}
+				return 0
+			}
+			span := b["in_octets"].at - a["in_octets"].at
+			switch {
+			case ar.spec.Bidir:
+				return d("in_octets") + d("out_octets"), span
+			case side.server == toServer:
+				return d("out_octets"), span
+			default:
+				return d("in_octets"), span
+			}
+		}
+		if !rated {
+			// Prefer two samples inside the test: the ones either side of it
+			// add up to a sample interval of idle time at each end.
+			if f, l, err := o.metrics.switchOctetsInside(ctx, series, from, to); err == nil && len(f) == 2 && len(l) == 2 {
+				if bytes, span := bytesOf(f, l); span >= 15 {
+					ls.Gbps, rated = bytes*8/span/1e9, true
+				}
+			}
+		}
 		if len(s0) == 0 || len(s1) == 0 {
-			if ls.Note == "" {
+			if ls.Note == "" && !rated {
 				ls.Note = "no switch samples for " + side.name + " " + side.port
 			}
 			continue
@@ -158,18 +213,7 @@ func (o *Orchestrator) legSwitch(ar *activeRun, p *legPlan, from, to time.Time) 
 			return b.value - a.value, b.at - a.at
 		}
 		if !rated {
-			in, span := delta("in_octets")
-			out, _ := delta("out_octets")
-			var bytes float64
-			switch {
-			case ar.spec.Bidir:
-				bytes = in + out
-			case side.server == toServer:
-				bytes = out
-			default:
-				bytes = in
-			}
-			if span > 0 {
+			if bytes, span := bytesOf(s0, s1); span > 0 {
 				ls.Gbps = bytes * 8 / span / 1e9
 				rated = true
 			} else if ls.Note == "" {

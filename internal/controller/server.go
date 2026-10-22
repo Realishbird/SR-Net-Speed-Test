@@ -59,6 +59,7 @@ type Server struct {
 	vlans       map[string]string                 // switch|port (lower-cased) -> VLAN id, from the same poll
 	ifaces      map[string]map[string]switchIface // switch (lower-cased) -> ifname (lower-cased) -> the switch's port table, from the same poll
 	naming      map[string]string                 // switch (lower-cased) -> interface naming mode (NATIVE | STANDARD)
+	clockOffset map[string]float64                // switch name -> seconds its clock is ahead of the controller's (negative: behind)
 	lldpAt      time.Time
 	qos         map[string]*switchPortCfg // switch|port (lower-cased) -> port settings and queue counters, from the same poll
 	qosErr      string
@@ -430,9 +431,10 @@ func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {
 	out := make([]api.Host, len(hosts))
 	for i, h := range hosts {
 		markTwins(h.Ports)
+		markPCIeShare(h.Ports)
 		h.Online = s.hub.online(h.ID)
 		for j := range h.Ports {
-			h.Ports[j].TxGbps, h.Ports[j].RxGbps = s.metrics.live(h.Ports[j].ID)
+			h.Ports[j].TxGbps, h.Ports[j].RxGbps = s.metrics.liveAvg(h.Ports[j].ID, liveWindow, false)
 		}
 		out[i] = h.Host
 	}

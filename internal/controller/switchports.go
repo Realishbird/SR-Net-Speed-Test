@@ -2,7 +2,12 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"strings"
+	"time"
+
+	"github.com/Realishbird/SR-Net-Speed-Test/internal/api"
 )
 
 // switchIface is one interface from the switch's own port table: the name
@@ -77,28 +82,64 @@ func parsePortList(raw []byte) map[string][]switchIface {
 	return res
 }
 
-// switchNaming reads each switch's interface naming mode (Enterprise SONiC
-// reports NATIVE or STANDARD under system/state). In standard mode the CLI
-// only takes the alias (Eth1/2/1), in native mode the name (Ethernet8).
-func (s *Server) switchNaming(ctx context.Context) (map[string]string, error) {
-	out := map[string]string{}
+// switchSystem reads each switch's system state: its interface naming mode
+// (Enterprise SONiC reports NATIVE or STANDARD; in standard mode the CLI
+// only takes the alias, Eth1/2/1, in native mode the name, Ethernet8) and
+// its clock, as seconds the switch is ahead of the controller (negative when
+// it is behind). The clock is read against the moment the answer arrived,
+// so the offset errs by up to a second or so towards "behind".
+func (s *Server) switchSystem(ctx context.Context) (naming map[string]string, offset map[string]float64, err error) {
+	naming, offset = map[string]string{}, map[string]float64{}
 	s.mu.Lock()
 	cfg := s.cfg
 	s.mu.Unlock()
 	bySource := gnmiSources(cfg)
 	if len(bySource) == 0 {
-		return out, nil
+		return naming, offset, nil
 	}
 	raw, err := gnmicGet(ctx, cfg, "/openconfig-system:system/state")
+	now := time.Now()
 	if err != nil {
-		return out, err
+		return naming, offset, err
 	}
 	for source, mode := range parseNamingMode(raw) {
 		if sw, ok := gnmiSource(bySource, source); ok {
-			out[strings.ToLower(sw.Name)] = mode
+			naming[strings.ToLower(sw.Name)] = mode
 		}
 	}
-	return out, nil
+	for source, at := range parseSwitchClock(raw) {
+		if sw, ok := gnmiSource(bySource, source); ok {
+			offset[sw.Name] = at.Sub(now).Seconds()
+		}
+	}
+	return naming, offset, nil
+}
+
+// parseSwitchClock reads system/state current-datetime per source.
+func parseSwitchClock(raw []byte) map[string]time.Time {
+	res := map[string]time.Time{}
+	for source, values := range gnmicUpdates(raw) {
+		var walk func(v any)
+		walk = func(v any) {
+			if t, ok := v.(map[string]any); ok {
+				for k, x := range t {
+					if str, ok := x.(string); ok && strings.HasSuffix(k, "current-datetime") {
+						for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05Z0700", "2006-01-02T15:04:05"} {
+							if at, err := time.Parse(layout, str); err == nil {
+								res[source] = at
+								break
+							}
+						}
+					}
+					walk(x)
+				}
+			}
+		}
+		for _, v := range values {
+			walk(v)
+		}
+	}
+	return res
 }
 
 func parseNamingMode(raw []byte) map[string]string {
@@ -238,5 +279,30 @@ func fillLLDPFrom(hosts []hostRec, lldp map[string]lldpEntry, known map[string]m
 				p.LLDPSwitch, p.LLDPPort = "", ""
 			}
 		}
+	}
+}
+
+// clockSkewSec is how far off a switch clock may run before it is flagged.
+// The offset is read to about a second; NTP keeps a switch within
+// milliseconds, so anything past a few seconds means it is not syncing.
+const clockSkewSec = 5
+
+// clockAlerts opens a switch_clock alert for each switch whose clock is
+// off by more than clockSkewSec and resolves it once the clock is back.
+func (s *Server) clockAlerts(ctx context.Context, offset map[string]float64) {
+	if s.alerts == nil {
+		return
+	}
+	for name, off := range offset {
+		if math.Abs(off) <= clockSkewSec {
+			s.alerts.resolve(ctx, "switch_clock", name, "")
+			continue
+		}
+		dir := "behind"
+		if off > 0 {
+			dir = "ahead of"
+		}
+		s.alerts.open(ctx, api.Alert{Kind: "switch_clock", Host: name, Message: fmt.Sprintf(
+			"%s's clock is %.0f s %s the controller's. Point the switch at the NTP server the hosts use (sonic-cli: ntp server, then the server address).", name, math.Abs(off), dir)})
 	}
 }

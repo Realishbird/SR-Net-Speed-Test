@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -40,8 +41,10 @@ func TestLegSwitchFromVictoriaMetrics(t *testing.T) {
 		"in_errors":    {0, 0},
 		"out_errors":   {0, 0},
 	}
-	re := regexp.MustCompile(`^(tlast_over_time|last_over_time)\(\{__name__=~"srnet_gnmi_\.\*(\w+)",([^}]*)\}\[90s\] @ (\d+)\)$`)
+	re := regexp.MustCompile(`^(tfirst_over_time|first_over_time|tlast_over_time|last_over_time)\(\{__name__=~"srnet_gnmi_\.\*(\w+)",([^}]*)\}\[(\d+)s\] @ (\d+)\)$`)
 	qosRe := regexp.MustCompile(`^last_over_time\(\{__name__=~"srnet_gnmi_\.\*qos[^"]*",source=~"[^"]*",interface_interface_id="(Ethernet\d+)"\}\[90s\] @ (\d+)\) or last_over_time\(\{[^}]*interface_id="Ethernet\d+"\}\[90s\] @ \d+\)$`)
+	// times are the switch's sample times; values per counter follow them.
+	times := []float64{t0, t1}
 	var queries []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query().Get("query")
@@ -73,35 +76,48 @@ func TestLegSwitchFromVictoriaMetrics(t *testing.T) {
 		if !strings.Contains(m[3], `interface_name="Ethernet8"`) && !strings.Contains(m[3], `interface_name="Ethernet64"`) {
 			t.Errorf("selector %q lacks the port", m[3])
 		}
-		at, ts := m[4], t0
-		if at == fmt.Sprint(end.Unix()) {
-			ts = t1
-		}
-		var v float64
-		if m[1] == "tlast_over_time" {
-			v = ts
-		} else {
-			c, ok := counters[m[2]]
-			if !ok {
-				w.Write([]byte(`{"status":"success","data":{"result":[]}}`))
-				return
-			}
-			v = c[0]
-			if ts == t1 {
-				v = c[1]
-			}
+		rng, _ := strconv.ParseFloat(m[4], 64)
+		at, _ := strconv.ParseFloat(m[5], 64)
+		value := func(i int) (float64, bool) {
+			name := m[2]
 			if strings.Contains(m[3], "Ethernet8") { // client port: swap directions, no discards
-				if m[2] == "in_octets" {
-					v = counters["out_octets"][0]
-					if ts == t1 {
-						v = counters["out_octets"][1]
-					}
-				} else if m[2] != "out_octets" {
-					v = 0
+				switch name {
+				case "in_octets", "out_octets":
+					name = "out_octets"
+				default:
+					return 0, true
 				}
 			}
+			c, ok := counters[name]
+			if !ok {
+				return 0, false
+			}
+			return c[i], true
 		}
-		fmt.Fprintf(w, `{"status":"success","data":{"result":[{"metric":{"__name__":"x","source":"z9864f","interface_name":"Ethernet64"},"value":[%d,"%g"]}]}}`, int64(ts), v)
+		// The samples in (at-range, at], as VictoriaMetrics would pick them.
+		var pick []int
+		for i, ts := range times {
+			if ts > at-rng && ts <= at {
+				pick = append(pick, i)
+			}
+		}
+		if len(pick) == 0 {
+			w.Write([]byte(`{"status":"success","data":{"result":[]}}`))
+			return
+		}
+		i := pick[len(pick)-1]
+		if strings.HasPrefix(m[1], "tfirst") || strings.HasPrefix(m[1], "first") {
+			i = pick[0]
+		}
+		v, ok := times[i], true
+		if !strings.HasPrefix(m[1], "t") {
+			v, ok = value(i)
+		}
+		if !ok {
+			w.Write([]byte(`{"status":"success","data":{"result":[]}}`))
+			return
+		}
+		fmt.Fprintf(w, `{"status":"success","data":{"result":[{"metric":{"__name__":"x","source":"z9864f","interface_name":"Ethernet64"},"value":[%d,"%g"]}]}}`, int64(at), v)
 	}))
 	defer srv.Close()
 
@@ -140,6 +156,14 @@ func TestLegSwitchFromVictoriaMetrics(t *testing.T) {
 	ar.spec.Test, ar.spec.Bidir = "write", true
 	if ls := o.legSwitch(ar, p, start, end); ls.Gbps < 98.0 || ls.Gbps > 98.2 {
 		t.Errorf("bidir Gbps = %.3f, want 98.13", ls.Gbps)
+	}
+	// Two samples inside the test: the rate comes from them alone, with no
+	// idle seconds from a sample before the start (run 12 had none in range).
+	ar.spec.Bidir = false
+	times = []float64{float64(start.Unix() + 5), float64(end.Unix() - 5)}
+	counters["out_octets"] = [2]float64{5e9, 5e9 + 612.5e9} // 612.5 GB over 50 s
+	if ls := o.legSwitch(ar, p, start, end); ls.Gbps < 97.9 || ls.Gbps > 98.1 || ls.Note != "" {
+		t.Errorf("inside samples: Gbps = %.3f note %q, want 98", ls.Gbps, ls.Note)
 	}
 	// Without LLDP there is nothing to say, and without VictoriaMetrics only the ports.
 	if ls := o.legSwitch(ar, &legPlan{}, start, end); ls != nil {

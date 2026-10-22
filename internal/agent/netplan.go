@@ -478,15 +478,45 @@ func (e netplanEnv) apply(ctx context.Context, ch api.NetplanChange, st *netplan
 	st.Verifying = ch.ID
 	e.saveState(*st)
 	defer func() { st.Verifying = 0 }()
-	applied := e.Sys.Now()
-	if out, err := e.Sys.Run(ctx, "netplan", "apply"); err != nil {
+	// netplan apply sets the addresses it lists but does not take one off a
+	// port, so an address moving between two ports of the change (a Spark
+	// cable's first PCIe half to its second) would sit on both, and a
+	// rolled-back change would leave a new address up on a port netplan no
+	// longer configures. Note what each port has now to tidy both cases.
+	before := map[string][]netip.Prefix{}
+	for _, p := range ch.Ports {
+		before[p.Netdev], _, _, _ = e.Sys.LinkState(p.Netdev)
+	}
+	rollback := func() {
 		restore()
 		e.Sys.Run(ctx, "netplan", "apply")
+		for _, p := range ch.Ports {
+			now, _, _, _ := e.Sys.LinkState(p.Netdev)
+			for _, a := range now {
+				if routable(a) && !hasPrefix(before[p.Netdev], a) {
+					e.Sys.Run(ctx, "ip", "addr", "del", a.String(), "dev", p.Netdev)
+					step("took %s off %s", a, p.Netdev)
+				}
+			}
+		}
+	}
+	applied := e.Sys.Now()
+	if out, err := e.Sys.Run(ctx, "netplan", "apply"); err != nil {
+		rollback()
 		res.Status, res.Message = "rolled_back", "netplan apply failed: "+firstLines(out, err)
 		step("put the previous files back and applied them")
 		return res
 	}
 	step("netplan apply")
+	for _, p := range ch.Ports {
+		now, _, _, _ := e.Sys.LinkState(p.Netdev)
+		for _, a := range now {
+			if routable(a) && !wants(p, a) && wantedElsewhere(ch, p.Netdev, a) {
+				e.Sys.Run(ctx, "ip", "addr", "del", a.String(), "dev", p.Netdev)
+				step("took %s off %s: it moved to another port", a, p.Netdev)
+			}
+		}
+	}
 
 	timeout := time.Duration(ch.TimeoutSec) * time.Second
 	if timeout <= 0 {
@@ -509,8 +539,7 @@ func (e netplanEnv) apply(ctx context.Context, ch api.NetplanChange, st *netplan
 		step("checks passed: addresses, MTU, link, peers, controller")
 		return res
 	}
-	restore()
-	e.Sys.Run(ctx, "netplan", "apply")
+	rollback()
 	step("checks failed after %.0f s; put the previous files back and applied them", timeout.Seconds())
 	res.Status, res.Message = "rolled_back", strings.Join(problems, "; ")
 	return res
@@ -557,6 +586,31 @@ func (e netplanEnv) check(ctx context.Context, ch api.NetplanChange, applied tim
 		problems = append(problems, "the agent has not reached the controller since the change")
 	}
 	return problems
+}
+
+// routable is an address a change can set: not link-local.
+func routable(a netip.Prefix) bool {
+	return !a.Addr().IsLinkLocalUnicast() && !a.Addr().IsLoopback()
+}
+
+// wants says whether a change gives port p the address a.
+func wants(p api.NetplanPort, a netip.Prefix) bool {
+	for _, s := range p.Addresses {
+		if w, err := netip.ParsePrefix(s); err == nil && w.Addr() == a.Addr() {
+			return true
+		}
+	}
+	return false
+}
+
+// wantedElsewhere says whether another port of the change gets address a.
+func wantedElsewhere(ch api.NetplanChange, netdev string, a netip.Prefix) bool {
+	for _, p := range ch.Ports {
+		if p.Netdev != netdev && wants(p, a) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasPrefix(have []netip.Prefix, want netip.Prefix) bool {

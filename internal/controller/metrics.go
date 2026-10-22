@@ -248,6 +248,42 @@ func (m *metrics) temperatures(portID int64) (optic, nic float64) {
 	return optic, nic
 }
 
+// liveWindow is how far back a running leg's live rate averages. One-second
+// rates on a lossy fabric swing between legs that share a link (retransmits
+// and congestion control take turns), which made the run page jumpy; five
+// seconds of counter growth still follows a real change within a refresh.
+const liveWindow = 5 * time.Second
+
+// liveAvg is the average rate on a port over the last window, from the byte
+// counters: RDMA port counters, or the netdev's with nic. It falls back to
+// the latest one-second rate when the ring holds too little.
+func (m *metrics) liveAvg(portID int64, window time.Duration, nic bool) (tx, rx float64) {
+	m.mu.Lock()
+	r := m.ring[portID]
+	var a, b *bytesPoint
+	if n := len(r); n > 0 && time.Since(r[n-1].t) <= 20*time.Second {
+		b = &r[n-1]
+		for i := n - 1; i >= 0 && b.t.Sub(r[i].t) <= window; i-- {
+			a = &r[i]
+		}
+	}
+	m.mu.Unlock()
+	if a != nil && b != nil {
+		dt := b.t.Sub(a.t).Seconds()
+		dtx, drx := b.tx-a.tx, b.rx-a.rx
+		if nic {
+			dtx, drx = b.nicTx-a.nicTx, b.nicRx-a.nicRx
+		}
+		if dt >= 1.5 && dtx >= 0 && drx >= 0 {
+			return dtx * 8 / dt / 1e9, drx * 8 / dt / 1e9
+		}
+	}
+	if nic {
+		return m.liveNIC(portID)
+	}
+	return m.live(portID)
+}
+
 // liveNIC is live for the netdev (IP) counters.
 func (m *metrics) liveNIC(portID int64) (tx, rx float64) {
 	m.mu.Lock()

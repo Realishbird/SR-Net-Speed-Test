@@ -563,10 +563,11 @@ func (s *Server) switchPollLoop(ctx context.Context) {
 		} else {
 			report("ports", err, 0)
 		}
-		if m, err := s.switchNaming(ctx); err == nil {
+		if m, off, err := s.switchSystem(ctx); err == nil {
 			s.mu.Lock()
-			s.naming = m
+			s.naming, s.clockOffset = m, off
 			s.mu.Unlock()
+			s.clockAlerts(ctx, off)
 		}
 		s.refreshQoS(ctx)
 		s.pushPortInfo()
@@ -788,6 +789,55 @@ func markTwins(ports []api.HostPort) {
 		for _, i := range idx {
 			if i != keep && len(ports[i].Addrs) == 0 {
 				ports[i].TwinOf = ports[keep].Netdev
+			}
+		}
+	}
+}
+
+// markPCIeShare flags addressed ports that share one PCIe link slower than
+// their line rates added up: on a DGX Spark both cables' first PCIe
+// functions (enp1s0f0np0, enp1s0f1np1) sit on one Gen5 x4 link of about
+// 107 Gbps, so two 100G ports addressed there top out near 100 together.
+// For one port of each such group it names the twin (same cable) on a link
+// no addressed port uses, where the address can move to; run after markTwins.
+func markPCIeShare(ports []api.HostPort) {
+	byLink := map[string][]int{}
+	for i, p := range ports {
+		if p.PCIe != nil && p.PCIe.Address != "" && len(p.Addrs) > 0 {
+			k := pcieLinkOf(p.PCIe.Address)
+			byLink[k] = append(byLink[k], i)
+		}
+	}
+	for link, idx := range byLink {
+		usable := ports[idx[0]].PCIe.UsableGbps
+		var sum float64
+		for _, i := range idx {
+			sum += float64(ports[i].SpeedMbps) / 1000
+		}
+		if len(idx) < 2 || usable <= 0 || sum <= usable*1.05 {
+			continue
+		}
+		sort.Slice(idx, func(a, b int) bool { return pciAddress(ports[idx[a]]) < pciAddress(ports[idx[b]]) })
+		for _, i := range idx {
+			var others []string
+			for _, j := range idx {
+				if j != i {
+					others = append(others, ports[j].Netdev)
+				}
+			}
+			ports[i].PCIeShared = fmt.Sprintf("shares PCIe link %s (%s, about %.0f Gbps) with %s: together they top out near %.0f Gbps, not %.0f",
+				link, ports[i].PCIe.String(), usable, strings.Join(others, ", "), usable, sum)
+		}
+		// Offer the move for the last port of the group (the second cable on
+		// a Spark), so the first keeps its address and the two end up apart.
+		last := &ports[idx[len(idx)-1]]
+		for _, t := range ports {
+			if t.TwinOf != last.Netdev || t.PCIe == nil || len(t.Addrs) > 0 {
+				continue
+			}
+			if tl := pcieLinkOf(t.PCIe.Address); tl != link && len(byLink[tl]) == 0 {
+				last.PCIeMoveTo = t.Netdev
+				break
 			}
 		}
 	}
